@@ -1,5 +1,7 @@
 # Running a Mac application
 
+Part of [the documentation](README.md).
+
 macrt runs classic Mac applications, the programs written for 68000-family
 Macs and System 1 to 7, as windows on your desktop next to your own
 programs. It reads the application's resources and loads its 68k code
@@ -17,8 +19,8 @@ form it can read, how to run it, and what to do when it stops.
 - [What happens at launch](#what-happens-at-launch)
 - [What works](toolbox.md)
 - [When it stops](#when-it-stops)
-- [Surveying many applications](#surveying-many-applications)
-- [Writing a test application](#writing-a-test-application)
+- [Surveying many applications](survey.md), on a page of its own
+- [Writing a test application](development.md#the-test-applications)
 
 
 ## Quick start
@@ -51,7 +53,8 @@ built-in demo programs instead.
 - **PyQt6** (6.5 or later) for the windows and menus.
 - **unicorn** (2.1 or later), the 68k processor emulator.
 - **rsrcfork** and **machfs**, which read resource forks and HFS disks'
-  B*-trees. (The rest of an HFS disk, and MFS disks, macrt reads itself.)
+  B*-trees. (The rest of an HFS disk, and HFS Plus and MFS disks, macrt
+  reads itself.)
 
 `pip install -e .` installs all four. unicorn has wheels for Linux, macOS
 and Windows.
@@ -61,6 +64,28 @@ and Windows.
   install unar`.
 - **To run without a display** (a server or CI), set
   `QT_QPA_PLATFORM=offscreen`.
+
+### Fonts
+
+The chrome looks right with Chicago (system font) and Geneva (application
+font). These aren't bundled. Put `.ttf`/`.otf` files in `macrt/ui/fonts/` and
+they load at startup. *ChicagoFLF* is a freely licensed Chicago clone. With a
+Mac font present, text is drawn without antialiasing for the crisp 1-bit look.
+Without one, macrt falls back to Helvetica at 13px with antialiasing on, because
+outline fonts look broken without it. `theme.TEXT_ANTIALIAS = True/False`
+forces either. An application's own fonts are drawn from their bitmaps
+(see [Text and fonts](architecture.md#text-and-fonts)).
+
+### Wayland and macOS
+
+- **Wayland** doesn't let apps place their own windows. With `--host
+  desktop` window drags go through the compositor (`startSystemMove`), but
+  windows can't be placed exactly. Use `QT_QPA_PLATFORM=xcb` (XWayland) or
+  `--host screen`.
+- **macOS** already has a global menu bar at the top of the screen, so use
+  `--menubar window` or `--host screen` there.
+- With `--host desktop`, the shaped windows and their 1-pixel shadows rely
+  on `setMask`, which works without a compositor.
 
 
 ## Which applications run
@@ -118,7 +143,7 @@ it works it out from the contents:
 | Executor | `App` next to `%App` | Executor's host folder |
 | a resource fork on its own | `App.rsrc`, or any file that is one | `DeRez`/`Rez` tooling, resource editors |
 | a macOS file | `App` itself, through `App/..namedfork/rsrc` | a Mac running macOS |
-| an HFS or MFS disk image | `Disk.dsk`, `.img`, `.image`, `.hfs`, `.toast` | raw and DiskCopy 4.2 floppy images (800K and 1.4MB HFS, 400K MFS), with each sector's 12 tag bytes or without them, HFS CD images, partitioned hard disk images. A CD's image, or any other of 16 MB or more, is mapped rather than read in, and a file's forks are read from it only when they're wanted, so only what's used of it is in memory. |
+| an HFS, HFS Plus or MFS disk image | `Disk.dsk`, `.img`, `.image`, `.hfs`, `.iso`, `.cdr`, `.toast` | raw and DiskCopy 4.2 floppy images (800K and 1.4MB HFS, 400K MFS), with each sector's 12 tag bytes or without them, HFS and HFS Plus CD images, partitioned hard disk images. A CD's image, or any other of 16 MB or more, is mapped rather than read in, and a file's forks are read from it only when they're wanted, so only what's used of it is in memory. A raw CD image, which keeps each of the disc's 2352-byte sectors whole, is read in as the 2048 bytes of data in each. |
 | a MOOF floppy image | `Disk.moof` | Applesauce, imaging a 400K or 800K floppy's tracks bit by bit |
 
 For AppleDouble and the emulator folders, give macrt the data-fork file
@@ -194,7 +219,8 @@ $ python -m macrt "vect_250 folder/Vector 2.5"
 ### Disk images
 
 Many collections come as disk images: floppies, CD-ROMs and hard disks.
-macrt reads HFS and MFS volumes directly, so there's nothing to extract:
+macrt reads HFS, HFS Plus and MFS volumes directly, so there's nothing to
+extract:
 
 ```sh
 python -m macrt "System 6.0.8.dsk"                  # a disk with one application
@@ -225,8 +251,66 @@ When two applications have the same name, as the two TeachTexts do here,
 (`Mac System 6.0.8:TeachText`). Give more of the path to get the other:
 `--app "LabelWriter II Folder:TeachText"`.
 
+#### Image formats
+
 macrt reads raw images and DiskCopy 4.2 images, including images of
-partitioned disks (an Apple partition map with an HFS partition).
+partitioned disks (an Apple partition map with an HFS or HFS Plus
+partition). A CD's image can also keep the disc's sectors whole, 2352
+bytes each, starting with their sync and header (ECMA-130); macrt takes
+the 2048 bytes of data in each (after the header in a mode 1 sector, and
+after 8 more bytes in a mode 2 one) and mounts the result as a CD-ROM,
+whatever the image is called.
+
+macrt can't read compressed images yet: NDIF (DiskCopy 6) and UDIF
+(`.dmg`, `.smi`). Convert them to a raw image first.
+
+#### CD-ROM images
+
+An image whose name ends in `.iso`, `.cdr` or `.toast` is mounted as a
+CD-ROM, whatever its size. Its driver has a device control entry in the
+unit table, named `.AppleCD`, the Apple CD-ROM driver's name in Technical
+Note DV 22, "CD-ROM Driver Calls", so a program that checks its disc's
+driver by name finds it, as Lode Runner: The Legend Returns does. The
+image is taken to be the disc's one data track, starting at 00:02:00: the
+driver gives its table of contents (`ReadTOC`), answers the audio calls
+with `paramErr`, as the Note has them for a data track, and keeps the
+volume `AudioControl` sets for `ReadAudioVolume`. macrt doesn't make up
+audio tracks an image hasn't got, so a program that plays music from its
+disc's audio tracks gets those errors.
+
+The volume says it's locked by hardware: bit 7 of its attributes
+(`vcbAtrb` in its volume control block, and `ioVAtrb` from `PBGetVInfo`),
+"Set if the volume is locked by hardware" in Inside Macintosh: Files
+("Volume Control Blocks"), is set, as Technical Note FL 530 ("File Manager
+Volume Handling Q&As") says a CD-ROM's is, and macrt takes no changes to
+it: making, deleting, renaming or moving a file or folder, changing a
+file's information or opening one to write says `wPrErr`, the File
+Manager's error for a volume locked by hardware, and a file opened with
+`fsCurPerm` is opened to be read. Treasure Galaxy! tells its disc from a
+hard disk by whether it can make a file on it.
+
+An image named any other way (`.img`, `.dsk`, `.image`, `.hfs`) is a
+floppy up to 1.4MB and a hard disk above that, with no driver in the unit
+table, since an HFS CD-ROM's image holds nothing that says it came from a
+CD.
+
+#### HFS Plus
+
+HFS Plus is the format Technote 1150 ("HFS Plus Volume Format") describes,
+introduced with Mac OS 8.1; some later CDs of earlier software use it.
+macrt reads an HFS Plus volume, or one inside an HFS wrapper (TN1150's "HFS
+Wrapper"), into the same form as an HFS one, so a program sees it as an
+ordinary HFS volume. A hard link (TN1150's "Hard Links") is the file it
+links to, and the folder of linked files is left out. Dates are given in
+local time, as HFS keeps them (TN1150's "HFS Plus Dates"). An HFS Plus name
+can be 255 Unicode characters, and an HFS one is 31 characters of Mac Roman
+with no colon in it: a name that can't be written that way, or that would
+then be the same as another in its folder, is cut short and given its
+file's or folder's catalog node ID in hexadecimal, as in
+`A Name Far Too Long For An H#16`, so that every file has a name of its
+own. That rule is macrt's own.
+
+#### Floppies, track by track
 
 It also reads Applesauce's MOOF images of 400K and 800K floppies. These
 keep each track as the bits the drive reads, as the moof-a-day
@@ -249,6 +333,8 @@ didn't keep the marks, the ROM's routine reads a data field with whatever
 marks a program gives it: The Slide Show Magician reads its key file
 through marks its master disk has there.
 
+#### MFS disks
+
 MFS disks are the 400K floppies of System 1 to 4, from 1984 to 1987: the
 first MacPaint and MacWrite disks, and most early games, came on them.
 MFS has no folders of its own. The folders you saw in the Finder were kept
@@ -257,56 +343,64 @@ file at the top of the disk and `--app` takes just the name. An
 application on an MFS disk sees an ordinary HFS volume, as it would have
 on a Mac Plus.
 
+#### Disks that start up into a game
+
 A few early games took the Finder's place on their disk, so that a Mac
 started from it went straight into the game. Given a disk without
 `--app`, macrt runs the program the disk starts up into, as its boot
 blocks name it, when that isn't Apple's Finder, and otherwise the disk's
 only application.
 
+#### Copy protection
+
 Some early programs check that they're on their original floppy, by
 reading marks a copier can't copy. From a MOOF image, which keeps what's
-on each track, a check that reads through the floppy disk driver gets
-what's on the original, and so does one that puts its own routine in the
-driver's place to read past a sector's address field, as Excel 1.0 does,
-or to give the ROM's routine marks of its own to look for, as Dollars and
-$ense and PFS:FILE do. A check that times the disk as it turns, through the ROM's
-routines that find each sector's address field as it comes round and
-step the head, as Mac Attack's does, sees the original's timing: the
-disk turns at the speed its zone of tracks did. Where a track goes on long with no flux change,
-the drive reads noise there, different bits each time, and a check that
-reads it twice, as Q-Sheet's does, sees that it's the original; a few zeros
-together the drive reads as written, so a check that counts a turn of a
-track whose bytes are further apart than a disk's own, as The Ancient Art
-of War's does, counts what the original gives. A check
-that steps the head itself and counts the bytes the floppy controller
-reads from the track it moved to, as PageMaker's does a track in from
-its key sector, sees them go by as the disk turns, and one that times
-them with the VIA's timer, as Jazz's does, counts what the original
-gives: the VIA and the drives keep one clock. A check whose own routine
-reads a sector bit by bit as the floppy controller shifts them in, as
-Shufflepuck Cafe's does, sees the original's bits too. It stops the
-shifting for as long as its own instructions take, and macrt counts what
-each instruction would take a Mac, so the same bits go by unread as on
-the original. A check with its own routine to find a sector's address
-field, as Dragonworld's has, is called for each sector the driver
-reads. A key track whose flux changes come a bit cell and a half apart,
-as Fraction Action's, MathTalk's and KidTalk's do, reads differently
-each time, as on the original: the floppy controller reads each such
-change as one cell after the last or two, as it comes a little early or
-late, and their check reads the track twice and sees the difference that
-a copy, written as bits, can't have. A check that steps the head through
-the drive's registers, waits through the ROM's WakeUp and expects a
-given sector next, as Moebius's does, sees the skew from one track to
-the next that the original has: the drive says at once that a step is
-over, and the disk driver's step and settle times, which WakeUp waits
-for, are 12 and 30 ms. Those are macrt's choice, within what such a check
-allows, not times known from the ROM. Other checks that
-drive the floppy drive's hardware themselves still fail: the program
-shows its own "damaged disk" or "not an original" alert, or asks for its
-master disk.
+on each track:
 
-macrt can't read compressed images yet: NDIF (DiskCopy 6) and UDIF
-(`.dmg`, `.smi`). Convert them to a raw image first.
+- A check that reads through the floppy disk driver gets what's on the
+  original, and so does one that puts its own routine in the driver's
+  place to read past a sector's address field, as Excel 1.0 does, or to
+  give the ROM's routine marks of its own to look for, as Dollars and
+  $ense and PFS:FILE do.
+- A check that times the disk as it turns, through the ROM's routines that
+  find each sector's address field as it comes round and step the head, as
+  Mac Attack's does, sees the original's timing: the disk turns at the
+  speed its zone of tracks did.
+- Where a track goes on long with no flux change, the drive reads noise
+  there, different bits each time, and a check that reads it twice, as
+  Q-Sheet's does, sees that it's the original; a few zeros together the
+  drive reads as written, so a check that counts a turn of a track whose
+  bytes are further apart than a disk's own, as The Ancient Art of War's
+  does, counts what the original gives.
+- A check that steps the head itself and counts the bytes the floppy
+  controller reads from the track it moved to, as PageMaker's does a track
+  in from its key sector, sees them go by as the disk turns, and one that
+  times them with the VIA's timer, as Jazz's does, counts what the
+  original gives: the VIA and the drives keep one clock.
+- A check whose own routine reads a sector bit by bit as the floppy
+  controller shifts them in, as Shufflepuck Cafe's does, sees the
+  original's bits too. It stops the shifting for as long as its own
+  instructions take, and macrt counts what each instruction would take a
+  Mac, so the same bits go by unread as on the original.
+- A check with its own routine to find a sector's address field, as
+  Dragonworld's has, is called for each sector the driver reads.
+- A key track whose flux changes come a bit cell and a half apart, as
+  Fraction Action's, MathTalk's and KidTalk's do, reads differently each
+  time, as on the original: the floppy controller reads each such change
+  as one cell after the last or two, as it comes a little early or late,
+  and their check reads the track twice and sees the difference that a
+  copy, written as bits, can't have.
+- A check that steps the head through the drive's registers, waits through
+  the ROM's WakeUp and expects a given sector next, as Moebius's does,
+  sees the skew from one track to the next that the original has: the
+  drive says at once that a step is over, and the disk driver's step and
+  settle times, which WakeUp waits for, are 12 and 30 ms. Those are
+  macrt's choice, within what such a check allows, not times known from
+  the ROM.
+
+Other checks that drive the floppy drive's hardware themselves still fail:
+the program shows its own "damaged disk" or "not an original" alert, or
+asks for its master disk.
 
 ### Where to find software
 
@@ -348,7 +442,8 @@ python -m macrt FILE... [--app NAME]... [options]
 | `--record-sound FILE.wav` | Writes the Mac's sound to a WAV file as it plays, as well. |
 | `--model plus` | Says the Mac is a Mac Plus, with a 68000 and no floating-point unit. This is the default. Programs from before the Mac II need it: a 68000's exception frames are smaller than a 68020's, and MacWrite 4.5 pops its own. |
 | `--model ii` | Says the Mac is a Mac II, with a 68020 and a 68881, for a program that needs one. The instructions run are the same either way. Some games pick how to draw by the processor: on a 68000 they draw straight into the screen's memory as if it were a 512×342 Mac's, which on a bigger screen puts their picture in the wrong place. Give them `--model ii`, or `--size 512x342`. A Mac II's screen is in colour: see `--depth`. |
-| `--depth N` | With `--model ii`, the screen's bits a pixel: 1, 2, 4 or 8 for that many bits of an index into the screen's colour table, 16 or 32 for colours themselves. The default is 8, 256 colours. A Mac Plus's is 1, black and white. |
+| `--model iix` | Says the Mac is a Mac IIx, with a 68030 and a 68882, for a program that asks for one, such as Fine Artist; otherwise it's the Mac II above, with its colour screen. The instructions run are still the same, and Gestalt says there's no memory management unit. |
+| `--depth N` | With `--model ii` or `iix`, the screen's bits a pixel: 1, 2, 4 or 8 for that many bits of an index into the screen's colour table, 16 or 32 for colours themselves. The default is 8, 256 colours. A Mac Plus's is 1, black and white. |
 | `--row-bytes N` | How many bytes apart the screen's rows are in its memory at the depth it starts at, as if its memory were wider than what shows; when a program changes the depth, they're as many pixels apart as before (with `--depth 8 --row-bytes 1024`, 128 bytes at 1 bit a pixel, 512 at 4). QuickDraw says how far apart they are (`screenBits.rowBytes`, and the `rowBytes` of the screen's `PixMap`), and most programs that draw straight into the screen ask it; a few take the rows to be some fixed number of bytes apart instead, and draw each row in the wrong place unless the screen's are so far apart. The default is as few as a row needs: 80 for a 640-pixel row at 1 bit a pixel, 640 at 8. |
 | `--classic-menus` | Menus stay open only while the mouse button is held, as before System 7. |
 | `--rainbow` | Shows the striped Apple logo in the menu bar. |
@@ -379,7 +474,9 @@ python -m macrt mac6-0-8.dsk --app TeachText --app "Creepy Castle™"
 Every file you name is launched, in order. When disk images are among
 them, each `--app` is looked for on the images in turn and taken from the
 first one that has it. Without `--app`, each image gives its only
-application.
+application, unless an application file is among the files you name: the
+images are then its disks, as a CD is for a copy of its program on the
+Mac's own disk.
 
 An image nothing is launched from, one with no application on it or, with
 `--app`, none of the names, is a disk of documents. Every image is in a
@@ -469,7 +566,7 @@ application came from:
 | The application came from | What happens to files it writes |
 | --- | --- |
 | a folder on your computer | They're written into that folder. A file read as MacBinary or AppleSingle is written back the same way. Any other file is written as its data fork under its own name. Its resource fork, type and creator go in the side file it already had, such as `unar`'s `name.rsrc`, or for a new file in an AppleDouble `._name`. macrt reads all of these back the next time. Symbolic links in the folder aren't followed: applications don't see what they lead to, and nothing is read or written through one. A side file that isn't the file's own, such as a `name.rsrc` that is a file of its own, is left alone. |
-| a disk image | The changes are kept in memory and lost when macrt quits. The image file itself is never changed. |
+| a disk image | The changes are kept in memory and lost when macrt quits. The image file itself is never changed. A CD's image takes no changes at all (see [CD-ROM images](#cd-rom-images)). |
 
 A BinHex file is text, not a Mac file, so macrt treats it as locked. Some
 applications keep their settings in their own resource fork, and can't
@@ -516,7 +613,10 @@ stop, note and caution icons (`ICON` 0 to 2), the standard cursors
 resources (`INTL` 0 and 1). It also has the pattern list (`PAT#` 0) that
 paint programs show as their palette, and the desktop's gray and light
 gray (`PAT ` 16 and 17). Its icons, cursors and patterns are
-drawn for macrt. Some applications look for resources that only a real
+drawn for macrt. They're kept in memory, not in a file, but as with a
+real System file's, one a program releases is read in again when it asks
+for it: Aladdin Activity Centre releases the watch cursor and gets it
+again with `GetCursor`. Some applications look for resources that only a real
 System file has, such as other icons, strings (`STR#`), the fonts
 themselves and the Script Manager's `itl` resources.
 
@@ -580,6 +680,13 @@ Its 68k definition procedures and packages aren't run: windows, menus and
 the standard controls are always drawn by macrt, and the package calls
 are always macrt's. Anything above
 that the real System file lacks, macrt adds.
+
+The Finder beside the System file, if there is one, is in the System
+Folder with it, where a program that opens it by name finds it from its
+own folder, and changes to it stay in memory, as the System file's do:
+FinderColors, from BMUG's PD-ROM Volume 2, opens it to read and change
+the colours of the Finder's Color menu. macrt doesn't run the Finder;
+applications start as `--app` names them.
 
 A System 7 file's System heap has room to grow, as a real one's has
 ("the system heap expands dynamically to meet your request", Inside
@@ -693,107 +800,15 @@ clouds with a halo.
 
 The first Macintosh games often go around the Toolbox. They draw
 straight into the screen, read the mouse button from the hardware, and
-keep time by the processor's speed or by the VIA's timers. macrt gives
-them what they reach for:
+keep time by the processor's speed or by the VIA's timers.
 
-- **The screen buffer.** The bitmap at `ScrnBase` mirrors the windows.
-  What QuickDraw draws is written there, and what a program writes there
-  shows in the window it lands on, at its next trap or within a tick if
-  it calls none. What a program writes where no window is shows on the
-  desk, which only `--host screen` has.
-- **A Mac 512K's screen.** With `--size 512x342` the screen buffer is at
-  `$7A700`, where a 512K or a Plus has it, for games that write there
-  without asking `ScrnBase`. Most games from 1984 and 1985 expect that
-  screen. Its alternate buffer is `$8000` below, at `$72700`. An
-  application launched with `Launch`'s page option finds it in
-  `CurPageOption`, and while the VIA's `vPage2` bit is clear the desk and
-  the menu bar show the alternate buffer rather than the main one. The
-  windows go on showing what's drawn in them. A Plus's RAM repeats through
-  its 4 MB of addresses, so the screens are at `$3FA700` and `$3F2700` as
-  well, and Apache Strike's flight writes them there. `BufPtr`, the top of what an
-  application may use, and `ScrnBase` are each application's own. For an
-  ordinary launch both are the screen's base, `$7A700`. An application
-  launched with the alternate screen (a negative page option) gets the
-  memory a Plus with 4 MB gives it: its partition ends just under
-  `$3F2700`, with its A5 world under the alternate screen, and its
-  `ScrnBase` and `BufPtr` are both `$3FA700`, as are its QuickDraw's
-  `screenBits.baseAddr` and the bit maps of the ports and windows it
-  opens. MacRacquetball launches itself again until `BufPtr` is far
-  enough over its A5, Arkanoid's demo stops unless `BufPtr` is
-  `ScrnBase`, and Yeager's AFT launches itself again until its A5 is
-  under `screenBits.baseAddr` less `$8000`. When that room is taken, as
-  when Arkanoid's launcher, which is in it, launches the game, the
-  partition goes lower, with its top `$8000` kept for the alternate
-  buffers, and gets the same `ScrnBase` and `BufPtr`. A partition above
-  `$400000` has `BufPtr` at its own top and `ScrnBase` at `$7A700`.
-- **The VIA**, at `$EFE1FE`: the mouse button, the vertical blanking flag
-  at each tick, the one-second flag, the two timers, and which screen
-  buffer is shown. Above it, where a Plus looks for a test ROM, there is
-  none, and reading there is no bus error.
-- **The exception vectors.** What the System leaves in them is in a page
-  of ROM over the top of RAM, at `ROMBase`, as on a Mac. A program can put
-  its own handler in any of them, for a `TRAP`, dividing by zero or `CHK`,
-  and it comes back past the instruction that raised it. A handler for the
-  VIA's interrupts, at `$64`, is interrupted at each tick and once a
-  second, from the next tick on; it goes on to the ROM's, as
-  Flight Simulator's does, to clear them. When the program quits, the
-  vectors it took are the System's again. The A-line vector, `$28`, holds
-  the ROM's trap dispatcher, and the start-up code that puts it there is
-  in the ROM too, `LEA` then `MOVE.L A0,$28`, for programs such as Lotus
-  Jazz that look for it there to put it back; a jump to the dispatcher
-  with a trap's address stacked does the trap.
-- **The stack.** An application gets 32K of stack between `ApplLimit` and
-  `CurStackBase`, and `DefltStack` says so: The Fool's Errand takes what
-  that falls short of 32K from its heap. `ReserveMem` grows the heap
-  toward `ApplLimit` for what it reserves, and all the way when that's not
-  enough, as a 64K ROM's does for programs that ask for more than there is
-  in place of `MaxApplZone`. A `SetApplLimit` past `CurStackBase`, past
-  the end of the partition, leaves the heap the limit it had at launch, so
-  the stack keeps its 32K: Macify 2.7 asks for 128K past `ApplZone` in its
-  75K partition, then `MaxApplZone`, and its next segment would otherwise
-  load over the stack it's running on.
-- **The drives.** A floppy disk's image is in drive 1, the internal
-  drive, with the floppy disk driver's reference number, -5. macrt's own
-  disk is a hard disk, from drive 3. Flight Simulator looks for its disk
-  in drive 1. Each drive is in the drive queue at `DrvQHdr`, with the
-  flags before its element: a floppy drive's disk in place, a hard
-  disk's 8 (it can't be ejected).
-- **The floppy disk driver**, `.Sony`. `Read` and `Write` with reference
-  number -5 read and write the disk in drive 1 or 2 by sector, as copy
-  protection and disk tools do, with each sector's 12-byte tag at
-  `TagData` and in the buffer `Control` 8 gives it; `Status` 8 is the
-  drive's. What's written stays in memory, as with the File Manager's
-  writes to a disk image. A program can put its own routine in the 64K
-  ROM's `RdData` vector to read what's on the disk after a sector's
-  address field; macrt calls it with a MOOF image's bytes there coming in
-  through the IWM, the floppy controller, at `$DFE1FF`, and with A3
-  pointing at the ROM's table of the six bits each byte from the disk
-  stands for (indexed by the byte, $FF for one that stands for none), as
-  MacGammon's routine expects. The routine can
-  go on to the ROM's, which `RdData` held, with A1 pointing at the five
-  marks the data field begins and ends with: it reads the field into the
-  buffer at A0, or compares it with the buffer while `DskVerify` is set.
-- **What the Event Manager keeps in low memory:** the mouse (`Mouse` and
-  `RawMouse`; and `MTemp`, which counts its movement up, for a program
-  that clears it to see how far it has moved) and its button (`MBState`),
-  the keys held down (`KeyMap`, which `GetKeys` reads; an arrow key by
-  both a Mac Plus's code and ADB's) and the last key
-  pressed (`KeyLast`, `KeyTime`). They follow the mouse with the button up
-  too. A program can move the mouse itself, writing `RawMouse` and setting
-  `CrsrNew`, and macrt's cursor task copies it to `Mouse` at the next tick
-  and clears `CrsrNew`, which Pirates! waits for. While the program has
-  the cursor hidden, the mouse stays where it put it and goes on from
-  there as the host's pointer moves, which is how Crystal Quest steers;
-  with the cursor showing, it's back under the pointer when that moves.
-- **`--speed`**, for games that run as fast as the processor goes. A
-  modern computer runs them hundreds of times too fast; `--speed 1` is
-  about a Mac Plus. Each instruction is counted by the cycles it would
-  take a 68000, and the 68k code is held to the 6 million a second a
-  Plus's gets through, its RAM shared with the video and the sound. A
-  game that times its frames by the ticks, as Downhill Racer does, sees
-  them take as long as on a Plus. `TickCount` is what `Ticks` holds, as
-  the ROM's is, and `Ticks` changes at each tick, so a program that reads
-  one and then the other sees the same count.
+macrt gives them what they reach for: the screen buffer at `ScrnBase`, a
+Mac 512K's screen where a 512K has it, the VIA, the exception vectors,
+the floppy disk driver and the drives, and the Event Manager's
+low-memory record of the mouse and keyboard. [The
+hardware](toolbox.md#the-hardware) says how each one works. `--speed`
+holds the processor to about a Mac Plus's pace, for games that time
+themselves by how fast it goes.
 
 So a game on a 400K floppy runs like this:
 
@@ -849,7 +864,13 @@ parameter RAM. What's in the buffer comes from three places:
   waits for its end, `SndChannelStatus` gives its times, and the
   program's completion routine is called when it ends, however it ends.
 - **The program itself**, writing its samples into the buffer at each
-  tick, as Dark Castle, Crystal Quest and SmoothTalker's speech do.
+  tick, as Dark Castle, Crystal Quest and SmoothTalker's speech do. A
+  program needn't start at the buffer's first word: counting from 0,
+  Creepy Castle starts at word 10, Prince of Persia at 37, Dark Castle
+  at 40, Crystal Quest at 42 and Tetris at 140, each going round to just
+  before where it started. macrt plays each frame from where the program
+  starts writing it, which it looks at twice a second, by watching one
+  tick's writes to the buffer.
 
 On a Mac II, a program can also write its samples to the Apple Sound
 Chip, at the address in `ASCBase`, as Digital Messiah does with its
@@ -861,7 +882,9 @@ buffer's. macrt's Mac Plus has no chip, and its `ASCBase` is 0.
 
 `--no-sound` keeps the sound off your speakers, and `--record-sound
 FILE.wav` writes it to a WAV file as well: 8-bit mono, 22,200 samples a
-second.
+second. A sound output that doesn't take 22,200 samples a second gets
+them at its own rate, each of its samples on the line between the two
+of the Mac's it comes between.
 
 How it differs from a Mac:
 
@@ -911,8 +934,10 @@ How it differs from a Mac:
 
 1. **Memory.** macrt reads the application's `SIZE` resource (or, without
    one, the sizes from the Finder's Get Info) and gives it a partition of
-   that size in an 8 MB Mac. `--memory` gives it a size of your own. An application that asks for more than is
-   free is refused, and macrt says how much it needs.
+   that size in an 8 MB Mac, and 24K more for its bigger stack (see [The
+   stack](architecture.md#the-stack)). `--memory` gives it a size of your
+   own. An application that asks for more than is free is refused, and
+   macrt says how much it needs.
 2. **The A5 world.** `CODE 0` describes the application's globals, which
    sit below A5, and the jump table, which sits above it. macrt builds them
    as the Segment Loader did and loads `CODE 1`. The other segments load
@@ -921,8 +946,9 @@ How it differs from a Mac:
    first jump-table entry. Gestalt, `SysEnvirons` and the low-memory
    globals say it's a Mac Plus, with a 68000 and no floating-point unit,
    and the exception frames it stacks are a 68000's (see `--model`).
-   The few instructions of a 68020 and a 68881 that unicorn doesn't run
-   (`CHK2` and `CMP2`, packed decimal `FMOVE`, an `FMOVE` of immediate
+   The few instructions of a 68020 and a 68881 that unicorn doesn't run,
+   or runs otherwise than Motorola's manual says (`CHK2` and `CMP2`,
+   `PACK` and `UNPK`, packed decimal `FMOVE`, an `FMOVE` of immediate
    data to the floating-point control registers, `FSAVE` and `FRESTORE`)
    stop it, and macrt runs them in Python (`macrt/m68k/instructions.py`).
 4. **Traps.** Every A-line trap the code executes (`_NewWindow`,
@@ -930,7 +956,7 @@ How it differs from a Mac:
    matching Python routine then reads its arguments from the 68k stack or
    registers and does what Inside Macintosh says that routine does.
    - Windows and menus become Qt windows and menus.
-   - QuickDraw draws into a 1-bit bitmap for each window, which Qt shows.
+   - QuickDraw draws into an image for each window, which Qt shows.
    - The Mac's data structures (window records, handles, regions and so
      on) are real, in the Mac's memory, so code that reads them directly
      still works.
@@ -940,6 +966,9 @@ How it differs from a Mac:
    resource says it takes high-level events finds an Open Application
    Apple event waiting, as System 7's Finder sends when it opens an
    application without documents.
+
+[How macrt works](architecture.md) goes through each of these in more
+depth: the processor, the trap dispatcher, memory, drawing and resources.
 
 
 ## What works
@@ -1026,193 +1055,11 @@ went on with a value that call should have filled in.
   ```
 - `--view` shows the application's menus, windows and dialogs from its
   resources without running any code. If you mainly want to see what an
-  application looked like, this always works.
+  application looked like, this always works. An application with no 68k
+  code gets the same. `viewer.py`'s ResourceViewer does what the
+  application's startup would do, through the same Toolbox calls:
+  `GetNewMBar` or `GetMenu` for the menu bar, then `GetNewWindow` for the
+  first `WIND`. A *Resources* menu opens the other windows, dialogs and
+  alerts.
 - `--list` shows what the application is made of. An `ALRT` or `STR#`
   near the error often says what the application was trying to tell you.
-
-
-## Surveying many applications
-
-`python -m macrt.survey` runs a list of applications with no windows on
-your desktop, several at a time, and reports on each one: whether it's
-still running, has quit, or stopped with a system error, which calls it
-made that macrt doesn't implement, and what its screen looked like. It
-takes a list of runs as JSON:
-
-```json
-{"defaults": {"wait": 8},
- "runs": [
-  {"file": "Disks/Dark Castle.dsk", "app": "Dark Castle", "steps": "s title;c 320,240;w 5"},
-  {"file": "Disks/Crystal Quest.dsk", "model": "ii", "depth": 8},
-  {"name": "word", "file": "Word 1.0.dsk", "app": "Microsoft Word",
-   "steps": "k Hello\\nthere;s typed;C q;w 2"}
- ]}
-```
-
-```sh
-python -m macrt.survey run titles.json --out survey1 --jobs 4
-```
-
-A run's fields are the command line's options: `file` (an application, a
-disk image or a list of them), `app`, `model`, `depth`, `size`, `memory`,
-`system`, `speed`, `settle` and `trace`. `name` is the run's folder in the output
-folder, by default the application's name. Paths are relative to the
-list's folder. `defaults` fills in what a run leaves out.
-
-Each run waits `wait` seconds after launching (6 by default), then does its
-`steps`, separated by `;`:
-
-| Step | What it does |
-| --- | --- |
-| `w 2.5` | wait 2.5 seconds |
-| `W 10` | wait until the screen has settled (below), 10 seconds at most |
-| `c 320,240` | click at h 320, v 240 on the Mac's screen |
-| `d 10,10 50,50 90,10` | press at the first point, drag through the others, let go at the last |
-| `k some text` | type it a key at a time; `\n` is Return, `\t` Tab, `\;` a semicolon, `\\` a backslash |
-| `K Return` or `K Left,1.5` | press a key by its name, holding it that many seconds |
-| `C q` | Command-Q |
-| `s title` | save a screenshot, `title.png` |
-| `O` | OK the alert macrt shows for a system error |
-
-Most titles have finished drawing long before a wait is over. With
-`"settle": true` (or `--settle`), the wait after launching ends once the
-screen has settled, and a `W` step's wait does the same. macrt looks at the
-screen ten times a second. It has settled once every process has been
-asking for input for the last 1.5 seconds, and the last 0.75 seconds
-showed the same pictures as the 0.75 seconds before, two at most, so that
-a blinking caret doesn't keep it waiting. A process is asking for input
-while it waits for an event in WaitNextEvent or GetNextEvent, or while it
-asks over and over whether there's one (EventAvail, a GetNextEvent that
-returns at once) or whether the mouse button or a key is down (Button,
-StillDown, GetKeys). But for a quarter of a second after it reads the
-clock with TickCount or Delay, it isn't, whether it waits for events
-between or not: a screen it shows until it's time to go on isn't waiting
-for the user. One of macrt's own dialogs being up counts as asking too.
-`settled` in `result.json` is how many seconds after launching the wait
-ended, or `null` if it went on to the end.
-
-That's a guess at when a title is waiting for the user, and it can be
-wrong both ways:
-
-- A program that times a screen by reading the Ticks global itself, by
-  the times of the events it gets, or by counting them, looks as if it's
-  waiting for the user: the wait can end on a screen that would have moved
-  on by itself.
-- A title that animates, or reads the clock as it waits for the user,
-  never settles, and takes the whole wait, as a plain one would.
-
-On the 472 runs of a list of the 500 Mac Games CD's titles, with waits of
-8 seconds and two runs at a time, the survey took 2066 seconds with plain
-waits and 975 with settled ones; 381 of the waits ended early. Every run
-had the same outcome either way, and made the same unimplemented calls.
-80 end screenshots differed from a plain run's, where two plain runs
-differed in 67, mostly in random play, a blinking caret or label, or an
-animation caught at another moment. Five titles' waits ended on a screen
-they would have left by themselves 1 to 4 seconds later, as the first
-case above says.
-
-While one of macrt's own dialogs is up (Standard File's, an alert), `k`,
-`K` and `C` type into it, as the keyboard would, so `k Player 1\n` names a
-file in a Save dialog and saves it.
-
-The whole list is checked first, so a mistake in a field or a step stops
-the survey before any run starts. Each run is a process of its own, so one
-that crashes Python can't stop the others. A run has as long as its wait
-and steps take and two minutes more, unless it says `timeout` or
-`--timeout` does. One that takes longer is stopped, and its threads' stacks
-go in its log.
-
-Each run's folder has `result.json`, `log.txt` with all macrt printed, its
-screenshots, and `end.png`, the screen when the steps are done (unless it
-had quit). A screenshot shows a menu pulled down, and macrt's own dialogs
-(Standard File's, its alerts) over the Mac's screen. Its outcome is one of
-these:
-
-| Outcome | Meaning |
-| --- | --- |
-| running | still running when the steps were done |
-| quit | quit by itself, or when told to |
-| system error | stopped with a system error; `result.json` has its ID and message |
-| internal error | macrt itself failed: a bug in macrt, with a Python traceback |
-| faulted | its records broke macrt's drawing (a bad handle in a window record, say), so macrt stopped it |
-| no code | the file has resources but nothing to run (`--view` shows them) |
-| can't open | the file couldn't be read, or isn't an application |
-| timeout | took longer than its time |
-| crashed | the process ended without a result: see `log.txt` |
-
-`result.json` also lists each process's windows, front to back, with
-their titles. A dialog or alert left up gives its text as well, ParamText's
-strings put in, so a title that is "running" but waiting at its own alert
-("This program needs 512K", say) shows what it asked. `host_dialogs` lists
-macrt's own dialogs left up, Standard File's or an alert, with their
-titles and what they say, since they aren't the Mac's windows: a program
-that asks at once for a file to open has no window of its own to show.
-`first_window` is how many seconds after launching its first window came
-up, and `settled`, with `settle`, when the wait settled.
-
-The summary at the end, also in `report.json`, counts the outcomes and
-ranks the calls macrt doesn't implement by how many applications make
-them. That's the list to work from: implementing the call at its top
-helps the most titles. Of the titles still running, it names those with no
-window to show, and gives the text of the dialog or alert each other one is
-waiting at, if any, its own or macrt's (a Standard File dialog's title
-first): most are opening screens and shareware notices, but an
-error ("can't find the file", say) stands out without a look at every
-screenshot. Last it names the runs slowest to show a window, where making
-macrt faster would be felt first. `python -m macrt.survey report survey1`
-prints the summary again.
-
-A survey of hundreds of titles takes a while. If it's stopped part way,
-run it again with `--resume`: the runs that finished, those with a
-`result.json`, are kept, the rest run, and the summary counts them all.
-`--only NAME` runs just the run of that name; repeat it for several.
-
-To see what a change to macrt changed, run the same list before and
-after it and compare the two:
-
-```sh
-python -m macrt.survey compare survey1 survey2
-```
-
-```
-Dark_Castle: running -> system error
-word: unimplemented -HMGetHelpMenuHandle
-word/typed.png: 812 pixels differ in (14, 40, 210, 52)
-```
-
-That names each run whose outcome changed, the calls it no longer makes
-or newly makes, and each screenshot that differs, with the box round the
-pixels that do. It exits 1 when there are differences and 0 when there
-are none, so a script can use it. A title whose screen moves by itself (a
-game's animation, a clock) differs from run to run: take its screenshots
-where it stands still, or after `w` long enough for it to.
-
-
-## Writing a test application
-
-`tests/apps` holds small 68k applications written in assembly, one per
-part of the Toolbox: Hello (windows and menus), Controls, Dialogs, Edit
-(TextEdit and the scrap), Lists (the List Manager), Menus (its own
-`MBDF`), Frames (its own `WDEF`) and Launcher (`_Launch`). To build them you need
-binutils for m68k (`apt install binutils-m68k-linux-gnu`). Then run:
-
-```sh
-python tests/apps/build.py
-```
-
-That assembles each `.s` file and wraps the code, with the resources it
-needs, into a MacBinary file next to it. The built `.bin` files are checked
-in, so the tests don't need the assembler. `tests/apps/traps.inc` defines
-the trap words. Each application is one code segment, and the end of
-`build.py` lists the resources each one gets. To try one, run it like any
-other application:
-
-```sh
-python -m macrt tests/apps/Dialogs.bin --trace-traps
-```
-
-Keep what you need in registers the way Inside Macintosh's "Using
-Assembly Language" says: a Toolbox routine called through the stack keeps
-only A2-A6 and D3-D7. In macrt one that has no result leaves 0 in D0, or
-the Resource Manager's leave `ResError` there, but for `ReleaseResource`,
-which leaves D0 as it was.
