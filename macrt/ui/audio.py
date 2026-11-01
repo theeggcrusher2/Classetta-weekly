@@ -4,12 +4,14 @@ The Mac's speaker through the host's sound output.
 The Speaker (macrt.m68k.sound) hands HostSpeaker a frame of 370 samples
 at each tick, from the CPU's thread: unsigned bytes, at RATE samples a
 second, silence at $80.  HostSpeaker makes them the sound output's own
-format, at its own rate if it hasn't RATE, holding each sample for as
-long as it lasts, and keeps them until a timer on the GUI thread writes
-them out.  A Mac's speaker doesn't pass on a level that holds, only the
-changes: a buffer of 0s sounds as silent as one of $80s.  So the samples
-go through a filter that lets the level drift back to silence, as the
-speaker's would.
+format, and keeps them until a timer on the GUI thread writes them out.
+An output that hasn't RATE gets its own rate's samples, each on the line
+between the two of the Mac's it comes between: holding each of the Mac's
+for as long as it lasts, two of a 48 kHz output's samples or three as it
+comes, would add tones of its own to the sound.  A Mac's speaker doesn't
+pass on a level that holds, only the changes: a buffer of 0s sounds as
+silent as one of $80s.  So the samples go through a filter that lets the
+level drift back to silence, as the speaker's would.
 
 Frames come in bursts, as the application's code gets the CPU, so up to
 about a quarter of a second of them is kept: more, and the oldest go.
@@ -107,7 +109,8 @@ class Converter:
         self.rate = rate
         self.channels = max(channels, 1)
         self.sample_format = sample_format
-        self._held = 0                      # toward the next output sample, in RATEs
+        self._held = 0                      # where the next output sample comes, after _before
+        self._before = 0.0                  # the last level, for the line from it
         self._last_in = 0.0
         self._last_out = 0.0
 
@@ -128,7 +131,7 @@ class Converter:
             levels.append(y0)
         self._last_in, self._last_out = x0, y0
         if self.rate != RATE:
-            levels = self._hold(levels)
+            levels = self._resample(levels)
         if self.channels > 1:
             levels = [y for y in levels for _ in range(self.channels)]
         fmt = self.sample_format
@@ -141,13 +144,17 @@ class Converter:
             return bytes(max(0, min(255, 128 + int(y * 127))) for y in levels)
         return array("h", (max(-32767, min(32767, int(y * 32767))) for y in levels)).tobytes()
 
-    def _hold(self, levels: list[float]) -> list[float]:
-        """Each sample, at RATE, for as many of the output's samples as it lasts."""
+    def _resample(self, levels: list[float]) -> list[float]:
+        """The levels, at RATE, at the output's rate: each of its samples on
+        the line from the level before it to the one after, a sample late."""
         out = []
-        held, rate = self._held, self.rate
+        at, before, rate = self._held, self._before, self.rate
         for y in levels:
-            held += rate
-            n, held = divmod(held, RATE)
-            out.extend([y] * n)
-        self._held = held
+            step = (y - before) / rate
+            while at < rate:
+                out.append(before + step * at)
+                at += RATE
+            at -= rate
+            before = y
+        self._held, self._before = at, before
         return out

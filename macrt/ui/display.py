@@ -64,6 +64,12 @@ from .window import AppBarWindow, MacWindowView
 
 HOSTS = ("desktop", "screen")
 MENU_BARS = ("global", "window")
+ROW_BYTES = "row-bytes is an even number of bytes, less than 16384"
+
+
+def row_bytes_ok(n: int) -> bool:
+    """Whether n bytes will do as DisplayConfig.row_bytes: ROW_BYTES."""
+    return not n & 1 and 0 < n < 0x4000
 
 
 @dataclass
@@ -228,8 +234,6 @@ class Display(QObject):
         self.disk_dialogs: list = []              # which disk goes in a drive, open now
         self.color_dialogs: list = []             # the Color Picker's, open now
         self.edition_dialogs: list = []           # the Edition Manager's options, open now
-        self._router = InputRouter(self)
-        QApplication.instance().installEventFilter(self._router)
         self._app_bar_timer = QTimer(self, singleShot=True, interval=250)
         self._app_bar_timer.timeout.connect(self._update_app_bars)
 
@@ -238,8 +242,6 @@ class Display(QObject):
         self.origin = QPoint(0, 0)
         if self.config.host == "screen":
             self.size = self.config.screen_size or (640, 480)
-            self.host_window = ScreenWindow(self, self.size)
-            self.screen_widget = self.host_window.screen_widget
         else:
             avail = QGuiApplication.primaryScreen().availableGeometry()
             self.origin = avail.topLeft()
@@ -257,6 +259,14 @@ class Display(QObject):
                              row_bytes=self.config.row_bytes)
         for disk in disks:
             self.system.files.mount_folder(VolumeFolder(disk))
+        # The window and the application-wide filter come once nothing
+        # above can fail: left behind for the garbage collector, the window
+        # is destroyed under the filter, and that takes the host down.
+        if self.config.host == "screen":
+            self.host_window = ScreenWindow(self, self.size)
+            self.screen_widget = self.host_window.screen_widget
+        self._router = InputRouter(self)
+        QApplication.instance().installEventFilter(self._router)
         self.system.screen.order = lambda: self.processes
         if self.screen_widget is not None:
             self.screen_widget.mirror = self.system.screen
@@ -312,7 +322,7 @@ class Display(QObject):
                 self.memory_sizes[app.key] = memory
             memory = self.memory_sizes.get(app.key)
         proc = Process(self.system, name, main,
-                       EventQueue(lambda: (self.input.mac_pos, self.input.modifiers)),
+                       EventQueue(lambda: (self.system.input.position, self.input.modifiers)),
                        app=app, folder=folder, page_option=page_option, memory=memory,
                        as_panel=as_panel, code0=code0, finder_info=finder_info)
         if proc.runner is not None:
@@ -556,7 +566,7 @@ class Display(QObject):
                 self.sync(fw)
                 old.events.post_activate(fw, False)
             old.events.post(EventRecord(osEvt, suspendResumeMessage << 24, 0,
-                                        self.input.mac_pos, self.input.modifiers))
+                                        self.system.input.position, self.input.modifiers))
         fw = proc.front_window()
         if fw is not None and not fw.hilited:
             fw.hilited = True
@@ -565,7 +575,8 @@ class Display(QObject):
         message = (suspendResumeMessage << 24) | resumeFlag
         if needs_converting(proc.system, proc.world, self.bridge):
             message |= convertClipboard
-        proc.events.post(EventRecord(osEvt, message, 0, self.input.mac_pos, self.input.modifiers))
+        proc.events.post(EventRecord(osEvt, message, 0, self.system.input.position,
+                                     self.input.modifiers))
         self.restack()
         self.focus(fw)
         self.refresh_bars()
@@ -1007,7 +1018,8 @@ class Display(QObject):
             return
         proc = self.front_process
         if proc is not None:
-            proc.events.post(EventRecord(mouseDown, 0, 0, self.input.mac_pos, self.input.modifiers))
+            proc.events.post(EventRecord(mouseDown, 0, 0, self.system.input.position,
+                                         self.input.modifiers))
 
     def mouse_up(self) -> None:
         try:
@@ -1020,7 +1032,7 @@ class Display(QObject):
                 return
             proc = self.front_process
             if proc is not None:
-                proc.events.post(EventRecord(mouseUp, 0, 0, self.input.mac_pos,
+                proc.events.post(EventRecord(mouseUp, 0, 0, self.system.input.position,
                                              self.input.modifiers))
             clicked = self._last_clicked
             if (self.screen_widget is None and isinstance(clicked, MacWindowView)
@@ -1069,4 +1081,5 @@ class Display(QObject):
         else:
             what = keyUp
         if msg is not None:
-            proc.events.post(EventRecord(what, msg, 0, self.input.mac_pos, self.input.modifiers))
+            proc.events.post(EventRecord(what, msg, 0, self.system.input.position,
+                                         self.input.modifiers))

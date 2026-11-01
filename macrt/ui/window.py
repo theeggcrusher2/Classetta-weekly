@@ -144,8 +144,8 @@ class MacWindowView(_Hosted):
     def sync(self) -> None:
         """Bring the widget in line with the record, and the record's
         structure region in line with the frame drawn around it.  A window
-        with its own WDEF is the WDEF's to shape and draw, at the
-        application's next trap, which reshapes it after."""
+        with its own WDEF is the WDEF's to shape and draw, on the
+        application's thread (wdefs.refresh), which reshapes it after."""
         rec = self.rec
         if rec.own_wdef and rec.process.runner is not None:
             rec.process.frames_due.add(rec)

@@ -386,11 +386,15 @@ class Pulldown(QWidget):
         return QRect(1, 1 + (index - 1) * theme.MENU_ITEM_HEIGHT,
                      self._inner_w, theme.MENU_ITEM_HEIGHT)
 
-    def selectable_at(self, pos: QPoint) -> int:
+    def item_at(self, pos: QPoint) -> int:
+        """The item at pos, enabled or not; 0 off the items."""
         items = QRect(1, 1, self._inner_w, len(self.menu.items) * theme.MENU_ITEM_HEIGHT)
         if not items.contains(pos):
             return 0
-        index = (pos.y() - 1) // theme.MENU_ITEM_HEIGHT + 1
+        return (pos.y() - 1) // theme.MENU_ITEM_HEIGHT + 1
+
+    def selectable_at(self, pos: QPoint) -> int:
+        index = self.item_at(pos)
         return index if self.menu.selectable(index) else 0
 
     def set_hilite(self, index: int) -> None:
@@ -598,6 +602,7 @@ class MenuTracker:
         self.sub_item = 0                                   # that item
         self.blinking = False
         self.done = False
+        self.disabled = 0               # the disabled item released over (MenuChoice)
 
     # -- tracker protocol (called by Display's input router) ---------------
     def start(self) -> None:
@@ -734,10 +739,22 @@ class MenuTracker:
                 and (self.sticky or quick)):
             self.sticky = True
             return
+        self.disabled = self._disabled_at(gpos)
         self._finish(0)
 
     def cancel(self) -> None:
         self._finish(0)
+
+    def _disabled_at(self, gpos: QPoint) -> int:
+        """The menu ID and number of the disabled item at gpos in a menu
+        the host draws, as MenuChoice gives them; 0 if there's none."""
+        for pd in (self.sub, self.pulldown):
+            if isinstance(pd, Pulldown) and pd.geometry().contains(gpos):
+                item = pd.item_at(pd.mapFromGlobal(gpos))
+                if item and not pd.menu.selectable(item):
+                    return (pd.menu.id & 0xFFFF) << 16 | item
+                return 0
+        return 0
 
     # -- internals ----------------------------------------------------------
     def _open(self, idx: int) -> None:
@@ -822,6 +839,8 @@ class MenuTracker:
         if result == 0:
             self.bar.set_hilite(0)
         self.display.tracker_finished(self)
+        if self.owner is not None:
+            self.owner.menu_choice = self.disabled
         if not self.future.done():
             self.future.set_result(result)
 
