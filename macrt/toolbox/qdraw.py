@@ -24,6 +24,7 @@ from __future__ import annotations
 import copy
 import re
 import struct
+import sys
 from contextlib import contextmanager
 from functools import lru_cache
 from itertools import accumulate
@@ -40,7 +41,8 @@ from .bitfont import AppFonts, style_offsets
 from .constants import (blackColor, blueColor, cyanColor, greenColor, magentaColor, redColor,
                         whiteColor, yellowColor)
 from . import pixels
-from .color import CLASSIC_RGB, CT_DEVICE, color_rgb, is_light, luminance, rgb_color
+from .color import (CLASSIC_RGB, CT_DEVICE, STANDARD_4BIT, STANDARD_8BIT, color_rgb, is_light,
+                    luminance, rgb_color)
 from .gdevice import (DEPTH_MODES, PIXMAP_FLAG, ROW_BYTES_MASK, GDevice, PixMap, PixPat, RGBPat,
                       deref, pixPat, read_table)
 from .memmgr import Heap
@@ -543,13 +545,26 @@ def _wrapped(src: QImage, dst: QImage, sub: bool) -> QImage:
                   QImage.Format.Format_RGB32).copy()
 
 
+def arithmetic_mode(mode: int) -> int:
+    """A transfer mode as macrt draws it: an arithmetic one with the
+    pattern bit (patCopy's, 8) set, as the arithmetic mode itself."""
+    return mode & ~8 if mode & 32 else mode
+
+
 def mode_table(mode: int, fg: int = BLACK_RGB,
                bk: int = WHITE_RGB) -> tuple[list[int], QPainter.CompositionMode]:
     """The colours a 1-bit image's 0 and 1 bits become in a transfer mode
     (the not- modes swap them), and how they're combined with what's there.
     1 bits draw in the foreground colour and 0 bits, where they draw at
     all, in the background colour; XOR ignores both.  An arithmetic mode
-    draws as the classic one it reverts to on a 1-bit destination."""
+    draws as the classic one it reverts to on a 1-bit destination, but
+    transparent, which leaves out what's in the background colour: the 0
+    bits, and the 1 bits too if the foreground colour is the same.  With
+    the pattern bit (40 to 47), an arithmetic mode is drawn as it is
+    without it."""
+    mode = arithmetic_mode(mode)
+    if mode == TRANSPARENT:
+        return [CLEAR, CLEAR if fg == bk else fg], OVER
     mode = ONE_BIT_MODES.get(mode, mode)
     zero, one = {srcCopy: (bk, fg), srcOr: (CLEAR, fg), srcXor: (KEEP, INVERT),
                  srcBic: (CLEAR, bk)}[mode & 3]
@@ -622,8 +637,14 @@ def _pattern_brush(img: QImage, mode: int,
                    bk: int) -> tuple[QBrush, QPainter.CompositionMode]:
     """A brush of a colour pattern's image in a pattern mode (the not-
     modes aside), and how it combines: copied; with white left out (Or);
-    inverting where it's dark (Xor); or the background colour where it
-    isn't white (Bic).  The port's colours don't change its own."""
+    inverting where it's dark (Xor); the background colour where it
+    isn't white (Bic); or with the background colour left out
+    (transparent).  The port's colours don't change its own."""
+    if arithmetic_mode(mode) == TRANSPARENT:
+        mask = img.createMaskFromColor(bk, Qt.MaskMode.MaskOutColor)
+        img = img.convertToFormat(QImage.Format.Format_ARGB32)
+        img.setAlphaChannel(mask)
+        return QBrush(img.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)), OVER
     mode &= 3
     if mode == srcXor:
         img = img.copy()
@@ -907,15 +928,18 @@ class Fonts:
 # =========================================================================
 class WindowSurface:
     """A window's Backing, whose area is relative to the top left of the
-    port's portRect."""
+    content area where the Window Manager placed it (backing_rect)."""
 
     def __init__(self, port: GrafPort):
         self.port = port
         self.backing = port.backing
 
     def _origin(self) -> tuple[int, int]:
-        r, a = self.port.port_rect, self.backing.area
-        return r.left + a.left, r.top + a.top
+        """Where the Backing's first pixel is in the port's coordinates:
+        portBits.bounds maps them to the screen, as QuickDraw maps them,
+        wherever the portRect is."""
+        at, b, a = self.port.backing_at, self.port.port_bits_bounds, self.backing.area
+        return at.h + b.left + a.left, at.v + b.top + a.top
 
     @contextmanager
     def painter(self, area: Rect | None = None):
@@ -1011,13 +1035,19 @@ class MemorySurface:
         return cls(mem, base, row_bytes, bounds, depth, table)
 
     @classmethod
-    def of_pixmap(cls, mem: RAM, p: int, palette: Callable[[], list[int] | None] | None = None
-                  ) -> MemorySurface | None:
+    def of_pixmap(cls, mem: RAM, p: int, palette: Callable[[], list[int] | None] | None = None,
+                  tableless: Callable[[int], list[int]] | None = None) -> MemorySurface | None:
         """The pixels of the PixMap at p (in the colours of palette()'s
-        entries, if its table's values are a palette's: see read_table)."""
+        entries, if its table's values are a palette's: see read_table;
+        of 2 to 8 bits with no colour table, or one with no colours,
+        tableless(depth)'s)."""
         pm = PixMap(mem, p)
         depth = pm.pixel_size
-        table = read_table(mem, pm.pm_table, palette) if depth <= 8 else None
+        ct = deref(mem, pm.pm_table)
+        if 1 < depth <= 8 and tableless is not None and (not ct or mem.r16s(ct + 6) < 0):
+            table = tableless(depth)
+        else:
+            table = read_table(mem, pm.pm_table, palette) if depth <= 8 else None
         got = cls.make(mem, pm.base_addr, pm.row_bytes & ROW_BYTES_MASK, pm.bounds, depth,
                        table)
         if got is not None and table is not None:
@@ -1262,6 +1292,19 @@ class QuickDraw:
         depth = pm.pixel_size if pm.pixel_size in DEPTH_MODES else 1
         return depth, read_table(self.mem, pm.pm_table) if depth <= 8 else []
 
+    def tableless(self, depth: int) -> list[int]:
+        """The colours of a PixMap of 2 to 8 bits with no colour table:
+        the current device's, if it's of that depth, else the standard
+        ones (the greys, for 2 bits).  The Discovery Demo draws its
+        pictures in one, and copies them out through another PixMap of
+        the same pixels with the screen's table."""
+        got, colors = self.device_colors()
+        if got == depth:
+            return list(colors)
+        if depth == 2:
+            return [0xFF000000 | v * 0x010101 for v in (0xFF, 0xAA, 0x55, 0)]
+        return list(STANDARD_4BIT if depth == 4 else STANDARD_8BIT)
+
     def color_index(self, rgb: tuple[int, int, int]) -> int:
         """Color2Index: the current device's pixel value nearest a colour."""
         if self.sys.devices is None:
@@ -1320,8 +1363,8 @@ class QuickDraw:
             return WindowSurface(port)
         if port.is_color:
             pm = port.pixmap()
-            return MemorySurface.of_pixmap(self.mem, pm, self._palette(current or port)) \
-                if pm else None
+            return MemorySurface.of_pixmap(self.mem, pm, self._palette(current or port),
+                                           self.tableless) if pm else None
         bounds = port.port_bits_bounds
         return (self.on_screen(base, bounds)
                 or MemorySurface.make(self.mem, base, port.port_bits_row_bytes, bounds))
@@ -1463,7 +1506,7 @@ class QuickDraw:
             values = self._values(port)
         fg, bk = self.colors(port, depth, values)
         h = getattr(pat, "handle", 0)
-        if h and depth > 1 and not mode & 4:
+        if h and depth > 1 and (not mode & 4 or arithmetic_mode(mode) == TRANSPARENT):
             shown = VALUE_TABLES[depth] if values and depth <= 8 else ()
             got = self._pix_pat_brush(h, mode, *(self.colors(port, depth, False) if shown
                                                  else (fg, bk)), shown, bk)
@@ -1503,11 +1546,11 @@ class QuickDraw:
                 return None
             rgb = (mem.r16(ct + 0x2A), mem.r16(ct + 0x2C), mem.r16(ct + 0x2E))
             if shown:
-                return solid_brush(shown[self.color_index(rgb) % len(shown)], mode & 3,
+                return solid_brush(shown[self.color_index(rgb) % len(shown)], mode,
                                    shown_bk)
             argb = rgb_argb(rgb)
             return solid_brush(devices.nearest(argb) if devices is not None else argb,
-                               mode & 3, bk)
+                               mode, bk)
         depth, b = pm.pixel_size, pm.bounds
         row_bytes, data_p = pm.row_bytes & ROW_BYTES_MASK, deref(mem, pp.pat_data)
         width, height = b.width, b.height
@@ -1532,11 +1575,20 @@ class QuickDraw:
                              bk, tuple(shown))
 
     def clip_region(self, port: GrafPort) -> Region:
-        clip = Region.rect(port.port_rect)
+        """Where drawing in port can go: its visRgn and clipRgn, and its
+        bitmap's own edges, past which there's nothing to draw on.  Inside
+        Macintosh I (QuickDraw) has it within the portRect as well; macrt
+        leaves that out, as Excel 4.0 needs: it draws its toolbar's buttons
+        in a port whose portRect it copies from a window it made with no
+        size, having set the regions to the buttons' pixel maps.  A
+        window's visRgn is within its portRect anyway.  ScrollRect, which
+        IM I names the portRect for itself, keeps to it (scroll_rect)."""
+        clip = None
         for h in (port.vis_rgn, port.clip_rgn):
             if h:
-                clip = clip.sect(read_rgn(self.mem, h))
-        return clip
+                rgn = read_rgn(self.mem, h)
+                clip = rgn if clip is None else clip.sect(rgn)
+        return Region.rect(port.port_rect) if clip is None else clip
 
     @contextmanager
     def _on(self, port: GrafPort, surface, area: Rect | None, clip: Region | None):
@@ -1570,17 +1622,42 @@ class QuickDraw:
     def painting(self, port: GrafPort | None, area: Rect | None = None,
                  mask: Region | None = None, surface=None):
         """A QPainter on port's pixels (surface, if it's known), clipped as
-        QuickDraw clips (to its portRect, visRgn and clipRgn, and mask);
+        macrt clips (to its visRgn and clipRgn, and mask);
         None if there's nothing to draw on."""
         if port is None:
             return self._on(port, None, area, None)
         clip = self.clip_region(port)
         if mask is not None:
             clip = clip.sect(mask)
+        if self.sys.outside_port_rect is not None:
+            self._outside_port_rect(port, area, clip)
         surface = surface or self.surface(port)
         if isinstance(surface, MemorySurface) and self._values(port):
             surface.in_values()
         return self._on(port, surface, area, clip)
+
+    def _outside_port_rect(self, port: GrafPort, area: Rect | None, clip: Region) -> None:
+        """Note, in the System's outside_port_rect, drawing in port that
+        can land outside its portRect, which a clip to the portRect would
+        cut.  One entry a port, portRect, bit map's bounds and QuickDraw
+        routine that drew (painting's caller), with how many times and the
+        box round where, in the port's coordinates."""
+        rect, bounds = port.port_rect, port.port_bits_bounds
+        extra = clip.diff(Region.rect(rect)).sect(Region.rect(bounds))
+        if area is not None:
+            extra = extra.sect(Region.rect(area))
+        if extra.empty:
+            return
+        via = sys._getframe(2).f_code.co_name
+        key = (port.addr, rect, bounds, via)
+        seen = self.sys.outside_port_rect
+        note = seen.get(key)
+        if note is None:
+            note = seen[key] = {"port": f"${port.addr:06X}", "port_rect": list(rect),
+                                "bounds": list(bounds), "via": via, "box": extra.bbox,
+                                "times": 0}
+        note["box"] = note["box"].union(extra.bbox)
+        note["times"] += 1
 
     def fill(self, port: GrafPort | None, path: QPainterPath, pat: bytes, mode: int) -> None:
         if port is None or path.isEmpty():
@@ -1832,7 +1909,7 @@ class QuickDraw:
             return
         face = port.tx_face
         extra = 2 if face & (outline | shadow) else 0
-        if port.tx_mode & 7 in (srcOr, srcXor, srcBic):
+        if port.tx_mode & 7 in (srcOr, srcXor, srcBic) or port.tx_mode == TRANSPARENT:
             # White leaves what's there: a pixel more all round, for what
             # the host's glyphs draw past their advances.
             area = Rect(pen.v - fm.ascent() - 1, pen.h - 1, pen.v + fm.descent() + extra + 1,
@@ -1936,7 +2013,8 @@ class QuickDraw:
             port = self.sys.port_with_pixmap(pm) if pm else None
             if port is not None:
                 return self.surface(port, current), port
-            return (MemorySurface.of_pixmap(mem, pm, self._palette(current)) if pm else None), None
+            return (MemorySurface.of_pixmap(mem, pm, self._palette(current), self.tableless)
+                    if pm else None), None
         base, bounds = mem.r32(bm), mem.r_rect(bm + 6)
         return (self.on_screen(base, bounds)
                 or MemorySurface.make(mem, base, row_bytes, bounds)), None
@@ -1958,15 +2036,19 @@ class QuickDraw:
         Clipped to the current port's regions when drawing in its bits.
         From a PixMap, or a window on a colour screen, it copies colours;
         from a PixMap to one whose pixel values are the same colours
-        (same_values), in srcCopy, the values as they are."""
+        (same_values), in srcCopy, the values as they are, and in
+        transparent, with a cGrafPort current, those that aren't its
+        bkColor.  TerraTopia gives its offscreen PixMap the screen's seed,
+        not its colours, and draws its sprites in it in transparent."""
         if src_r.empty or dst_r.empty:
             return
         src, _ = self.bitmap(src_bm, current)
         if src is None:
             return
         dst, dst_port = target = self.bitmap(dst_bm, current)
-        values = (mode & ~DITHER_COPY == srcCopy and isinstance(src, MemorySurface)
-                  and src.same_values(dst)
+        as_is = mode & ~DITHER_COPY == srcCopy or (
+            mode & ~DITHER_COPY == TRANSPARENT and getattr(current, "is_color", False))
+        values = (as_is and isinstance(src, MemorySurface) and src.same_values(dst)
                   and (dst_port is None or dst_port.addr not in self.pictures))
         if values:
             src.in_values()
@@ -2069,12 +2151,13 @@ class QuickDraw:
         return (self.mem.r16(gv), self.mem.r16(gv + 2), self.mem.r16(gv + 4)) if gv else None
 
     def scroll_rect(self, port: GrafPort | None, r: Rect, dh: int, dv: int) -> Region:
-        """ScrollRect: move the bits in r (clipped to the port) by dh, dv,
-        erase what's left behind, and return that."""
+        """ScrollRect: move the bits in r by dh, dv, erase what's left
+        behind, and return that.  IM I's ScrollRect moves only the bits
+        within the port's portRect, visRgn, clipRgn and bitmap."""
         if port is None:
             return Region()
         surface = self.surface(port)
-        clip = self.clip_region(port).sect(Region.rect(r))
+        clip = self.clip_region(port).sect(Region.rect(r.sect(port.port_rect)))
         if surface is None or clip.empty:
             return Region()
         if isinstance(surface, MemorySurface) and self._values(port):

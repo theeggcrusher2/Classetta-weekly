@@ -24,7 +24,7 @@ import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from ..macfile import MacFile, fonts_beside
+from ..macfile import MacFile, finder_beside, fonts_beside
 from ..memory import ADDRESS_MASK, RAM, from_mac, to_mac
 from ..resfork import (InvalidForkError, build_fork, open_fork, resCompressed, resLocked,
                        resSysHeap, restype)
@@ -32,9 +32,10 @@ from . import lowmem, printing, sysres
 from .files import FileManager, FileSystem
 from .lowmem import World
 from .bitfont import Strike, fond_ids, fond_sizes, font_family, font_id, font_ids
+from .color import standard_table
 from .constants import kApplicationMenuID
 from .menus import MenuInfo
-from .memmgr import APPL_MASTERS, LOCKED, MIN_BLOCK, MORE_MAST, RESOURCE, Heap
+from .memmgr import APPL_MASTERS, GZ_PROC, LOCKED, MIN_BLOCK, MORE_MAST, RESOURCE, Heap
 from .resources import UNWRITTEN, Item, ResourceManager, ResourceMap
 from .events import InputGlobals
 from .gdevice import Devices, PixMap
@@ -91,6 +92,7 @@ APPLE_SYSTEM_TYPES = frozenset(restype(kind) for kind in (
 # The resource IDs a control panel owns ('cdev' -4064's), in its own file
 # and in the System file.
 CONTROL_PANEL_IDS = range(-4064, -4032)
+STANDARD_CLUTS = (1, 4, 8)      # the ROM's 'clut's macrt has the tables of
 APP_PACKS = 8                   # the packages AppPacks has handles to
 DRIVER_ROOM = 0x20000           # how much of a disk's System's drivers it adds
 SOUND_ROOM = 0x10000            # and of its sounds
@@ -117,6 +119,12 @@ DEPTHS = (1, 2, 4, 8, 16, 32)  # bits a pixel the screen may have, with Color Qu
 COLOR_DEPTH = 8                 # and has, unless it's told otherwise
 DEFAULT_PARTITION = 1 << 20
 DEFAULT_STACK = 0x8000
+# The stack in the partition a SIZE resource, or the Finder's Get Info,
+# gives a program, with its heap and A5 world (Inside Macintosh: Memory,
+# "Organization of Memory in an Application Partition"): "At the start of
+# each application program, the limit is initialized to allow 8K bytes for
+# the stack" (Inside Macintosh II-17).
+SIZE_STACK = 0x2000
 MIN_STACK = 0x400           # MinStack, as a Mac has it
 APP_PARAMS = 32             # above A5, before the jump table
 MIN_HEAP = 0x8000
@@ -131,10 +139,11 @@ class Model:
     either way; what the model changes is the exception frames it stacks.
     A 68000's are six bytes, with no format word, and programs from before
     the Mac II pop them themselves: MacWrite 4.5 returns from its TRAP
-    handler with ADDQ.W #2,A7 and RTS."""
+    handler with ADDQ.W #2,A7 and RTS.  The Mac IIx is a Mac II that says
+    it has a 68030 and a 68882, for programs that ask for them."""
     name: str
-    cpu: int            # CPUFlag: 0 for a 68000, 2 for a 68020
-    fpu: bool
+    cpu: int            # CPUFlag: 0 for a 68000, 2 for a 68020, 3 for a 68030
+    fpu: int            # Gestalt's 'fpu ': 0 for none, 1 for a 68881, 2 for a 68882
     gestalt: int        # Gestalt's 'mach'
     environs: int       # SysEnvirons' machineType
     rom: int            # the ROM's version
@@ -154,10 +163,12 @@ class Model:
 
 
 MODELS = {
-    "plus": Model("Macintosh Plus", 0, False, gestalt=4, environs=2, rom=0x0075, keyboard=3,
+    "plus": Model("Macintosh Plus", 0, 0, gestalt=4, environs=2, rom=0x0075, keyboard=3,
                   hardware=0x91, toolbox_traps=512),
-    "ii": Model("Macintosh II", 2, True, gestalt=6, environs=4, rom=0x0178, keyboard=5,
+    "ii": Model("Macintosh II", 2, 1, gestalt=6, environs=4, rom=0x0178, keyboard=5,
                 hardware=0x9B, color=True, slots=True, adb=True),
+    "iix": Model("Macintosh IIx", 3, 2, gestalt=7, environs=5, rom=0x0178, keyboard=5,
+                 hardware=0x9B, color=True, slots=True, adb=True),
 }
 
 RTS = 0x4E75
@@ -303,12 +314,20 @@ class System:
         # there at startup: macrt.m68k.glue_devices has it.
         self.device_room = self.sys_heap.new_ptr(DEVICE_ROOM)
         self.ports: dict[int, GrafPort] = {}            # canonical views, by address
+        # Drawing that's landed outside a port's portRect, which macrt
+        # doesn't clip to, when something's watching for it (a survey's
+        # outside_port_rect): QuickDraw._outside_port_rect's.  None if not.
+        self.outside_port_rect: dict[tuple, dict] | None = None
         self.gestalt_procs: dict[int, int] = {}         # NewGestalt selector -> 68k function
+        # PPostEvent's event queue entries in the system heap, each with the
+        # queue and event it was last given for: free once that's been got
+        self.event_qels: dict[int, tuple] = {}
         self.init_patches: dict[int, int] = {}          # trap key -> address: the INITs'
         self.extensions_off: set[str] = set()           # control panels to open without their INITs
         self.script_settings: dict[int, int] = {}       # SetEnvirons verb -> value
         self.kchr_cache = 0                             # GetEnvirons(smKCHRCache)'s copy
         self.font_records: dict[tuple, int] = {}        # FMSwapFont's FONTs of host fonts
+        self.cicon_records: dict[int, int] = {}         # GetCIcon's records: handle -> size
         self.font_lines: dict[tuple[int, int], tuple[int, int, int]] = {}  # _disk_font_lines
         self.width_table = 0                            # and its global width table,
         self.width_request: tuple | None = None         # with what it was last made for
@@ -343,7 +362,7 @@ class System:
         self.fcbs = self.files.fcbs                     # open files, by reference number
         self._open_system_file(system_file, disk_system, disk_fonts)
         self.screen = Screen(self, desk_top)            # the buffer at ScrnBase
-        self.input = InputGlobals(mem)                  # the mouse and keys, in low memory
+        self.input = InputGlobals(mem, Rect(0, 0, h, w))  # the mouse and keys, in low memory
         # System 7's Application menu, in every application's menu list
         # after its own menus; the display gives it its items.
         self.application_menu = MenuInfo.new(self, self.sys_heap, kApplicationMenuID, "")
@@ -619,7 +638,7 @@ class System:
             for s in [s for s, (h, _) in self._zones.items() if h.start < limit and start < h.end]:
                 del self._zones[s]
             heap = Heap(self.mem, start, limit - MIN_BLOCK, align=self.align)
-            self.mem.w32(start + 16, grow_zone)                 # gzProc
+            self.mem.w32(start + GZ_PROC, grow_zone)
             self.mem.w16(start + MORE_MAST, more_masters)
             heap.more_masters()
             self._zones[start] = heap, owner
@@ -714,10 +733,18 @@ class System:
         # would have left it ('scrn' 0).
         if self.devices is not None and m.find(restype("scrn"), 0) is None:
             self._add_system_resources([("scrn", 0, self.devices.scrn())])
+        # And the standard colour tables of 1, 4 and 8 bits, 'clut' 1, 4 and
+        # 8, among the 'clut's Inside Macintosh V's "Resources in ROM" lists,
+        # where RGetResource finds them; macrt's ROM resources are the System
+        # file's.  Easy Color Paint sets the screen's colours to 'clut' 4.
+        if self.devices is not None:
+            self._add_system_resources([("clut", n, standard_table(n)) for n in STANDARD_CLUTS
+                                        if m.find(restype("clut"), n) is None])
         if all(next(m.entries(restype(kind)), None) is None for kind in ("FOND", "FONT", "NFNT")):
-            self._add_system_resources(sysres.fonts())      # a real System file brings its own
+            # A real System file brings its own.
+            font_files = [disk_system, *disk_fonts] if disk_system is not None else []
+            self._add_system_resources(sysres.fonts(self._disk_outlines(font_files)))
             if disk_system is not None:
-                font_files = [disk_system, *disk_fonts]
                 self._add_system_resources(self._disk_fonts(font_files))
                 for font_file in font_files:
                     for key, lines in self._disk_font_lines(font_file).items():
@@ -726,6 +753,12 @@ class System:
                 self._add_system_resources(self._disk_tables(disk_system))
         if real:
             self._add_system_resources(self._folder_fonts(fonts_beside(f)), replace=True)
+            # And the Finder beside it, in the System Folder with it, as on
+            # the disk: FinderColors opens it, and says to restart with
+            # MultiFinder off when it can't.
+            finder = finder_beside(f)
+            if finder is not None:
+                self.files.in_system_folder(finder)
         # The printer is macrt's whatever the System file says: its own
         # printer file's code would drive a serial port.
         name = to_mac(printing.PRINTER_NAME)
@@ -777,6 +810,30 @@ class System:
                     name = [e.name.decode("mac_roman")] if e.name else []
                     fonts.append((e.type.decode("mac_roman"), e.id, data, *name))
         return fonts
+
+    def _disk_outlines(self, files: Sequence[MacFile]) -> dict[int, int]:
+        """The standard families files, the System file on the disk the
+        applications come from and the suitcases beside it, have an outline
+        font of, size 0 in their FONDs, with its 'sfnt''s ID, the first
+        file's first.  macrt's FONDs of these list it too, as the Fonts
+        folder's do beside a real System file (_folder_fonts), and the
+        'sfnt' isn't taken there either: host fonts draw these families at
+        any size.  For an outline font RealFont "returns TRUE for almost
+        any size" (Inside Macintosh: Text, "Adding Font Sizes and Names to
+        the Menu"), and ATPM's DOCMaker issues, on a disk whose Fonts
+        folder has Geneva, Helvetica and Monaco as outline fonts, ask after
+        Geneva 11 and Helvetica 43 and say which are missing."""
+        outlines: dict[int, int] = {}
+        for f in files:
+            try:
+                fork = open_fork(f.rsrc)
+            except InvalidForkError:
+                continue
+            for e in fork.entries:
+                if e.type == b"FOND" and e.id in sysres.FONTS and not e.attrs & resCompressed:
+                    for rid in font_ids(fork.raw(e), 0)[:1]:
+                        outlines.setdefault(e.id, rid)
+        return outlines
 
     def _folder_fonts(self, files: Sequence[MacFile]) -> list[tuple]:
         """The fonts in files, the suitcases in the Fonts folder beside a
@@ -937,14 +994,16 @@ class System:
         in place of any with the same type and ID if replace.  Their
         handles."""
         with self.lock:
+            m = self.sys_map
+            resident = self.resources.resident(m)
             items = []
             for kind, rid, data, *name in resources:
                 h = self.sys_heap.new_handle_with(data)
                 self.sys_heap.set_state(h, LOCKED | RESOURCE)
                 items.append(Item(restype(kind), rid, to_mac(name[0]) if name else None,
                                   resSysHeap | resLocked, UNWRITTEN, h))
+                resident[(restype(kind), rid)] = bytes(data)
             if items:
-                m = self.sys_map
                 new = {(it.type, it.id) for it in items} if replace else set()
                 m.rewrite(self.sys_heap,
                           [it for it in m.items() if (it.type, it.id) not in new] + items)

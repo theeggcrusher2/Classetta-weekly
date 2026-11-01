@@ -297,11 +297,12 @@ class Screen:
     def _shape(self, w: WindowRecord) -> tuple[Region, Region]:
         """What of the screen w's content area and whole window cover: as
         its own WDEF shaped them, or the rectangles of a frame the host
-        draws."""
+        draws.  The content area is where the Window Manager placed it,
+        which a program that sets its portRect itself doesn't move."""
+        content = Region.rect(w.backing_rect)
         if w.wdef_shaped:
-            return (read_rgn(self.mem, w.cont_rgn).sect(Region.rect(w.content)),
-                    w.wdef_struc())
-        return Region.rect(w.content), Region.rect(w.struc_rect)
+            return read_rgn(self.mem, w.cont_rgn).sect(content), w.wdef_struc()
+        return content, Region.rect(w.struc_rect)
 
     def exposed(self, w: WindowRecord) -> Region:
         """What of w's content area no window in front of it covers, on the

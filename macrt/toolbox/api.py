@@ -53,6 +53,7 @@ if TYPE_CHECKING:
 IN_FRONT = -1   # NewWindow's behind = (WindowPtr)-1
 MOUSE_EVENTS = k.event_mask(k.mouseDown) | k.event_mask(k.mouseUp)
 MOUSE_UP_WAIT = 0.1             # seconds, for the host to post a release's mouse-up
+MENU_SIZES_KEPT = 64            # menus' sizes worked out, kept by their contents
 
 
 class Toolbox:
@@ -77,6 +78,10 @@ class Toolbox:
         # The application's own WDEFs, for a 68k application: its runtime's
         # macrt.m68k.wdefs.WindowDefinitions.
         self.wdefs = None
+        # size_menu's sizes by the menus' contents, with the strike they're
+        # in: The Secret Island of Dr. Quandary sets its items' marks and
+        # text again on each pass of its event loop, changing nothing.
+        self._menu_sizes: dict[tuple, tuple] = {}
 
     def _gui(self, fn, *args):
         return self._d.bridge.call(fn, *args)
@@ -665,7 +670,13 @@ class Toolbox:
         works out its own menus' (CalcMenuSize's mSizeMsg)."""
         if not menu.own_mdef:
             from ..ui.menubar import menu_size     # which imports this module
-            menu.size = menu_size(menu, self._system_strike())
+            strike, key = self._system_strike(), menu.contents_key()
+            found = self._menu_sizes.get(key)
+            if found is None or found[0] is not strike:
+                if len(self._menu_sizes) >= MENU_SIZES_KEPT:
+                    self._menu_sizes.clear()
+                found = self._menu_sizes[key] = (strike, menu_size(menu, strike))
+            menu.size = found[1]
 
     def GetMenu(self, menu_id: int) -> MenuInfo | None:
         """A menu from a MENU resource.  The resource is the menu: its
@@ -798,7 +809,10 @@ class Toolbox:
 
     def MenuSelect(self, pt: Point, serve: Callable | None = None) -> int:
         """serve(what, ...) answers the tracker on this thread while it
-        follows the mouse: an application's MBDF and MDEFs (mdefs.Menus)."""
+        follows the mouse: an application's MBDF and MDEFs (mdefs.Menus).
+        If it chooses nothing, MenuChoice gives the disabled item the mouse
+        was released over, if it was."""
+        self._p.menu_choice = 0
         return int(self._track(self._d.track_menu, self._p, pt, serve=serve) or 0)
 
     def PopUpMenuSelect(self, menu: MenuInfo, top: int, left: int, item: int,
@@ -810,6 +824,7 @@ class Toolbox:
         return int(self._track(*args, serve=serve) or 0)
 
     def MenuKey(self, ch: str | int) -> int:
+        self._p.menu_choice = 0
         if isinstance(ch, int):
             ch = bytes([ch & 0xFF]).decode("mac_roman")
 
@@ -831,6 +846,18 @@ class Toolbox:
         self._gui(self._d.hilite_menu, self._p, menu_id)
 
     def _change_item(self, menu: MenuInfo, item: int, **changes) -> None:
+        """A change to an item that leaves it as it is doesn't wait for the
+        GUI thread: The Secret Island of Dr. Quandary checks its menus'
+        items and sets their text again on each pass of its event loop, over
+        a hundred calls a second, and nearly all of them change nothing:
+        waiting about 5 ms each, they took three quarters of its time."""
+        if item:
+            with self._sys.lock:
+                changes_it = menu.changes_item(item, **changes)
+            if not changes_it:
+                self.size_menu(menu)
+                return
+
         def gui():
             if item == 0 and "enabled" in changes:
                 menu.enabled = changes["enabled"]
@@ -846,12 +873,19 @@ class Toolbox:
         of enableFlags, nothing more, so the guest doesn't wait for the
         menu bar to show it: Netscape Navigator 2.02 enables and disables
         some sixty items for each key typed, and at a wait for the GUI
-        thread each, lost keys typed at a typist's pace."""
+        thread each, lost keys typed at a typist's pace.  Only a menu's own
+        bit is drawn in the bar, so only a change to it has the bar drawn
+        again: The Secret Island of Dr. Quandary disables and enables items
+        on each pass of its event loop, and the bar was drawn fifty times a
+        second.  A menu that's pulled down reads its items' bits as it's
+        drawn."""
         with self._sys.lock:
             if not 0 <= item <= min(menu.count(), LAST_FLAGGED_ITEM):
                 return
             flags = menu.enable_flags
             menu.enable_flags = (flags | 1 << item) if on else (flags & ~(1 << item))
+            if item or menu.enable_flags == flags:
+                return
         with self._dirty_lock:
             due, self._bars_due = self._bars_due, True
         if not due:

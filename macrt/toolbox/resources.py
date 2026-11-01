@@ -89,6 +89,10 @@ class ResFile:
         # what the resources only a 'dcmp' could expand expanded to, by
         # what they're stored as
         self.expanded: dict[bytes, bytes] = {}
+        # what the resources macrt adds to its System file only in memory
+        # hold, by type and ID: a real Mac's System file or ROM has them,
+        # so they're read in again after they're released or purged
+        self.resident: dict[tuple[bytes, int], bytes] = {}
 
     @property
     def node(self) -> FileNode:
@@ -102,19 +106,24 @@ class ResFile:
     def key(self) -> str:
         return self.source.key if self.source else self.name
 
-    def raw(self, offset: int) -> bytes | None:
+    def raw(self, offset: int, key: tuple[bytes, int] | None = None) -> bytes | None:
+        """The data at offset; for one only in memory, the resident data
+        of the resource key is, if it has any."""
+        if offset == UNWRITTEN:
+            return self.resident.get(key) if key is not None else None
         base = struct.unpack_from(">I", self.fork, 0)[0]
         at = base + offset
-        if offset == UNWRITTEN or at + 4 > len(self.fork):
+        if at + 4 > len(self.fork):
             return None
         n = struct.unpack_from(">I", self.fork, at)[0]
         return bytes(self.fork[at + 4:at + 4 + n]) if at + 4 + n <= len(self.fork) else None
 
     def read(self, offset: int, attrs: int,
-             expand: Callable[[bytes], bytes | None] | None = None) -> bytes | None:
+             expand: Callable[[bytes], bytes | None] | None = None,
+             key: tuple[bytes, int] | None = None) -> bytes | None:
         """The resource's data, expanded if it's compressed: by rsrcfork,
         or else by expand, which gives None if it can't."""
-        data = self.raw(offset)
+        data = self.raw(offset, key)
         if data is None or not self.compressed(data, attrs):
             return data
         if data in self.expanded:
@@ -128,10 +137,10 @@ class ResFile:
             self.expanded[data] = out
             return out
 
-    def size(self, offset: int, attrs: int) -> int | None:
+    def size(self, offset: int, attrs: int, key: tuple[bytes, int] | None = None) -> int | None:
         """The size of the data, expanded, without expanding it: a
         compressed resource's header has it."""
-        data = self.raw(offset)
+        data = self.raw(offset, key)
         if data is not None and self.compressed(data, attrs) and len(data) >= 12:
             return struct.unpack_from(">I", data, 8)[0]
         return None if data is None else len(data)
@@ -342,6 +351,11 @@ class ResourceManager:
         # _ResourceStub: given the map, the entry and force, the handle,
         # or None to read it here.
         self.load_hook: Callable[[ResourceMap, Entry, bool], int | None] | None = None
+        # What gets a resource for macrt's own managers when an application
+        # has patched GetResource (or Get1Resource): given the type, the ID
+        # and whether it's Get1Resource, the handle the patch returns, or
+        # None to get it here.
+        self.get_hook: Callable[[bytes, int, bool], int | None] | None = None
         # What expands a compressed resource with a decompressor rsrcfork
         # hasn't got, by running the 'dcmp' it names: given the data as
         # stored, the data, or None if it can't.
@@ -419,6 +433,11 @@ class ResourceManager:
 
     def _file(self, m: ResourceMap) -> ResFile:
         return self.system.fcbs[m.refnum].res
+
+    def resident(self, m: ResourceMap) -> dict[tuple[bytes, int], bytes]:
+        """The data of the resources added to m's file only in memory
+        that are read in again from it, by type and ID."""
+        return self._file(m).resident
 
     def node_of(self, refnum: int) -> FileNode | None:
         """The file whose resource fork the open resource file refnum is."""
@@ -530,6 +549,8 @@ class ResourceManager:
                 if node.fork(True):
                     self.error = dupFNErr
                     return
+                if node.volume.lock_error:
+                    raise FileError(node.volume.lock_error)
                 self.system.files.set_fork(node, True, build_fork([]))
             except FileError as e:
                 self.error = e.code
@@ -658,7 +679,7 @@ class ResourceManager:
             self.error = noErr if h else memFullErr
             return h
         try:
-            data = self._file(m).read(e.offset, attrs, self.decompressor)
+            data = self._file(m).read(e.offset, attrs, self.decompressor, (e.type, e.id))
         except DecompressError:
             self.error = CantDecompress
             return 0
@@ -708,7 +729,17 @@ class ResourceManager:
         return 0
 
     def GetResource(self, rtype: ResType, rid: int) -> int:
-        return self.get(rtype, rid)
+        """GetResource as macrt's own managers call it (GetNewDialog,
+        GetPicture, ...): through the application's patch on the trap, if
+        it has one.  The trap itself is get, which a patch calls on to."""
+        return self._through_patch(rtype, rid, False)
+
+    def _through_patch(self, rtype: ResType, rid: int, one: bool) -> int:
+        if self.get_hook is not None:
+            h = self.get_hook(restype(rtype), rid, one)
+            if h is not None:
+                return h
+        return self.get(rtype, rid, one)
 
     def peek(self, rtype: ResType, rid: int, system: bool = True) -> bytes | None:
         """What GetResource would find, from CurMap down, without reading
@@ -728,7 +759,8 @@ class ResourceManager:
                     heap = self.system.heap_of(h)
                     return self.mem.read(heap.deref(h), heap.handle_size(h))
                 try:
-                    return self._file(m).read(e.offset, e.attrs, self.decompressor)
+                    return self._file(m).read(e.offset, e.attrs, self.decompressor,
+                                              (e.type, e.id))
                 except DecompressError:
                     return None
             return None
@@ -740,7 +772,7 @@ class ResourceManager:
             return {e.id for m in self._search(False) for e in m.entries(rtype)}
 
     def Get1Resource(self, rtype: ResType, rid: int) -> int:
-        return self.get(rtype, rid, one=True)
+        return self._through_patch(rtype, rid, True)
 
     def get_named(self, rtype: ResType, name: str | bytes, one: bool = False) -> int:
         with self.system.lock:
@@ -869,7 +901,7 @@ class ResourceManager:
         file's.  ResError is left as it was."""
         with self.system.lock:
             err = self.error
-            h = self.get(kind, def_id)
+            h = self.GetResource(kind, def_id)
             self.error = err
             return h or self.system.defproc(kind, def_id)
 
@@ -910,9 +942,13 @@ class ResourceManager:
                     it.id = rid
                     if name is not None:
                         it.name = to_mac(name)[:255]
+            old = (e.type, e.id) if e.offset == UNWRITTEN else None
             if not m.rewrite(self.system.heap_of(m.handle), items):
                 self.error = memFullErr
                 return
+            resident = self._file(m).resident
+            if old in resident and old[1] != rid:
+                resident[(old[0], rid)] = resident.pop(old)
             m.attrs |= mapChanged
             self.error = noErr
 
@@ -944,7 +980,7 @@ class ResourceManager:
             self.error = noErr
             if e.attrs & resChanged and self.mem.r32(h) & ADDRESS_MASK:
                 return self.system.heap_of(h).handle_size(h)
-            size = self._file(e.map).size(e.offset, e.attrs)
+            size = self._file(e.map).size(e.offset, e.attrs, (e.type, e.id))
             return size if size is not None else 0
 
     def MaxSizeRsrc(self, h: int) -> int:
@@ -1014,7 +1050,7 @@ class ResourceManager:
             items = m.items()
             out = []
             for it in items:
-                data = f.raw(it.offset) or b""
+                data = f.raw(it.offset, (it.type, it.id)) or b""
                 if it.handle == e.handle:
                     data = data[:size].ljust(max(size, 0), b"\0")
                 out.append(Resource(it.type, it.id, data, it.name, it.attrs & ~resChanged))
@@ -1086,6 +1122,8 @@ class ResourceManager:
                 self.error = rmvResFailed
                 return
             h = e.handle
+            if e.offset == UNWRITTEN and not e.attrs & resChanged:
+                self._file(m).resident.pop((e.type, e.id), None)
             items = [it for it in m.items() if it.handle != h]
             m.rewrite(self.system.heap_of(m.handle), items)
             m.attrs |= mapChanged
@@ -1143,7 +1181,7 @@ class ResourceManager:
                 data = self.mem.read(self.mem.r32(it.handle) & ADDRESS_MASK, size)
                 attrs = it.attrs & ~(resChanged | resCompressed)
             else:
-                data, attrs = f.raw(it.offset) or b"", it.attrs & ~resChanged
+                data, attrs = f.raw(it.offset, (it.type, it.id)) or b"", it.attrs & ~resChanged
             out.append(Resource(it.type, it.id, data, it.name, attrs))
         fork = build_fork(out, m.attrs)
         err = self._set_fork(f, fork)

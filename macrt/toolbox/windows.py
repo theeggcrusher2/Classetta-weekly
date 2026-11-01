@@ -322,6 +322,17 @@ class WindowRecord(GrafPort):
         seen = r.sect(self._seen())
         return Rect(0, 0, 0, 0) if seen.empty else seen.offset(-r.left, -r.top)
 
+    @property
+    def backing_rect(self) -> Rect:
+        """The content area where the Window Manager last placed it
+        (global): what of the screen its Backing keeps pixels for, whatever
+        the program has done to its portRect since.  Ricochet sets the
+        portRect to the half of its window it is about to copy to, without
+        SetOrigin, and QuickDraw goes on drawing where portBits.bounds puts
+        the pixels."""
+        at, port = self.backing_at, self.backing.port
+        return Rect(at.v, at.h, at.v + port.height, at.h + port.width)
+
     def fit_backing(self, moved: bool = False) -> bool:
         """After the window changes size, or moves, its pixels with it (or
         not: MovePortTo moves the port on the screen, and leaves what's on

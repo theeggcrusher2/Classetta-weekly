@@ -18,10 +18,30 @@ control, a handle to the text for static and edit text, the ICON or PICT
 for an icon or picture, and (left to SetDialogItem) a procedure for a user
 item.  Applications read and change it through GetDialogItem and
 SetDialogItem, so it stays laid out as on a Mac.
+
+On a colour machine an icon item whose ICON has a 'cicn' of the same ID
+is that colour icon instead (Inside Macintosh: Macintosh Toolbox
+Essentials, Finder Interface, "The Icon Resource"; Inside Macintosh: More
+Macintosh Toolbox, Icon Utilities, "The Color Icon Record"): its handle is
+the CIcon record GetCIcon makes of it, macrt's own choice of handle, which
+a program can dispose of with DisposeCIcon.  An icon item whose handle is
+a record GetCIcon made is drawn as a colour icon however it got there:
+Odell Down Under disposes of its item's and sets one it makes itself.
+
+A colour dialog or alert (one with a 'dctb' or 'actb') can have an item
+colour table, the 'ictb' of its item list's ID (Inside Macintosh V, the
+Dialog Manager): for each item two words, itemCData and itemCOffset.  For
+a statText or editText item itemCData's bits say which fields of the
+20-byte text style record at itemCOffset to use: diFont, diStyle (the
+face in its high byte), diSize, the foreground and background RGB colours
+and diMode, with bit 15 saying diFont is the offset of the font's name.
+For a control it's the length of the colour table at itemCOffset, laid out
+as a 'cctb'.  Zeros for an item with neither.
 """
 
 from __future__ import annotations
 
+import struct
 from dataclasses import dataclass
 
 from ..memory import ADDRESS_MASK, BYTE, INTEGER, LONG, RAM, RECT, Field, Record
@@ -52,6 +72,62 @@ class DialogState:
     outline: bool = False       # draw the bold outline around the default button
     icon: int = -1              # an alert's icon, ICON 0, 1 or 2
     tracks_cursor: bool = False
+    item_colors: bytes = b""    # the 'ictb', if it's a colour dialog with one
+
+
+# itemCData's bits for a text item: TESetStyle's mode word's, and the
+# Dialog Manager's own (Inside Macintosh V, the Dialog Manager)
+doFont, doFace, doSize, doColor, doAddSize = 1, 2, 4, 8, 16
+doBColor, doMode, doFontName = 0x2000, 0x4000, 0x8000
+
+
+@dataclass
+class TextStyle:
+    """A text item's style in an item colour table: which of the fields
+    to use, and the fields."""
+    flags: int
+    font: int
+    face: int
+    size: int
+    fore: tuple[int, int, int]
+    back: tuple[int, int, int]
+    mode: int
+    font_name: bytes | None = None
+
+
+def _item_color(ictb: bytes, number: int) -> tuple[int, int]:
+    """Item number's itemCData and itemCOffset; zeros past the table's end."""
+    at = 4 * (number - 1)
+    if number < 1 or at + 4 > len(ictb):
+        return 0, 0
+    return struct.unpack_from(">HH", ictb, at)
+
+
+def text_style(ictb: bytes, number: int) -> TextStyle | None:
+    """A text item's style, None if it has none."""
+    flags, at = _item_color(ictb, number)
+    if not flags or at + 20 > len(ictb):
+        return None
+    font, size = struct.unpack_from(">h", ictb, at)[0], struct.unpack_from(">h", ictb, at + 4)[0]
+    fore = struct.unpack_from(">HHH", ictb, at + 6)
+    back = struct.unpack_from(">HHH", ictb, at + 12)
+    mode = struct.unpack_from(">h", ictb, at + 18)[0]
+    name = None
+    if flags & doFontName and 0 <= font < len(ictb):
+        name = ictb[font + 1:font + 1 + ictb[font]]
+    return TextStyle(flags, font, ictb[at + 2], size, fore, back, mode, name)
+
+
+def control_colors(ictb: bytes, number: int) -> bytes | None:
+    """A control item's colour table, None if it has none: as long as its
+    ctSize says (the length word of Inside Macintosh V's own example
+    counts more than its table)."""
+    length, at = _item_color(ictb, number)
+    if not length or not at or at + 8 > len(ictb):
+        return None
+    size = struct.unpack_from(">h", ictb, at + 6)[0]
+    end = at + 8 + 8 * (size + 1)
+    return ictb[at:end] if size >= 0 and end <= len(ictb) else None
 
 
 class _Field:

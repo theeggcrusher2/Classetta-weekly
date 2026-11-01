@@ -91,6 +91,7 @@ DrvQHdr = 0x308         # the drive queue
 Lo3Bytes = 0x31A        # $00FFFFFF
 MinStack = 0x31E        # the least room an application's stack is given
 DefltStack = 0x322      # the room it's given, below CurStackBase and above ApplLimit
+GZRootHnd = 0x328       # the handle a grow-zone function mustn't move or purge (GZSaveHnd)
 FCBSPtr = 0x34E         # the file control block buffer
 DefVCBPtr = 0x352       # the default volume's VCB
 VCBQHdr = 0x356         # the volume control block queue
@@ -190,6 +191,11 @@ MethodNotFound = 0xBE8  # Object Pascal's, which no manual here names: where
 ClassTable = 0xBEC      # _MethodDispatch goes for no method, and its classes
 FractEnable = 0xBF4     # nonzero: fractional character widths
 MMU32Bit = 0xCB2        # 0: 24-bit addressing
+TimeDBRA = 0xD00        # word: DBRAs a millisecond, as system initialization finds
+TimeSCCDB = 0xD02       # word: accesses to the SCC a millisecond
+TimeSCSIDB = 0xDA6      # word: accesses to the SCSI chip a millisecond
+DTQueue = 0xD92         # the deferred task queue's header
+jDTInstall = 0xD9C      # vector to DTInstall
 ASCBase = 0xCC0         # the Apple Sound Chip, where there is one
 
 TheGDevice = 0xCC8      # the GDevice drawing is done on
@@ -208,7 +214,7 @@ SWITCHED = {
     WindowList: 4, GhostWindow: 4, MenuList: 4, TheMenu: 2, MBDFHndl: 4,
     TopMapHndl: 4, CurMap: 2, ResLoad: 2, ResErr: 2,
     CurJTOffset: 2, CurPageOption: 2, PrintVars: 16, AppParmHandle: 4, ApplScratch: 12,
-    VBLQueue: 10,
+    VBLQueue: 10, DTQueue: 10,
     ResumeProc: 4, ANumber: 2, ACount: 2, DABeeper: 4, DAStrings: 16, DlgFont: 2,
     ScrapSize: 16, TEScrpLength: 4, TEScrpHandle: 4,
     DefVCBPtr: 4, DefVRefNum: 2, SFSaveDisk: 2, CurDirStore: 4, FPState: 6,

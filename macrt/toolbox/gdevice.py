@@ -177,14 +177,21 @@ def table_rgb(rgb: int) -> tuple[int, int, int]:
 def make_itable(table: list[int], seed: int, res: int = ITAB_RES) -> bytes:
     """An inverse table for table: for each colour of res bits a component,
     the index of the nearest of the table's colours (as Qt finds it)."""
+    return struct.pack(">LH", seed & 0xFFFFFFFF, res) + _itable_indexes(tuple(table), res)
+
+
+@lru_cache(maxsize=16)
+def _itable_indexes(table: tuple[int, ...], res: int) -> bytes:
+    # Kept by the colours alone: a program that reserves or protects entry
+    # after entry gets a new seed each time but the same colours.
     n = 1 << res
     levels = [round(i * 255 / (n - 1)) for i in range(n)]
     cube = array("I", [0xFF000000 | r << 16 | g << 8 | b
                        for r in levels for g in levels for b in levels])
     img = QImage(cube.tobytes(), n * n, n, QImage.Format.Format_RGB32)
-    idx = img.convertToFormat(QImage.Format.Format_Indexed8, table or MONO_TABLE,
+    idx = img.convertToFormat(QImage.Format.Format_Indexed8, list(table) or MONO_TABLE,
                               Qt.ImageConversionFlag.ThresholdDither)
-    return struct.pack(">LH", seed & 0xFFFFFFFF, res) + raw(idx)[:n ** 3]
+    return raw(idx)[:n ** 3]
 
 
 DEPTH_MODES = {1: 0, 2: 1, 4: 2, 8: 3, 16: 4, 32: 5}   # gdMode, from DEFAULT_MODE

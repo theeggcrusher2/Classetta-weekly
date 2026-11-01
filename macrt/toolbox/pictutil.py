@@ -233,11 +233,11 @@ class Survey:
         self.depth = max(self.depth, depth)
         self.add_colors(colors, depth == 32)
 
-    def add_picture(self, data: bytes) -> None:
-        """A picture, from its picSize on.  PictError if it can't be read."""
-        frame = pict.picture_frame(data)
+    def add_picture(self, frame: Rect, r: pict.Reader) -> None:
+        """A picture with this frame, its opcodes read from r.  PictError
+        if it can't be read."""
         walk = _Walk(self)
-        walk.walk(pict.Reader.of(data, 10))
+        walk.walk(r)
         width, height = frame.width, frame.height
         h_res = v_res = FIXED_72
         if walk.header is not None:

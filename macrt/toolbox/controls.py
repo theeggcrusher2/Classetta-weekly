@@ -358,14 +358,15 @@ def _draw_button(p: Painter, c: Control) -> None:
 def _draw_check(p: Painter, c: Control, kind: int, whole: bool = True) -> None:
     """A check box or radio button: drawn whole, its rect erased and its
     box and title drawn in it (Operation Tsunami's radio buttons fill a
-    frame white); otherwise its box alone, so that what's drawn over the
-    rest of its rect stays (ScreenChooser's dialog's text says what its
-    untitled check boxes are for)."""
+    frame white); otherwise, or when it has no title, its box alone, so
+    that what's drawn over the rest of its rect stays (ScreenChooser's
+    dialog's text says what its untitled check boxes are for, and Missions
+    of the Reliant's pictures, drawn before them, its radio buttons)."""
     r = c.rect
     mid = r.top + r.height // 2
     box = Rect(mid - CHECK_BOX // 2, r.left + 2, mid + CHECK_BOX // 2, r.left + 2 + CHECK_BOX)
     shape = rect_path if kind == k.checkBoxProc else oval_path
-    p.erase(rect_path(r if whole else box))
+    p.erase(rect_path(r if whole and c.title else box))
     pressed = c.active and c.hilite == k.inCheckBox
     p.frame(rect_path if kind == k.checkBoxProc else oval_path, box, 2 if pressed else 1)
     if c.value:

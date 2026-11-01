@@ -474,7 +474,7 @@ class Player:
         elif op == 0x05:
             port.tx_mode = r.s16()
         elif op == 0x06:
-            port.sp_extra = r.s32()
+            port.sp_extra = self._space_extra(r.s32())
         elif op == 0x07:
             self.pn_size = r.point()
             port.pn_size = self.scale(self.pn_size)
@@ -568,6 +568,12 @@ class Player:
             src = Rect(*struct.unpack_from(">hhhh", data, 12))
             if not src.empty:
                 self.frame = src
+
+    def _space_extra(self, extra: int) -> int:
+        """SpExtra is pixels in the picture's coordinates, so it maps to
+        the destination as horizontal positions do."""
+        f, d = self.frame, self.dst
+        return extra * d.width // f.width if f.width and d.width != f.width else extra
 
     def _text_size(self) -> None:
         size = self.tx_size

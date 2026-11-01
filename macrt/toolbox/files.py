@@ -53,7 +53,7 @@ import struct
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import machfs
 
@@ -125,6 +125,10 @@ ROOM = FREE_BLOCKS * BLOCK              # what they say is free: no fork grows p
 ERIK = 0x4552494B                       # 'ERIK': the procID the Finder gives working directories
 MAC_1904 = 2082844800
 BOOT_VOLUME = "Macintosh HD"
+# When the boot volume was made: the same each time macrt starts, as a
+# startup disk's date is.  MacBrickout 3.1's demo starts its score from
+# it.  The date, 1 January 1990, is macrt's own.
+BOOT_CREATED = 0xA1C44E00
 SYSTEM_FOLDER = "System Folder"
 SYSTEM_FILE = "System"
 kIsInvisible = 0x4000
@@ -170,7 +174,8 @@ def _host_date(t: float) -> int:
     return (calendar.timegm(time.localtime(t)) + MAC_1904) & 0xFFFFFFFF
 
 
-def _key(name: str) -> str:
+def name_key(name: str) -> str:
+    """A name as the catalog compares names: case doesn't count."""
     return name.lower()
 
 
@@ -234,7 +239,7 @@ class Dir(Node):
         return self._children
 
     def child(self, name: str) -> Node | None:
-        return self.children.get(_key(name))
+        return self.children.get(name_key(name))
 
     def items(self) -> list[Node]:
         """Files and directories in catalog order, as indexed calls count them."""
@@ -309,6 +314,7 @@ class Volume:
         self.store = store
         self.locked = False
         self.floppy = store.floppy
+        self.cdrom = store.cdrom
         self.crdate = self.mddate = now()
         self.bkdate = 0
         self.finder_info = bytearray(32)    # the first long is the blessed folder's ID
@@ -321,10 +327,33 @@ class Volume:
         self.root.cnid = ROOT
         self.nodes: dict[int, Node] = {ROOT: self.root}
         self.file_ids: set[int] = set()     # the files PBCreateFileIDRef has given IDs
+        self.changes = 0                    # entries added, taken out and renamed
         self.top = Dir("")                  # directory 1, whose one entry is the root
         self.top.volume = self
         self.top.cnid = ROOT_PARENT
-        self.top._children[_key(name)] = self.root
+        self.top._children[name_key(name)] = self.root
+
+    def attributes(self) -> int:
+        """vcbAtrb and ioVAtrb: bit 15 "Set if the volume is locked by
+        software" (PBSetVInfo sets it), bit 7 "Set if the volume is locked
+        by hardware" (Inside Macintosh: Files, "Volume Control Blocks"),
+        as a CD-ROM's is (Technical Note FL 530, "File Manager Volume
+        Handling Q&As")."""
+        return (0x8000 if self.locked else 0) | (0x0080 if self.cdrom else 0)
+
+    @property
+    def lock_error(self) -> int:
+        """What a change to it says, or 0 if it can be changed: wPrErr if
+        it's locked by hardware, as a CD-ROM is, vLckdErr if by software."""
+        return wPrErr if self.cdrom else vLckdErr if self.locked else 0
+
+    def allocation(self) -> tuple[int, int, int]:
+        """Its allocation blocks, their size and how many of them are free,
+        for its VCB and PBHGetVInfo.  A CD's are the ones its MDB has, since
+        nothing can be written to one (Over the Reich looks for its CD by
+        its size and its having no blocks free).  Every other volume says
+        the same: VOLUME_BLOCKS of BLOCK bytes, FREE_BLOCKS of them free."""
+        return self.store.allocation or (VOLUME_BLOCKS, BLOCK, FREE_BLOCKS)
 
     @property
     def driver(self) -> int:
@@ -354,15 +383,17 @@ class Volume:
             node.cnid = self.next_cnid
             self.next_cnid += 1
         self.nodes[node.cnid] = node
-        parent._children[_key(node.name)] = node
+        parent._children[name_key(node.name)] = node
         parent._sorted = None
+        self.changes += 1
         return node
 
     def unlink(self, node: Node) -> None:
         parent = node.parent
-        parent._children.pop(_key(node.name), None)
+        parent._children.pop(name_key(node.name), None)
         parent._sorted = None
         node.parent = None
+        self.changes += 1
 
     def forget(self, node: Node) -> None:
         """A file or an empty directory deleted."""
@@ -370,17 +401,30 @@ class Volume:
         self.nodes.pop(node.cnid, None)
 
     def rename_node(self, node: Node, name: str) -> None:
+        self.changes += 1
         if node is self.root:
-            self.top._children.pop(_key(self.name), None)
+            self.top._children.pop(name_key(self.name), None)
             self.name = name
-            self.top._children[_key(name)] = node
+            self.top._children[name_key(name)] = node
             node.name = name
             return
         parent = node.parent
-        parent._children.pop(_key(node.name), None)
+        parent._children.pop(name_key(node.name), None)
         node.name = name
-        parent._children[_key(name)] = node
+        parent._children[name_key(name)] = node
         parent._sorted = None
+
+    def catalog(self) -> list[Node]:
+        """Every file and directory, the root among them, in the catalog's
+        order: by the parent directory's ID, then by name.  Every directory
+        of a host folder is looked in."""
+        nodes, dirs = [self.root], [self.root]
+        while dirs:
+            for node in dirs.pop().children.values():
+                nodes.append(node)
+                if node.is_dir:
+                    dirs.append(node)
+        return sorted(nodes, key=lambda n: (n.parid, _order(n.name)))
 
     def counts(self) -> tuple[int, int]:
         """Files and directories (other than the root) known so far."""
@@ -398,6 +442,8 @@ class Store:
     """In memory only.  The other stores say where else changes go."""
     source: object = None
     floppy = False
+    cdrom = False
+    allocation: tuple[int, int, int] | None = None     # its own blocks, their size and the free
 
     def mount(self, vol: Volume) -> None:
         pass
@@ -481,7 +527,10 @@ class ImageStore(Store):
 
     def __init__(self, volume: machfs.Volume):
         self.volume = self.source = volume
-        self.floppy = getattr(volume, "size", FLOPPY + 1) <= FLOPPY
+        self.cdrom = bool(getattr(volume, "cdrom", False))     # an image named as a CD's
+        self.floppy = not self.cdrom and getattr(volume, "size", FLOPPY + 1) <= FLOPPY
+        if self.cdrom:
+            self.allocation = getattr(volume, "allocation", None)
 
     def mount(self, vol: Volume) -> None:
         def walk(folder, d: Dir) -> None:
@@ -688,7 +737,7 @@ class HostStore(Store):
                 node.crdate = node.mddate = _host_date(p.stat().st_mtime)
             except (OSError, ValueError):
                 continue                            # unreadable or damaged; the rest are still here
-            if _key(node.name) not in d._children:
+            if name_key(node.name) not in d._children:
                 vol.add(d, node)
 
     def _file(self, where: Path, n: str) -> File:
@@ -897,11 +946,15 @@ class FileSystem:
         self.offline: list[Volume] = []     # unmounted, their disks in their drives still
         self.fcbs: dict[int, FCB] = {}
         self.wds: dict[int, WD] = {}
+        # What puts a volume's disk's driver in the Device Manager's unit
+        # table, once there is one (macrt.m68k.glue_devices)
+        self.add_driver: Callable[[Volume], None] | None = None
         size = FCB_START + FCB_LEN * MAX_FCBS
         self.fcb_buffer = system.sys_heap.new_ptr(size, clear=True)
         self.mem.w16(self.fcb_buffer, size)
         self.mem.w32(lowmem.FCBSPtr, self.fcb_buffer)
         self.boot = self.mount(BOOT_VOLUME, Store())
+        self.boot.crdate = BOOT_CREATED
         self.system_folder = self.make_dir(self.boot.root, SYSTEM_FOLDER)
         self.boot.blessed = self.system_folder.cnid
         # The System Folder's working directory, the system's own: what
@@ -928,6 +981,8 @@ class FileSystem:
             self._open_trees(vol)
             self._write_vcb(vol)
             self._add_drive(vol)
+            if self.add_driver is not None:
+                self.add_driver(vol)
             return vol
 
     def _open_trees(self, vol: Volume) -> None:
@@ -1060,7 +1115,8 @@ class FileSystem:
                 source, make = image, lambda: (image.name, ImageStore(image))
             elif isinstance(folder, HostFolder):
                 root = Path(folder.root.path).resolve()
-                source, make = root, lambda: (mac_name(root.name or "Host"), HostStore(root))
+                source, make = root, lambda: (self._unused_name(mac_name(root.name or "Host")),
+                                              HostStore(root))
             else:
                 source, make = folder, lambda: ("Memory", FolderStore(folder))
             for vol in self.volumes + self.offline:
@@ -1068,6 +1124,18 @@ class FileSystem:
                                                   vol.store.source == source):
                     return vol
             return self.mount(*make())
+
+    def _unused_name(self, base: str) -> str:
+        """A host folder's volume name: its folder's, or with a number after
+        it if a volume has that name already, since a full pathname finds
+        the first volume of the name it starts with (a program copied from
+        a CD to a folder named as the CD is, and run with the CD in)."""
+        taken = {name_key(v.name[:27]) for v in self.volumes + self.offline}
+        name, n = base, 1
+        while name_key(name[:27]) in taken:
+            n += 1
+            name = f"{base[:26 - len(str(n))]} {n}"
+        return name
 
     def volume(self, vref: int) -> Volume:
         """By volume reference number or drive number."""
@@ -1078,7 +1146,7 @@ class FileSystem:
 
     def volume_named(self, name: str) -> Volume:
         for vol in self.volumes:
-            if _key(vol.name) == _key(name):
+            if name_key(vol.name) == name_key(name):
                 return vol
         raise FileError(nsvErr)
 
@@ -1086,10 +1154,11 @@ class FileSystem:
         files, dirs = vol.counts()
         root_files = sum(1 for n in vol.root.items() if not n.is_dir)
         name = to_mac(vol.name)[:27]
+        blocks, size, free = vol.allocation()
         rec = struct.pack(
             ">HHHIIHHHHHIIHIH28sHhHhIIHHHIHIIIHII32s",
-            0, 0, HFS_SIGNATURE, vol.crdate, vol.mddate, 0x8000 if vol.locked else 0,
-            root_files, 0, 0, VOLUME_BLOCKS, BLOCK, BLOCK, 0, vol.next_cnid, FREE_BLOCKS,
+            0, 0, HFS_SIGNATURE, vol.crdate, vol.mddate, vol.attributes(),
+            root_files, 0, 0, blocks, size, size, 0, vol.next_cnid, free,
             bytes([len(name)]) + name.ljust(27, b"\0"), vol.drive, vol.driver, 0,
             vol.vref, 0, 0, 0, 0, 0, vol.bkdate, 0, 0, BLOCK, BLOCK,
             sum(1 for n in vol.root.items() if n.is_dir), files, dirs, bytes(vol.finder_info))
@@ -1220,7 +1289,8 @@ class FileSystem:
         return self._adopt(self.system_folder, f, SYSTEM_FILE)
 
     def in_system_folder(self, f: MacFile) -> File:
-        """A file of macrt's own in the System Folder, as the printer's is."""
+        """A file in the System Folder: macrt's own, as the printer's is, or
+        one from beside the System file.  Changes to it stay in memory."""
         return self._adopt(self.system_folder, f)
 
     def _adopt(self, where: Dir, f: MacFile, name: str | None = None) -> File:
@@ -1254,7 +1324,7 @@ class FileSystem:
             if not isinstance(node, File):
                 raise FileError(fnfErr)
             vol = node.volume
-            locked = node.locked or vol.locked
+            locked = node.locked or vol.lock_error
             writers = [p for p in self.paths(node) if p.rsrc == rsrc and p.write]
             shared = perm == fsRdWrShPerm
             if perm == fsRdPerm:
@@ -1263,7 +1333,7 @@ class FileSystem:
                 write = not locked and not writers
             elif perm in (fsWrPerm, fsRdWrPerm, fsRdWrShPerm):
                 if locked:
-                    raise FileError(vLckdErr if vol.locked else permErr)
+                    raise FileError(vol.lock_error or permErr)
                 if writers and not (shared and all(p.shared for p in writers)):
                     raise FileError(opWrErr, writers[0].refnum)
                 write = True
@@ -1405,6 +1475,15 @@ class FileManager:
     # the first implies) and a pathname, full or partial.
     # =====================================================================
     def _start(self, vref: int, dirid: int) -> tuple[Volume, Dir]:
+        """A volume reference number (or a drive number) means the volume's
+        root directory, and only 0 the default directory: Inside Macintosh:
+        Files has the volume's number name its root ("Identifying Files,
+        Directories, and Volumes"), says code using the number GetVol
+        gives after HSetVol "will access the root directory of the default
+        volume, not the actual default directory", and starts a partial
+        pathname given with one "in the root directory of the volume in
+        vRefNum" (Table 2-10).  Technical Note FL 22: "the root directory
+        of a volume is always referred to by a vRefNum"."""
         fs = self.fs
         if vref == 0:
             _, vol, base = self.default
@@ -1487,16 +1566,28 @@ class FileManager:
 
     def lookup_dir(self, vref: int, dirid: int, name: str | None) -> Dir:
         """A directory, as PBHSetVol and PBOpenWD name one; a bare name
-        that isn't one in the directory may be a volume's."""
+        that isn't one in the directory may be a volume's, as SetVol's
+        volName is (Inside Macintosh: Files).  That holds where the name
+        is a file's there too: Solitaire Antics gives SetVol back the
+        name GetVol gave it, and its application, in the default
+        directory, has that name.  If no volume has it either, it's the
+        directory that isn't there: Kid Works 2 opens a working directory
+        for its "KW Users" folder, and makes it when that says fnfErr."""
         try:
             node = self.lookup(vref, dirid, name)
+            err = None if isinstance(node, Dir) else FileError(dirNFErr)
         except FileError as e:
-            if name and ":" not in name and e.code == fnfErr:
+            if e.code != fnfErr:
+                raise
+            err = e
+        if err is None:
+            return node
+        if name and ":" not in name:
+            try:
                 return self.fs.volume_named(name).root
-            raise
-        if not isinstance(node, Dir):
-            raise FileError(dirNFErr)
-        return node
+            except FileError:
+                pass
+        raise err from None
 
     def volume_for(self, vref: int, name: str | None = None) -> Volume:
         """The volume a volume-level call means: by name if it has one
@@ -1602,8 +1693,8 @@ class FileManager:
         return self.fs.open_fork(self.lookup_file(vref, dirid, name, True), rsrc, perm, self)
 
     def _writable(self, vol: Volume) -> None:
-        if vol.locked:
-            raise FileError(vLckdErr)
+        if vol.lock_error:
+            raise FileError(vol.lock_error)
 
     def create(self, vref: int, dirid: int, name: str | None, directory: bool = False) -> Node:
         fs = self.fs
@@ -1738,6 +1829,7 @@ class FileManager:
         with fs.lock:
             if a.volume is not b.volume:
                 raise FileError(diffVolErr)
+            self._writable(a.volume)
             a.forks(), b.forks()
             a._forks, b._forks = b._forks, a._forks
             a.mddate, b.mddate = b.mddate, a.mddate

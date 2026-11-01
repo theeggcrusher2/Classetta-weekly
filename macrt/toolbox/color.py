@@ -85,6 +85,33 @@ def standard_table(ct_id: int) -> bytes | None:
     return None
 
 
+def highlight_table(ct_id: int, hilite: tuple[int, int, int]) -> bytes | None:
+    """GetCTable's 66, 68 and 72 (64 + depth), the standard colours with the
+    highlight colour added (Inside Macintosh: Imaging With QuickDraw's
+    GetCTable; Advanced Color Imaging's default colour tables): of 2 bits,
+    white, 50% grey, the highlight colour and black; of 4 and 8, the
+    standard colours, with the one closest to the highlight colour, between
+    white and black, averaged with it if it's more than $3000 off in any
+    component.  Which is closest is macrt's own: the one whose furthest-off
+    component is nearest.  None for any other ID."""
+    if ct_id == 66:
+        return color_table([WHITE, (0x7FFF,) * 3, hilite, BLACK], ct_id)
+    if ct_id not in (68, 72):
+        return None
+    data = bytearray(standard_table(ct_id - 64))
+    struct.pack_into(">l", data, 0, ct_id)
+    count = struct.unpack_from(">h", data, 6)[0] + 1
+    colors = [struct.unpack_from(">HHH", data, 10 + 8 * i) for i in range(count)]
+
+    def off(i: int) -> int:
+        return max(abs(a - b) for a, b in zip(colors[i], hilite))
+    near = min(range(1, count - 1), key=off)
+    if off(near) > 0x3000:
+        struct.pack_into(">HHH", data, 10 + 8 * near,
+                         *((a + b) // 2 for a, b in zip(colors[near], hilite)))
+    return bytes(data)
+
+
 def _standard_8bit() -> list[int]:
     """The Mac's standard 256 colours, as 0xAARRGGBB: a 6x6x6 cube from
     white, then ramps of red, green, blue and grey without the cube's
