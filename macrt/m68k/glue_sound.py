@@ -5,7 +5,9 @@ SysBeep is the Toolbox's, ErrorSound the Dialog Manager's.  Sound
 compressed with MACE expands to silence.
 
 The Sound Input Manager's (Inside Macintosh: Sound) find no device to
-record from, as on a Mac Plus or a Mac II, which have none.
+record from, as on a Mac Plus or a Mac II, which have none, and no driver
+signs in as one; its routines that build an 'snd ' resource's or an AIFF
+file's header for sound to go after work.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ unitTypeSeconds = 0
 SCSTATUS_SIZE = 24
 SMSTATUS_SIZE = 6
 sysBeepDisable, sysBeepEnable = 0, 1
-siNoSoundInHardware, siBadSoundInDevice = -220, -221
+siNoSoundInHardware, siBadSoundInDevice, siBadRefNum = -220, -221, -229
 # NumVersions: 2.0, the Sound Manager of System 6.0.7 and System 7; and
 # 3.0, which every System 7.5 has (Apple's Technical Q&A QTPC 03) where
 # there is an Apple Sound Chip, not on a Mac Plus (Inside Macintosh: Sound)
@@ -144,17 +146,21 @@ def SndStartFilePlay(t, chan, f_ref_num, res_num, buffer_size, the_buffer, selec
 
 def _resource_sound(t, res_num: int) -> tuple[bytes, float] | int:
     """The sampled sound of the 'snd ' resource res_num, and its samples a
-    second; silent if it's compressed."""
-    h = t.process.resources.GetResource("snd ", res_num)
-    at = t.mem.r32(h) & ADDRESS_MASK if h else 0
-    if not at:
+    second; silent if it's compressed.  It's read from its file, or its
+    handle if it's in memory, with no handle made for it: a play from disk
+    leaves the heap as it was.  OutNumbered! CD plays a 926K one in a
+    heap of about 2M, and needs the room for the 'ASEQ' resources it
+    loads next."""
+    data = t.process.resources.peek("snd ", res_num)
+    if data is None:
         return sm.resProblem
-    parsed = sm.parse_snd(t.tb.contents(h))
+    parsed = sm.parse_snd(data)
     if parsed is None:
         return sm.badFormat
     for cmd, _, p2 in parsed[2]:
         if cmd & ~sm.dataPointerFlag in (sm.bufferCmd, sm.soundCmd):
-            sound = sm.read_header(t.mem, at + p2 if cmd & sm.dataPointerFlag else p2)
+            sound = sm.read_header(sm.InData(data), p2) if cmd & sm.dataPointerFlag else \
+                sm.read_header(t.mem, p2)
             if sound is None:
                 return b"", sm.MAC_RATE
             if not sound[1]:
@@ -307,6 +313,31 @@ def GetSoundPreference(t, kind, name, settings):
     return noErr
 
 
+@trap
+def GetSoundHeaderOffset(t, snd, offset):
+    """Where in an 'snd ' resource its sound header is: the one its first
+    soundCmd or bufferCmd with dataPointerFlag points to (Inside
+    Macintosh: Sound, the Sound Manager)."""
+    heap = _settings_heap(t, snd)
+    parsed = sm.parse_snd(t.tb.contents(snd)) if heap is not None and heap.deref(snd) else None
+    for cmd, _, p2 in parsed[2] if parsed is not None else ():
+        if cmd in (sm.dataPointerFlag | sm.soundCmd, sm.dataPointerFlag | sm.bufferCmd):
+            t.mem.w32(offset & ADDRESS_MASK, p2)
+            return noErr
+    return sm.badFormat
+
+
+@trap
+def UnsignedFixedMulDiv(t, value, multiplier, divisor):
+    """value times multiplier, divided by divisor, all unsigned Fixed
+    numbers, as the interfaces name them: for the Fixed scale cancels, the
+    product's bits over the divisor's.  macrt's own: a result too big, or
+    dividing by 0, is the biggest there is."""
+    if not divisor:
+        return 0xFFFFFFFF
+    return min(value * multiplier // divisor, 0xFFFFFFFF)
+
+
 # =========================================================================
 # MACE: sound compressed 3:1 and 6:1
 # =========================================================================
@@ -348,6 +379,27 @@ def SPBOpenDevice(t, name, permission, ref):
 
 
 @trap
+def SPBCloseDevice(t, ref):
+    return siBadRefNum
+
+
+def _no_device(name: str):
+    """One of the routines that act on an open device, or sign one in or
+    out: there's none."""
+    def impl(t, *args) -> int:
+        return siBadSoundInDevice
+    impl.__name__ = name
+    return impl
+
+
+for _name in ("SPBRecord", "SPBRecordToFile", "SPBPauseRecording", "SPBResumeRecording",
+              "SPBStopRecording", "SPBGetRecordingStatus", "SPBGetDeviceInfo",
+              "SPBSetDeviceInfo", "SPBMillisecondsToBytes", "SPBBytesToMilliseconds",
+              "SPBSignInDevice", "SPBSignOutDevice"):
+    trap(_no_device(_name))
+
+
+@trap
 def SndRecord(t, filter_proc, corner, quality, snd):
     return siNoSoundInHardware
 
@@ -355,3 +407,94 @@ def SndRecord(t, filter_proc, corner, quality, snd):
 @trap
 def SndRecordToFile(t, filter_proc, corner, quality, refnum):
     return siNoSoundInHardware
+
+
+# Building headers for recorded sound (Inside Macintosh: Sound, the Sound
+# Input Manager): the compressions macrt knows, each packet's bytes
+MACE_PACKETS = {b"MAC3": 2, b"MAC6": 1}
+MACE_IDS = {b"MAC3": 3, b"MAC6": 4}                 # threeToOne, sixToOne
+MACE_NAMES = {b"MAC3": b"MACE 3-to-1", b"MAC6": b"MACE 6-to-1"}
+stdSH, cmpSH = 0x00, 0xFE
+SND_PREFIX = 20                                     # a format 1 'snd ' up to its header
+AIFCVersion1 = 0xA2805140
+
+
+def _frames(channels: int, size: int, kind: bytes, length: int) -> int | None:
+    """How many sample frames length bytes of sound make, each a sample
+    or, compressed, a packet per channel; None for a compression macrt
+    doesn't know (it has only MACE's)."""
+    if kind == b"NONE":
+        each = max((size + 7) // 8, 1)
+    elif kind in MACE_PACKETS:
+        each = MACE_PACKETS[kind]
+    else:
+        return None
+    return length // (each * max(channels, 1))
+
+
+def _extended(rate: int) -> bytes:
+    """An unsigned Fixed sample rate as an 80-bit extended, exactly."""
+    if not rate:
+        return bytes(10)
+    n = rate.bit_length()
+    return struct.pack(">HQ", 16383 + n - 17, rate << (64 - n))
+
+
+@trap
+def SetupSndHeader(t, snd, channels, rate, size, compression, base, length, header_len):
+    """A format 1 'snd ' resource's start, in the handle, for the sound to
+    go after: the sampled synthesizer, a bufferCmd and a sound header,
+    standard for one channel of 8-bit samples, extended for others, and
+    compressed for MACE.  macrt's own: paramErr for no handle or one too
+    small for the header."""
+    kind = struct.pack(">I", compression & 0xFFFFFFFF)
+    rate &= 0xFFFFFFFF
+    length &= 0xFFFFFFFF
+    frames = _frames(channels, size, kind, length)
+    if frames is None:
+        return sm.siInvalidCompression
+    data = struct.pack(">hhhIhHHI", 1, 1, sm.sampledSynth, 0, 1,
+                       sm.dataPointerFlag | sm.bufferCmd, 0, SND_PREFIX)
+    common = struct.pack(">IiIIIBB", 0, channels, rate, 0, 0, 0, base & 0xFF)
+    if kind == b"NONE" and channels == 1 and size == 8:
+        data += struct.pack(">IIIIIBB", 0, length, rate, 0, 0, stdSH, base & 0xFF)
+    elif kind == b"NONE":
+        data += common[:20] + bytes([sm.extSH]) + common[21:] + struct.pack(
+            ">I10sIIIhhIII", frames, _extended(rate), 0, 0, 0, size, 0, 0, 0, 0)
+    else:
+        data += common[:20] + bytes([cmpSH]) + common[21:] + struct.pack(
+            ">I10sI4sIIIhhhh", frames, _extended(rate), 0, kind, 0, 0, 0,
+            MACE_IDS[kind], 8 * MACE_PACKETS[kind], 0, size)
+    heap = _settings_heap(t, snd)
+    if heap is None or not heap.deref(snd) or heap.handle_size(snd) < len(data):
+        return paramErr
+    t.mem.write(heap.deref(snd), data)
+    t.mem.w16(header_len & ADDRESS_MASK, len(data))
+    return noErr
+
+
+@trap
+def SetupAIFFHeader(t, refnum, channels, rate, size, compression, length, frames):
+    """An AIFF file's chunks, or for compressed sound an AIFF-C file's,
+    up to the sound's, written at the file's mark: the sound goes after.
+    Given no number of frames, it's worked out from the bytes."""
+    kind = struct.pack(">I", compression & 0xFFFFFFFF)
+    length &= 0xFFFFFFFF
+    counted = _frames(channels, size, kind, length)
+    if counted is None:
+        return sm.siInvalidCompression
+    comm = struct.pack(">hIh", channels, frames & 0xFFFFFFFF or counted, size) \
+        + _extended(rate & 0xFFFFFFFF)
+    form = b"AIFF"
+    if kind != b"NONE":
+        name = bytes([len(MACE_NAMES[kind])]) + MACE_NAMES[kind]
+        comm += kind + name + bytes(len(name) & 1)
+        form = b"AIFC" + b"FVER" + struct.pack(">II", 4, AIFCVersion1)
+    chunks = form + b"COMM" + struct.pack(">I", len(comm)) + comm \
+        + b"SSND" + struct.pack(">III", 8 + length, 0, 0)
+    head = b"FORM" + struct.pack(">I", (len(chunks) + length + (length & 1)) & 0xFFFFFFFF)
+    try:
+        t.process.files.write(refnum, head + chunks)
+    except FileError as e:
+        return e.code
+    return noErr

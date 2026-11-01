@@ -58,7 +58,9 @@ EXTRA_FUNCTIONS = {
     "Chain": (0xA9F3, None, None, "", "e", (("A0", "p"),), "D0", ""),
     # Its parameter block's in A0 (IM II-29).
     "InitZone": (0xA019, None, None, "", "", (("A0", "p"),), None, "ReturnMemErr<D0>"),
-    "PostEvent": (0xA02F, None, None, "", "e", (("A0", "h"), ("D0", "l")), "D0", ""),
+    # PPostEvent is it with bit 8 set: the queue entry's address in A0.
+    "PostEvent": (0xA02F, None, None, "", "e", (("A0", "h"), ("D0", "l"), ("TrapBit<0x100>", "b")),
+                  "D0", ""),
     "Unimplemented": (0xA89F, None, None, "", "", (), None, ""),
     # The Start Manager's, a DefVideoRec or DefStartRec in A0 (Inside
     # Macintosh V).
@@ -68,6 +70,12 @@ EXTRA_FUNCTIONS = {
     # The routine's selector in D0, its SpBlock in A0 (Inside Macintosh V,
     # The Slot Manager).
     "SlotManager": (0xA06E, None, None, "", "e", (("A0", "p"), ("D0", "l")), "D0", ""),
+    # The Vertical Retrace Manager's, theSlot in D0 and its result in D0
+    # (Inside Macintosh: Processes).
+    "AttachVBL": (0xA071, None, None, "", "e", (("D0", "h"),), "D0", ""),
+    # The Deferred Task Manager's, the task in A0 and its result in D0
+    # (Inside Macintosh: Processes).
+    "DTInstall": (0xA082, None, None, "", "e", (("A0", "p"),), "D0", ""),
     "SetDefaultStartup": (0xA07E, None, None, "", "", (("A0", "p"),), None, ""),
     # The 64K ROM's, gone from later interfaces (IM I-121).
     "AddReference": (0xA9AC, None, None, "php", "", (), None, ""),
@@ -139,7 +147,7 @@ EXTRA_FUNCTIONS = {
 EXTRA_DISPATCHERS = {"MenuDispatch": (0xA825, "D0W"), "SCSIDispatch": (0xA815, "StackW")}
 STD_FILTER_SELECTOR = 0x067F
 EXTRA_NAMES = {0xA02F: "PostEvent", 0xA89F: "Unimplemented", 0xA9F2: "Launch",
-               0xA9EB: "FP68K", 0xA9EC: "Elems68K"}
+               0xA9EB: "FP68K", 0xA9EC: "Elems68K", 0xABF2: "ThreadDispatch"}
 # Inside Macintosh's names for routines the interfaces name otherwise.
 RENAMED = {"ROMlib_Fpstr2dec": "PStr2Dec", "ROMlib_Fcstr2dec": "CStr2Dec",
            "ROMlib_Fdec2str": "Dec2Str", "IsMetric": "IUMetric",

@@ -15,12 +15,14 @@ from ..macfile import MacFile
 from ..memory import ADDRESS_MASK, from_mac
 from ..process import Process, size_resource
 from ..toolbox import lowmem, script
+from ..toolbox.constants import activateEvt, event_mask, kHighLevelEvent, osEvt, updateEvt
 from ..toolbox.events import EventRecord, ProcessKilled, tick_count
 from ..toolbox.files import File, FileError
 from ..toolbox.gdevice import VIDEO_SLOT
-from ..toolbox.memmgr import MIN_BLOCK, ZONE_HEADER, memWZErr, nilHandleErr, noErr
-from ..toolbox.system import DEFAULT_PARTITION, DEFAULT_STACK, RAM_SIZE
-from . import decompressors, dispatch, glue_components, glue_desk, glue_sony, segload, timemgr
+from ..toolbox.memmgr import GZ_PROC, MIN_BLOCK, ZONE_HEADER, memWZErr, nilHandleErr, noErr
+from ..toolbox.system import DEFAULT_PARTITION, RAM_SIZE
+from . import (decompressors, dispatch, glue_components, glue_desk, glue_sony, glue_threads,
+               segload, timemgr)
 from .dispatch import raw, trap
 from .glue_common import _heap
 
@@ -74,7 +76,7 @@ def NewPtr(t, size, sys, clear):
     # works out its offscreen buffer's size in 16 bits, and on a 640-pixel
     # screen gets NIL back and gives up, where 0 bytes it would draw over.
     heap = _zone(t, sys)
-    return _done(t, heap, heap.new_ptr(size & 0xFFFFFFFF, clear))
+    return _done(t, heap, heap.new_ptr(size & 0xFFFFFFFF, clear, low=True))
 
 
 @trap
@@ -230,7 +232,8 @@ def InitZone(t, pb):
     if limit - start < ZONE_HEADER + MIN_BLOCK + 8 + 4 * masters:   # no room for anything
         t.set_mem_err(memFullErr)
         return
-    t.system.init_zone(start, limit, masters, grow_zone, t.process.partition)
+    heap = t.system.init_zone(start, limit, masters, grow_zone, t.process.partition)
+    heap.grow_zone = t.call_grow_zone
     t.process.world.w32(lowmem.TheZone, start)
     t.set_mem_err(noErr)
 
@@ -242,21 +245,30 @@ def InitApplZone(t):
 
 @trap
 def SetApplLimit(t, p):
-    """How far the application heap may grow.  Below where it already
-    ends is too low (memFullErr), though ApplLimit still says what was
-    asked for.  Past the stack's base is past the partition, and the
-    heap stops where it began, the default stack below the base: grown to the
-    base, the next segment loaded lands on the stack in use (Macify 2.7
-    asks for 128K past ApplZone in its 75K partition, then MaxApplZone)."""
-    proc, p = t.process, p & ADDRESS_MASK
+    """How far the application heap may grow.  It "enforces a minimum
+    stack size equal to DefltStack" (Inside Macintosh: Memory errata,
+    "Addendum to Description of SetApplLimit"), so a limit nearer
+    CurStackBase than that, or past it, becomes the one launch gives, the
+    long word at or below DefltStack under CurStackBase.  Grown past that,
+    the heap takes the stack in use (Macify 2.7 asks for 128K past
+    ApplZone in its 75K partition, Bumptz Science Carnival for its stack
+    pointer, before MaxApplZone).  Below where the heap already ends is
+    too low (memFullErr), though ApplLimit still says what was asked for."""
+    proc = t.process
+    p = min(p & ADDRESS_MASK, (proc.partition.stack_base - t.mem.r32(lowmem.DefltStack)) & ~3)
     proc.world.w32(lowmem.ApplLimit, p)
-    stack_base = proc.partition.stack_base
-    proc.heap.set_limit(p if p <= stack_base else stack_base - DEFAULT_STACK)
+    proc.heap.set_limit(p)
     t.set_mem_err(noErr if p >= proc.heap.end else memFullErr)
 
 
 @trap
 def SetGrowZone(t, p):
+    """The current zone's grow-zone function, which the Memory Manager calls
+    when it can make room for a block no other way (Inside Macintosh:
+    Memory, "MyGrowZone")."""
+    heap = _zone(t, False)
+    t.mem.w32(heap.start + GZ_PROC, p)
+    heap.grow_zone = t.call_grow_zone
     t.set_mem_err(noErr)
 
 
@@ -344,13 +356,19 @@ def ReserveMem(t, size, sys):
 
 @trap
 def PurgeSpace(t, sys):
-    heap = _zone(t, sys)
-    return None, heap.free_bytes(), heap.max_block()     # D0 total, A0 contiguous
+    """What purging the zone's unlocked purgeable blocks would leave free,
+    in all and in one piece, with nothing purged (Inside Macintosh IV,
+    Memory Manager).  HyperCard 1.2 fills its heap with purgeable blocks,
+    then asks this whether it has room to go on."""
+    total, contig = _zone(t, sys).purge_space()
+    return None, total, contig      # D0 total, A0 contiguous
 
 
 @trap
 def StackSpace(t):
-    return max(t.cpu.sp - t.process.heap.end, 0)
+    """In a Thread Manager thread, what's left of its own stack."""
+    space = glue_threads.stack_space(t)
+    return max(t.cpu.sp - t.process.heap.end, 0) if space is None else space
 
 
 @trap
@@ -467,6 +485,7 @@ QD32TRAP = 0xAB03
 # way: NetTrek asks whether SlotVInstall is there, and if it is, calls
 # GetVideoDefault for the slot to give it.
 SLOT_TRAPS = {0xA06E, 0xA06F, 0xA070,           # SlotManager, SlotVInstall, SlotVRemove,
+              0xA071,                           # AttachVBL
               0xA080, 0xA081}                   # Get/SetVideoDefault
 # Nor has macrt's Plus the ADB Manager, which Inside Macintosh V puts in
 # the 256K ROM: CountADBs, GetIndADB, GetADBInfo, SetADBInfo.
@@ -496,7 +515,12 @@ def trap_address(t, key: int) -> int:
 
 @trap
 def GetTrapAddress(t, num, new, toolbox):
-    return trap_address(t, _trap_key(num, new, toolbox))
+    key = _trap_key(num, new, toolbox)
+    addr = trap_address(t, key)
+    if (key != UNIMPLEMENTED and key not in t.patches
+            and addr == t.machine.stub_for(UNIMPLEMENTED)):
+        t.asked_missing(dispatch.trap_name(key))
+    return addr
 
 
 @trap
@@ -532,12 +556,14 @@ def gestalt_table(t) -> dict[int, int]:
         "vers": 1,                  # Gestalt's own version
         "sysv": t.system.version,
         "sysa": 1,                  # 68k
-        "proc": model.cpu + 1,      # 1 a 68000, 3 a 68020
-        "fpu ": int(model.fpu),     # 1 a 68881
+        "proc": model.cpu + 1,      # 1 a 68000, 3 a 68020, 4 a 68030
+        "fpu ": model.fpu,          # 1 a 68881, 2 a 68882
         "mmu ": 0,
-        # 32-Bit QuickDraw 1.2, or the original; its features: colour, deep
-        # GWorlds and direct pixel maps
-        "qd  ": 0x220 if model.color else 0,
+        # gestalt32BitQD13, the System 7 version of Color QuickDraw (Inside
+        # Macintosh: Imaging With QuickDraw, Color QuickDraw), as macrt is
+        # a System 7; or the original.  Its features: colour, deep GWorlds
+        # and direct pixel maps
+        "qd  ": 0x230 if model.color else 0,
         "qdrw": 7 if model.color else 0,
         "mach": model.gestalt,
         "romv": model.rom,
@@ -547,8 +573,10 @@ def gestalt_table(t) -> dict[int, int]:
         "vm  ": 0,
         # the Sound Manager's: SndPlayDoubleBuffer (bit 10), and channels
         # played together (gestaltMultiChannels, bit 11), as Lucy's colour
-        # WorldBuilder games want; mono, no sound input
-        "snd ": 1 << 10 | 1 << 11,
+        # WorldBuilder games want; the Sound Input Manager's routines
+        # (gestaltSoundIOMgrPresent, bit 3), as Meteor Storm wants before
+        # it asks the Sound Manager's version; mono, no sound input device
+        "snd ": 1 << 3 | 1 << 10 | 1 << 11,
         # The system heap grows; Launch can return and takes an FSSpec;
         # temporary memory, tracked
         "os  ": 0x7F,
@@ -559,11 +587,15 @@ def gestalt_table(t) -> dict[int, int]:
         "stdf": 1,                  # gestaltStandardFile58: StandardGetFile and the rest
         "ditl": 1,                  # gestaltDITLExtPresent: AppendDITL, ShortenDITL, CountDITL
         "edtn": 1,                  # gestaltEditionMgrPresent
+        "nmgr": 1,                  # gestaltNotificationPresent: NMInstall and NMRemove
         "evnt": 1,                  # gestaltAppleEventsPresent
         "help": 1,                  # gestaltHelpMgrPresent
         "ppc ": 0x1000,             # initialised, but nothing comes or goes on a network
         "tmgr": 3,                  # gestaltExtendedTimeMgr: InsXTime
+        "thds": 1,                  # the Thread Manager (glue_threads)
         "scri": script.VERSION,
+        "scr#": 1,                  # gestaltScriptCount: the Roman script, the only one
+        "pop!": 1,                  # gestaltPopupPresent: CDEF 63 (popups)
         "cpnt": glue_components.VERSION,
         "kbd ": model.keyboard,     # 3 a Mac Plus's, 5 Apple Standard ADB
         "dbug": 0,
@@ -587,6 +619,10 @@ def Gestalt(t, selector):
         return err, value
     value = gestalt_table(t).get(selector)
     if value is None:
+        code = selector.to_bytes(4, "big")
+        t.asked_missing("Gestalt " + (f"'{code.decode('mac_roman')}'"
+                                      if all(32 <= b < 127 for b in code)
+                                      else f"${selector:08X}"))
         return gestaltUndefSelectorErr, 0
     return noErr, value
 
@@ -619,7 +655,7 @@ def SysEnvirons(t, version, p):
     model = t.system.model
     sys_vref = t.system.file_manager.get_vol()[1]     # the System Folder's working directory
     rec = struct.pack(">hhhhBBhhh", min(version, 2), model.environs, t.system.version,
-                      model.cpu + 1, model.fpu, model.color, model.keyboard, 0, sys_vref)
+                      model.cpu + 1, model.fpu > 0, model.color, model.keyboard, 0, sys_vref)
     t.mem.write(p, rec)
     return envVersTooBig if version > 2 else noErr
 
@@ -628,20 +664,54 @@ def SysEnvirons(t, version, p):
 # OS Event Manager
 # =========================================================================
 evtNotEnb = 1
+evType = 4
+# An EvQEl: qLink, qType, evtQWhat, evtQMessage, evtQWhen, evtQWhere, evtQModifiers
+EVQEL_SIZE = 22
 
 
 @trap
-def PostEvent(t, what, message):
-    where, mods = t.process.events.input_state()
-    if t.process.events.post(EventRecord(what, message & 0xFFFFFFFF, 0, where, mods)):
-        return noErr
-    return evtNotEnb                        # SysEvtMask leaves it out
+def PostEvent(t, what, message, ppost):
+    """PostEvent, and PPostEvent (bit 8), which gives the program the
+    event's queue entry in A0 (IM: Macintosh Toolbox Essentials, Event
+    Manager).  macrt's entry holds that event alone, its qLink NIL; what
+    the program changes in it before the event's got is what it gets."""
+    events = t.process.events
+    where, mods = events.input_state()
+    ev = EventRecord(what, message & 0xFFFFFFFF, 0, where, mods)
+    if not events.post(ev):
+        return evtNotEnb                    # SysEvtMask leaves it out
+    if ppost:
+        qel = _event_qel(t)
+        if qel:
+            t.system.event_qels[qel] = (events, ev)
+            t.mem.write(qel, struct.pack(">LhhLLhhH", 0, evType, ev.what, ev.message, ev.when,
+                                         ev.where.v, ev.where.h, ev.modifiers))
+            ev.qel = qel
+        t.cpu.set_a(0, qel)
+    return noErr
+
+
+def _event_qel(t) -> int:
+    """A queue entry in the system heap whose event has been got, or a new one."""
+    qels = t.system.event_qels
+    for qel, (events, ev) in qels.items():
+        if not events.queued(ev):
+            ev.qel = 0
+            return qel
+    return t.system.sys_heap.new_ptr(EVQEL_SIZE, clear=True)
+
+
+# These two read the Operating System event queue only: GetOSEvent "does
+# not return activate, update, operating-system, or high-level events"
+# (IM: Macintosh Toolbox Essentials, Event Manager, "Receiving Events").
+OS_EVENTS = 0xFFFF & ~(event_mask(activateEvt) | event_mask(updateEvt) | event_mask(osEvt) |
+                       event_mask(kHighLevelEvent))
 
 
 @trap
 def GetOSEvent(t, mask, p):
     glue_sony.put_back(t)
-    got, ev = t.process.events.get(mask & 0xFFFF, 0, lambda: None)
+    got, ev = t.process.events.get(mask & OS_EVENTS, 0, lambda: None)
     t.write_event(p, ev)
     return got
 
@@ -649,7 +719,7 @@ def GetOSEvent(t, mask, p):
 @trap
 def OSEventAvail(t, mask, p):
     glue_sony.put_back(t)
-    got, ev = t.process.events.peek(mask & 0xFFFF, lambda: None)
+    got, ev = t.process.events.peek(mask & OS_EVENTS, lambda: None)
     t.write_event(p, ev)
     return got
 
@@ -895,6 +965,19 @@ def VRemove(t, task):
     return Dequeue(t, task, lowmem.VBLQueue)
 
 
+# Deferred tasks: queued by an interrupt's tasks, to run once they're done
+# (Runner._deferred_tasks).  Each application has its own queue too.
+dtQType = 7
+
+
+@trap
+def DTInstall(t, task):
+    if t.mem.r16(task + QTYPE) != dtQType:
+        return vTypErr
+    Enqueue(t, task, lowmem.DTQueue)
+    return noErr
+
+
 @trap
 def SlotVInstall(t, task, slot):
     """For one video card's retrace; there's one screen, so the same."""
@@ -904,6 +987,18 @@ def SlotVInstall(t, task, slot):
 @trap
 def SlotVRemove(t, task, slot):
     return VRemove(t, task)
+
+
+slotNumErr = -360
+
+
+# AttachVBL makes theSlot the primary monitor's (Inside Macintosh:
+# Processes, Vertical Retrace Manager, Utility Routines).  The one screen
+# is the card in VIDEO_SLOT, so that's the slot it can be; any other is
+# slotNumErr.
+@trap
+def AttachVBL(t, slot):
+    return noErr if slot == VIDEO_SLOT else slotNumErr
 
 
 # The Start Manager's default video device, kept in parameter RAM (Inside

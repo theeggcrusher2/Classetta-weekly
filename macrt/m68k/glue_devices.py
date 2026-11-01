@@ -29,6 +29,20 @@ for hardware it hasn't got (UNLOADED_DRIVERS): opening one of those fails
 as if there were no such driver.  A program can also make a device
 control entry itself, with DrvrInstall, and open it by its driver's
 name.  The drivers an application opens or installs go when it quits.
+
+Of macrt's own drivers, two kinds have a device control entry in the
+table.  The screen's video driver, on a colour machine, has one as a slot
+card's driver has (Inside Macintosh V, the Device Manager): with the
+card's slot, its sResource's ID and its device base after dCtlMenu.
+Programs find it through the main GDevice's gdRefNum and take the slot
+from it for SlotVInstall (Powerball).  And a CD-ROM's driver has one, at
+the reference number its volume's drive gives, named as the Apple CD-ROM
+driver is, .AppleCD (Technical Note DV 22, "CD-ROM Driver Calls"): Lode
+Runner: The Legend Returns takes its volume's driver from its VCB's
+vcbDRefNum, looks it up with GetDCtlEntry and compares the name with
+that.  Each one's driver is a header with the driver's name, for
+programs that look for a driver by it, and the calls to it are macrt's
+own still, glue_video's and glue_files'.
 """
 
 from __future__ import annotations
@@ -37,13 +51,17 @@ from contextlib import contextmanager
 
 from ..memory import ADDRESS_MASK, from_mac
 from ..toolbox import lowmem
+from ..toolbox.gdevice import VIDEO_DRIVER, VIDEO_SLOT
 from ..toolbox.resources import UNWRITTEN
 from ..toolbox.system import UNLOADED_DRIVERS
 from .dispatch import raw
 
-UNITS = 48                      # the unit table's length, as from the Mac Plus's ROM on
+# The unit table's length: IM Devices' reserved unit numbers go up to 127,
+# 48 on being for slot and other drivers (Disk Copy's goes there).
+UNITS = 128
 FIRST_SPARE = 32                # where a driver goes whose own unit is taken
 LOW_DCES = 16                   # the DCEs made with the unit table, low in memory
+CD_DRIVER = b".AppleCD"         # a CD-ROM's driver's name (Technical Note DV 22)
 
 noErr = 0
 controlErr = -17
@@ -97,6 +115,9 @@ dCtlEMask = 36
 dCtlMenu = 38
 DCE_SIZE = 40
 dOpened, dRAMBased, drvrActive = 0x20, 0x40, 0x80
+# A slot device's goes on (Inside Macintosh V, the Device Manager)
+dCtlSlot, dCtlSlotId, dCtlDevBase = 40, 41, 42
+SLOT_DCE_SIZE = 52
 
 # The driver's header
 drvrFlags = 0
@@ -140,10 +161,59 @@ def init(machine) -> None:
     mem.w32(lowmem.UTableBase, table)
     mem.w16(lowmem.UnitNtryCnt, UNITS)
     mem.w32(lowmem.JIODone, machine.io_done)
+    machine.own_units = set()
+    if system.model.color:
+        _video_dce(machine)
+    files = system.files
+    files.add_driver = lambda vol: _disk_driver(machine, vol)
+    for vol in files.volumes + files.offline:
+        _disk_driver(machine, vol)
+
+
+def _own_dce(machine, refnum: int, name: bytes, size: int = DCE_SIZE) -> int:
+    """A device control entry in the table at refnum for one of macrt's
+    own drivers: open, for Control and Status calls, its driver a header
+    that has only its name.  Its address."""
+    mem, heap = machine.mem, machine.system.sys_heap
+    flags = dCtlEnable | dStatEnable
+    drvr = heap.new_ptr(drvrName + 2 + len(name) & ~1, clear=True)
+    mem.w16(drvr + drvrFlags, flags)
+    mem.w8(drvr + drvrName, len(name))
+    mem.write(drvr + drvrName + 1, name)
+    dh = heap.new_handle(size, clear=True)
+    heap.lock(dh)
+    dce = mem.r32(dh) & ADDRESS_MASK
+    mem.w32(dce + dCtlDriver, drvr)
+    mem.w16(dce + dCtlFlags, flags | dOpened)
+    mem.w16(dce + dCtlRefNum, refnum)
+    mem.w32((mem.r32(lowmem.UTableBase) & ADDRESS_MASK) + 4 * ~refnum, dh)
+    machine.own_units.add(~refnum)
+    return dce
+
+
+def _video_dce(machine) -> None:
+    """The video driver's device control entry, with the card's slot
+    fields as the Slot Manager has them (glue_slots)."""
+    from .glue_slots import VIDEO, VIDEO_NAME
+    mem = machine.mem
+    dce = _own_dce(machine, VIDEO_DRIVER, b"." + VIDEO_NAME, SLOT_DCE_SIZE)
+    mem.w8(dce + dCtlSlot, VIDEO_SLOT)
+    mem.w8(dce + dCtlSlotId, VIDEO)
+    mem.w32(dce + dCtlDevBase, machine.system.screen_bits.base)
+
+
+def _disk_driver(machine, vol) -> None:
+    """A CD-ROM's driver's device control entry, the first time a volume
+    on one is mounted; it stays when the volume goes."""
+    unit = ~vol.driver
+    table = machine.mem.r32(lowmem.UTableBase) & ADDRESS_MASK
+    if vol.cdrom and 0 <= unit < UNITS and not machine.mem.r32(table + 4 * unit):
+        _own_dce(machine, vol.driver, CD_DRIVER)
 
 
 def _dce(t, unit: int) -> int:
-    """The unit's DCE, 0 if it has none: for macrt's own drivers it hasn't."""
+    """The unit's DCE, 0 if it has none: for macrt's own drivers, but
+    the video driver and CD-ROMs', it hasn't."""
     m = t.mem
     table = m.r32(lowmem.UTableBase) & ADDRESS_MASK
     if not table or not 0 <= unit < m.r16(lowmem.UnitNtryCnt):
@@ -174,7 +244,8 @@ def call(t, w: int, built_in) -> bool:
     if n == 0:
         return _open(t, pb, w, built_in)
     dce = _dce_for(t, pb)
-    if not dce:
+    refnum = t.mem.r16s(pb + ioRefNum)
+    if not dce or refnum in built_in.values() or ~refnum in t.machine.own_units:
         return False
     if n == 1:
         _close(t, pb, w, dce)
@@ -303,6 +374,7 @@ def _remove(t, unit: int, code: bool = True) -> None:
     table = m.r32(lowmem.UTableBase) & ADDRESS_MASK
     with system.lock:
         t.machine.drivers.pop(unit, None)
+        t.machine.own_units.discard(unit)
         dh = m.r32(table + 4 * unit) & ADDRESS_MASK
         m.w32(table + 4 * unit, 0)
         if not dh:

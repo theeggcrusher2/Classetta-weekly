@@ -56,7 +56,8 @@ SndStartFilePlay plays an AIFF or AIFF-C file, or the sampled sound of
 a 'snd ' resource, on a channel (Inside Macintosh: Sound, "Playing From
 Disk"): the samples are read from the open file at once, not through
 the program's buffer, and played as a bufferCmd's are, all of them or
-an AudioSelection's seconds of them.  SndPauseFilePlay pauses and
+an AudioSelection's seconds of them.  A resource's are read from its
+file, or its handle if it's in memory, with no handle made for it.  SndPauseFilePlay pauses and
 resumes it, and SndStopFilePlay stops it, or waits for its end.
 SndChannelStatus reports its times.  However it ends, the program's
 completion routine is called with the channel.
@@ -83,7 +84,7 @@ from ..memory import ADDRESS_MASK, BusError
 from ..toolbox import sane
 from ..toolbox.files import paramErr
 from ..toolbox.memmgr import memFullErr, noErr
-from .sound import FRAME, SILENCE, SILENT_FRAME, fill, mix
+from .sound import FRAME, SILENCE, SILENT_FRAME, mix
 
 notEnoughHardware = -201
 badChannel = -205
@@ -277,10 +278,32 @@ def mono(raw: bytes, channels: int, width: int) -> bytes:
     return bytes(sum(raw[i:i + channels]) // channels for i in range(0, len(raw), channels))
 
 
+class InData:
+    """A resource's data, for read_header to read a sound header in it at
+    an offset, as it reads one in memory: one past its end isn't there."""
+
+    def __init__(self, data: bytes):
+        self.data = data
+
+    def read(self, at: int, n: int) -> bytes:
+        if not 0 <= at < len(self.data):
+            raise BusError(at)
+        return self.data[at:at + n]
+
+    def r8(self, at: int) -> int:
+        return self.read(at, 1)[0]
+
+    def r16(self, at: int) -> int:
+        return struct.unpack(">H", self.read(at, 2).ljust(2, b"\0"))[0]
+
+    def r32(self, at: int) -> int:
+        return struct.unpack(">I", self.read(at, 4).ljust(4, b"\0"))[0]
+
+
 def read_header(mem, at: int) -> tuple[bytes, int, tuple[int, int] | None, int] | None:
     """A sound header's samples (as offset binary bytes, one channel),
     rate, loop and base note; None for a compressed sound, or one that
-    isn't in memory."""
+    isn't in memory.  mem is guest memory, or an InData."""
     at &= ADDRESS_MASK
     try:
         ptr, length, rate, loop_start, loop_end = struct.unpack(">5I", mem.read(at, 20))
@@ -862,11 +885,11 @@ class SoundManager:
                 driver.switch.claim(self)
             if driver.active:
                 frames.append(driver.frame)
-            fill(self.mem, mix(frames))
+            self.machine.speaker.fill(mix(frames))
         elif self.active:
             self.active = False
             if not driver.active:
-                fill(self.mem, SILENT_FRAME)
+                self.machine.speaker.fill(SILENT_FRAME)
             driver.switch.release(self)
 
     def _frame(self, t, ch: Channel) -> bytes | None:

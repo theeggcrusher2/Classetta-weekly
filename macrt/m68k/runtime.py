@@ -51,13 +51,13 @@ from ..toolbox.types import Point, Rect
 from ..toolbox.windows import WindowRecord
 from . import cpu as m68k
 from . import decompressors, dispatch, timemgr, wdefs
-from .sound import ASC, ASC_BASE, SoundDriver, Speaker, gestaltHasASC, vSndEnb
+from .sound import ASC, ASC_BASE, ASC_SIZE, SoundDriver, Speaker, gestaltHasASC, vSndEnb
 from .sound_manager import SoundManager
 from .cpu import CPU
-from .cycles import RATE
+from .cycles import RATE, cycles
 from .hardware import (IWM, IWM_BASE, VIA, VIA_BASE, Clock, map_empty, map_test_rom, vBufA,
                        vBufB, vHeadSel)
-from .segload import Layout, SegmentLoader
+from .segload import Layout, SegmentLoader, has_powerpc_code
 
 if TYPE_CHECKING:
     from concurrent.futures import Future
@@ -87,6 +87,7 @@ SYSTEM_ERRORS = {
     28: "stack ran into heap",
 }
 VBL_ADDR, VBL_COUNT = 6, 10    # in a VBLTask record
+DT_ADDR, DT_PARM = 8, 12       # in a DeferredTask record
 SOUND_BUFFER = 0x300            # 370 words, rounded up as the Mac Plus's is
 FINDER_INFO_PARAM = 16          # the application parameter with the Finder information's handle
 USE_ASYNC = 2                   # a serial port's use type: the Serial Driver's, not AppleTalk's
@@ -106,6 +107,40 @@ appOpen = 0                     # the Finder information's message: open the doc
 # does under load, isn't the program doing something else.
 POLLS = frozenset({0xA971, 0xA972, 0xA973, 0xA974, 0xA975, 0xA976, 0xA977,
                    0xA030, 0xA031, 0xA9B4})
+# FlushEvents between them, as Runaround and Run call it between asking
+# EventAvail for a key, keeps it asking, but doesn't wait itself: what came
+# in while it waited there it might throw away.  So does KeyTranslate, as
+# Space Junkie calls it between GetKeys, which is the same each time, and
+# so do the calls that only say where things are or set the port, which
+# change nothing the program or anyone sees, as ArcMac calls GetPort and
+# SetPort between SystemTask, EventAvail and TickCount, and IAGO PtInRect
+# between Button and StillDown.  So do locking a handle and unlocking it
+# again, and priming a Time Manager task, which runs at the tick after it's
+# due (see timemgr) whether the program asks or waits: Opening Night locks
+# and unlocks the handles of its timers, primes a task for the next, and
+# asks TickCount, OSEventAvail and GetMouse until it runs.
+_KEYS = {name: key for key, name in dispatch.NAMES.items()}
+KEEPS_POLLING = frozenset({0xA032, 0xA9C3} | {_KEYS[name] for name in (
+    "GetPort", "SetPort", "PtInRect", "PtInRgn", "FrontWindow", "GlobalToLocal",
+    "LocalToGlobal", "StripAddress", "HGetState", "HLock", "HUnlock", "PrimeTime")})
+# The calls at whose end an application's own WDEFs shape and draw the
+# windows whose frames need it (wdefs.refresh): the Window and Dialog
+# Managers' that make, show, move, size, highlight or close windows, and
+# the Event Manager's that a program waits in, for what the host did to its
+# windows meanwhile, such as bringing another application forward.  Only
+# these, not the next trap whatever it is: Excel 2.2a's WDEF is p-code
+# that enters Excel's interpreter, and entered from within a BlockMove its
+# interpreter makes, it left the interpreter returning to a segment that
+# isn't there.
+FRAMES_AT = frozenset(_KEYS[name] for name in (
+    "NewWindow", "GetNewWindow", "NewCWindow", "GetNewCWindow", "CloseWindow",
+    "DisposeWindow", "SetWTitle", "SelectWindow", "HideWindow", "ShowWindow", "ShowHide",
+    "HiliteWindow", "BringToFront", "SendBehind", "MoveWindow", "DragWindow", "GrowWindow",
+    "SizeWindow", "ZoomWindow", "TrackBox", "TrackGoAway", "DrawGrowIcon", "PaintOne",
+    "PaintBehind", "DrawNew", "CalcVis", "CalcVisBehind", "SetWinColor",
+    "NewDialog", "GetNewDialog", "NewColorDialog", "CloseDialog", "DisposeDialog",
+    "ModalDialog", "DialogSelect", "Alert", "StopAlert", "NoteAlert", "CautionAlert",
+    "GetNextEvent", "WaitNextEvent", "EventAvail", "SystemTask"))
 SPIN_GAP = 0.0005               # seconds
 SPIN_BUDGET = 0.002
 
@@ -206,18 +241,27 @@ SWAP_FONT = bytes.fromhex(
     "588f"              # addq.l #4,sp
     "4ed0")             # jmp (a0)
 # How the Device Manager waits for a synchronous request a driver hasn't
-# finished, A0 its parameter block: until ioResult isn't 1 any more.
+# finished, A0 its parameter block: until ioResult isn't 1 any more.  Each
+# time round, the host waits for the next tick (Runner._wait_for_tick).
 WAIT_FOR_IO = bytes.fromhex(
     "4a680010"          # wait: tst.w ioResult(a0)
-    "6efa"              # bgt.s wait
-    "30280010"          # move.w ioResult(a0),d0
+    "6f04"              # ble.s done
+    "4afc"              # the next tick
+    "60f6"              # bra.s wait
+    "30280010"          # done: move.w ioResult(a0),d0
     "48c0"              # ext.l d0
     "4e75")             # rts
+WAIT_FOR_IO_TICK = 6
 
+# How the Sound Manager's callers wait for a channel: until the word at A0
+# isn't 1 any more, then on to A1.  The host waits for each tick too.
 SOUND_WAIT = bytes.fromhex(
     "4a50"              # wait: tst.w (a0)
-    "6efc"              # bgt.s wait
-    "4ed1")             # jmp (a1)
+    "6f04"              # ble.s done
+    "4afc"              # the next tick
+    "60f8"              # bra.s wait
+    "4ed1")             # done: jmp (a1)
+SOUND_WAIT_TICK = 4
 
 
 def init_dispatcher(at: int, dispatcher: int) -> bytes:
@@ -235,6 +279,7 @@ def init_dispatcher(at: int, dispatcher: int) -> bytes:
 MAX_LATE = 20           # ticks a retrace catches up on when the host was late
 MAX_RETRACES = 6        # and after a break (see _retrace_tasks); after a longer gap, one
 MAX_TIME_TASKS = 64     # Time Manager tasks run at one tick, at most
+MAX_DEFERRED_TASKS = 64     # deferred tasks run at one tick, at most
 INTERRUPT_REGISTERS = 32  # what an interrupt handler keeps on the stack: A0-A3 and D0-D3
 
 VECTOR_ERRORS = {m68k.BUS_ERROR: 1, m68k.ADDRESS_ERROR: 2, m68k.ILLEGAL: 3,
@@ -335,7 +380,12 @@ class Machine:
         if system.model.hardware >> gestaltHasASC & 1:
             self.asc = ASC()
             self.asc.map(self.cpu.uc)
-        self.speaker = Speaker(self.mem, self.via, system.sound, self.asc)
+        else:
+            # Where the chip is on a colour machine, reads 0 without one:
+            # Excel 1.5, where the ROM's version is below $0100, reads two
+            # words there and compares them with 'RA'.
+            map_empty(self.cpu.uc, ASC_BASE, ASC_BASE + ASC_SIZE)
+        self.speaker = Speaker(self.mem, self.via, system.sound, self.asc, self.cpu)
         self.cpu.sound_waiting = lambda: (self.sound.counting() or self.speaker.waiting
                                           or self.sound_manager.busy())
         self.cpu.watching = self._quiet_pages
@@ -398,7 +448,6 @@ class Machine:
         self.rte_stub = marks + 18
         self.bomb_stub = ROM_BASE + 16      # every exception vector, until replaced
         self.key_trans = ROM_BASE + 64      # Key2Trans, then Key1Trans 4 bytes on
-        self.wait_for_io = ROM_BASE + 116
         self.io_done = ROM_BASE + 130       # JIODone's: glue_devices does it
         self.cursor_vectors = ROM_BASE + 132
         self.data_marks = ROM_BASE + 184    # what begins and ends a sector's data field
@@ -414,12 +463,16 @@ class Machine:
         self.sony_routines = ROM_BASE + 422     # the disk driver's other routines, 2 bytes each
         self.level_1 = ROM_BASE + 434       # the VIA's interrupts' handler
         self.sound_task = ROM_BASE + 478    # the Sound Driver's VBL task's: an RTS
-        self.sound_wait = ROM_BASE + 480    # where the Sound Manager's callers wait
         self.address_marks = ROM_BASE + 486     # what begins and ends a sector's address field
         self.swap_font = ROM_BASE + 492     # JSwapFont's
         self.crsr_task = ROM_BASE + 512     # JCrsrTask's: the input globals do it
         self.load_trap = ROM_BASE + 514     # _LoadSeg's _Debugger, with LoadTrap set
         self.adb_service = ROM_BASE + 518   # the ADB devices' service routines: an RTS
+        self.sound_wait = ROM_BASE + 520    # where the Sound Manager's callers wait
+        self.wait_for_io = ROM_BASE + 530
+        self.thread_exit = ROM_BASE + 548   # where a Thread Manager thread's entry returns
+        # Where those wait for a tick
+        self.tick_waits = (self.sound_wait + SOUND_WAIT_TICK, self.wait_for_io + WAIT_FOR_IO_TICK)
         self.cpu.rom_interrupts = self.level_1
         self.cpu.no_handler = self.bomb_stub
         self.cpu.rom_level_1_routines = (self.level_1_routines,
@@ -445,6 +498,7 @@ class Machine:
         mem.w16(self.crsr_task, ILLEGAL_WORD)
         mem.write(self.load_trap, struct.pack(">HH", DEBUGGER, RTS))
         mem.w16(self.a_line, ILLEGAL_WORD)
+        mem.w16(self.thread_exit, ILLEGAL_WORD)
         mem.write(self.init_dispatcher, init_dispatcher(self.init_dispatcher, self.a_line))
         mem.write(self.cursor_vectors, CURSOR_VECTORS)
         mem.write(self.swap_font, SWAP_FONT)
@@ -518,6 +572,20 @@ class Machine:
         mem.w16(lowmem.HWCfgFlags, 0x1000 if model.fpu else 0)
         mem.w16(lowmem.ScrVRes, 72)
         mem.w16(lowmem.ScrHRes, 72)
+        # The initialization code determines these (Inside Macintosh:
+        # Operating System Utilities, Start Manager, "Global Timing
+        # Variables"): how many times a DBRA can be executed a millisecond,
+        # and the SCC and the SCSI chip accessed.  macrt's are how many
+        # times round a loop of a DBRA, and of a TST.B (A0) and a DBRA, the
+        # cycle model lets the core go a millisecond when --speed paces it.
+        # Unpaced, it goes round faster than a word counts, so they're the
+        # most a word holds as programs take it, signed: Sesame Street
+        # Letters draws every other row while TimeDBRA is 5004 or less.
+        dbra, tst = cycles(b"\x51\xC8", 0), cycles(b"\x4A\x10", 0)     # DBRA D0; TST.B (A0)
+        rate = self.cpu.rate
+        for at, took in ((lowmem.TimeDBRA, dbra), (lowmem.TimeSCCDB, tst + dbra),
+                         (lowmem.TimeSCSIDB, tst + dbra)):
+            mem.w16(at, min(0x7FFF, rate // 1000 // took) if rate else 0x7FFF)
         double, caret, thresh, rate, ap_font = 32, 32, 16, 4, 3     # ticks; Geneva
         volume = 7                                  # the VIA's, as it starts (hardware.VIA)
         mem.w32(lowmem.DoubleTime, double)
@@ -588,6 +656,7 @@ class Machine:
         glue_sony.set_up_vars(mem, sony)
         # Programs that load code call this before they run it.
         mem.w32(lowmem.jCacheFlush, self.stub_for(dispatch.trap_key(0xA0BD)))  # FlushCodeCache
+        mem.w32(lowmem.jDTInstall, self.stub_for(dispatch.trap_key(0xA082)))   # DTInstall
         glue_devices.init(self)
 
     # =====================================================================
@@ -696,13 +765,17 @@ class Runner:
         self.history: collections.deque = collections.deque(maxlen=16)
         self.reported: set[str] = set()
         self.unimplemented_calls: collections.Counter = collections.Counter()
+        # The traps it asked GetTrapAddress for, and the Gestalt selectors
+        # it asked about, that macrt hasn't: a program that looks before it
+        # calls takes another way without making an unimplemented call.
+        self.missing_asked: collections.Counter = collections.Counter()
         self.internal_error: str | None = None      # the traceback, if macrt failed running it
         self.temp_handles: set[int] = set()         # TempNewHandle's
         self.trace = False
         self.menu_rect = 0          # mbRect's answer while MenuSelect pulls a menu down
         self.retrace_tick = 0       # when its VBL tasks were last counted down
         self.catch_up = 1           # the most ticks the next count makes up for
-        self.null_tick = -1         # when GetNextEvent last had nothing for it
+        self.null_tick = -1         # when GetNextEvent or WaitNextEvent last had nothing
         self.updated = (None, -1, 0)    # the update event it was last given: window, when, begun
         self.cpu_time = time.monotonic  # its thread's processor time, once it runs
         self.polled = -SPIN_GAP     # when the last of POLLS returned, if no other trap since
@@ -712,7 +785,9 @@ class Runner:
         self.ticks_failed = False   # a tick while it waited went wrong
         self.time_tasks = timemgr.TimeTasks()
         self.in_wdef = 0            # how deep in calls to its own WDEFs
+        self.thread_id: int | None = None   # its thread's, once it runs
         process.events.enabled = lambda: self.mem.r16(lowmem.SysEvtMask)
+        process.heap.grow_zone = self.call_grow_zone
 
     # =====================================================================
     # Life cycle
@@ -723,6 +798,7 @@ class Runner:
         if toolbox is not None:
             toolbox.wdefs = wdefs.WindowDefinitions(self)
         self.cpu_time = thread_clock()
+        self.thread_id = threading.get_ident()
         self.machine.acquire(self)
         self.holding = True
         try:
@@ -745,6 +821,7 @@ class Runner:
             where = (f" in {dispatch.trap_name(self.history[-1][0])}" if self.history else "")
             self._report(SystemError68k(0, f"{type(e).__name__}{where}: {e}"))
         finally:
+            glue_threads.forget(self)
             glue_process.free_temp_memory(self)
             glue_devices.forget(self)
             glue_components.forget(self)
@@ -773,6 +850,10 @@ class Runner:
         cpu.sp = part.stack_base
         cpu.push32(self.machine.exit_stub)
         entry = self.segments.install()
+        app = self.process.app
+        if app is not None and has_powerpc_code(app):
+            log.info("%s also has PowerPC code (a 'cfrg' resource); macrt runs its 68k code",
+                     self.process.name)
         documents = self._documents()
         info = self.process.finder_info
         if info is None:
@@ -787,6 +868,8 @@ class Runner:
         glue_aevents.launched(self, documents)
         self.process.resources.load_hook = (
             lambda m, e, force: glue_resources.load_resource(self, m, e, force))
+        self.process.resources.get_hook = (
+            lambda rtype, rid, one: glue_resources.get_resource(self, rtype, rid, one))
         self.process.resources.decompressor = lambda data: decompressors.expand(self, data)
         return entry
 
@@ -855,9 +938,10 @@ class Runner:
         reach 0, with A0 pointing at the task.  A task that wants to run
         again sets its count again.  After them at each tick, the Sound
         Driver's task and the Sound Manager's channels make the sound
-        buffer's frame, and the speaker plays it.  Then the
-        VIA may interrupt it (_via_interrupt).  While the application has
-        interrupts masked, it waits."""
+        buffer's frame, and the speaker plays it.  Then the deferred
+        tasks they queued run (_deferred_tasks), and the VIA may interrupt
+        it (_via_interrupt).  While the application has interrupts masked,
+        it waits."""
         cpu = self.cpu
         if cpu.sr & m68k.INTERRUPT_MASK:
             self.catch_up = min(self.catch_up, MAX_RETRACES)
@@ -866,24 +950,26 @@ class Runner:
         self.ticks_failed = False
         self._retrace_tasks()
         self._time_tasks()
+        self._deferred_tasks()
         self._via_interrupt()
 
     def wants_ticks(self) -> bool:
         """Whether something is to happen at the ticks to come: a VBL task
-        counting down, a Time Manager task waiting, or a sound to make or
-        play.  With its machine held."""
+        counting down, a Time Manager task or a deferred task waiting, or a
+        sound to make or play.  With its machine held."""
         cpu = self.cpu
         return not (self.ticks_failed or self.process.events.killed) and bool(
-            cpu.vbl_counting() or self.time_tasks.due or cpu.sound_waiting())
+            cpu.vbl_counting() or self.time_tasks.due or cpu.deferred_waiting()
+            or cpu.sound_waiting())
 
     def idle_tick(self) -> None:
         """A tick while the application waits for the host (for an event, a
         menu, the end of a Delay), from the machine's ticker: its VBL
-        tasks, its sound and its Time Manager tasks, as the vertical
-        retrace interrupt would have them go on.  Not the VIA's interrupt,
-        which mustn't come in the middle of a trap.  If something goes
-        wrong, the ticks stop until the application's own code has them
-        again, to meet it there."""
+        tasks, its sound, its Time Manager tasks and its deferred tasks, as
+        the vertical retrace interrupt would have them go on.  Not the VIA's
+        interrupt, which mustn't come in the middle of a trap.  If something
+        goes wrong, the ticks stop until the application's own code has
+        them again, to meet it there."""
         cpu = self.cpu
         if cpu.sr & m68k.INTERRUPT_MASK:
             self.catch_up = min(self.catch_up, MAX_RETRACES)
@@ -892,6 +978,7 @@ class Runner:
         try:
             self._retrace_tasks()
             self._time_tasks()
+            self._deferred_tasks()
         except Exception:  # noqa: BLE001 - a system error, or the process killed
             log.debug("%s: a tick while it waited failed", self.process.name, exc_info=True)
             cpu.restore(ctx)
@@ -997,6 +1084,30 @@ class Runner:
                 tasks.running = None
         cpu.restore(ctx)
 
+    def _deferred_tasks(self) -> None:
+        """Run the application's deferred tasks, each taken out of the
+        queue before it runs, with dtParm in A1 (Inside Macintosh:
+        Processes).  At the end of a tick's tasks, as an interrupt's
+        handler runs them, and at the interrupt's priority still: one
+        queued by a task that ran this tick runs now, one queued by the
+        application itself at the next tick."""
+        mem = self.mem
+        if not mem.r32(lowmem.DTQueue + 2) & ADDRESS_MASK:
+            return
+        cpu = self.cpu
+        ctx = cpu.context()
+        self._interrupt_frame()
+        for _ in range(MAX_DEFERRED_TASKS):
+            task = mem.r32(lowmem.DTQueue + 2) & ADDRESS_MASK
+            if not task:
+                break
+            glue_os.Dequeue(self, task, lowmem.DTQueue)
+            routine = mem.r32(task + DT_ADDR) & ADDRESS_MASK
+            if routine:
+                cpu.set_a(1, mem.r32(task + DT_PARM))
+                self._jsr(routine)
+        cpu.restore(ctx)
+
     def _own_a_line(self, pc: int) -> bool:
         """Whether the trap at pc goes to a handler the program has put in
         vector $28, as every A-line instruction goes to the vector's.  Not
@@ -1016,9 +1127,6 @@ class Runner:
             # QuickDraw's globals with it: DD Expand finds the screen's
             # bounds through an InitGraf on a stack frame, then goes back.
             part.a5, part.left_a5 = part.left_a5, 0
-        if (self.process.frames_due and not self.in_wdef
-                and not cpu.sr & m68k.INTERRUPT_MASK):
-            wdefs.refresh(self)     # windows its own WDEFs are to shape and draw
         self.history.append((word, pc))
         self.screen.tick()          # show what it's written in the screen buffer
         if self.trace:
@@ -1071,7 +1179,8 @@ class Runner:
         self._trap(self.mem.r16(pc & ADDRESS_MASK), pc)
 
     def _dispatch(self, word: int, pc: int) -> None:
-        poll = dispatch.trap_key(word) in POLLS
+        key = dispatch.trap_key(word)
+        poll = key in POLLS
         if poll:
             self._polling()
         try:
@@ -1081,7 +1190,9 @@ class Runner:
         except BusError as e:           # it passed the trap a bad pointer or handle
             raise SystemError68k(1, f"in {dispatch.trap_name(word)} at ${pc & ADDRESS_MASK:06X}: "
                                     f"{e}", pc & ADDRESS_MASK) from None
-        self.polled = self.cpu_time() if poll else -SPIN_GAP
+        if key in FRAMES_AT:
+            wdefs.refresh(self)
+        self.polled = self.cpu_time() if poll or key in KEEPS_POLLING else -SPIN_GAP
 
     def _polling(self) -> None:
         """One of POLLS: if the program has done nothing but ask for
@@ -1095,11 +1206,17 @@ class Runner:
             return
         if now - self.spun_from < SPIN_BUDGET:
             return
+        self._wait_for_tick()
+        self.spun_from = self.cpu_time()
+
+    def _wait_for_tick(self) -> None:
+        """The program has nothing to do until the next tick, or input:
+        the host waits for them, and other applications may run.  Not at
+        a tick, with interrupts masked, or paced, where it goes on."""
         if (self.holding and not self.machine.ticking() and not self.cpu.rate
                 and not self.cpu.sr & m68k.INTERRUPT_MASK):
             with self.yielding():
                 self.process.events.nap(to_next_tick() / 60 + 2 * m68k.SETTLE)
-        self.spun_from = self.cpu_time()
 
     def _call_os_patch(self, addr: int, word: int, ret: int) -> None:
         """What the OS trap dispatcher does for a patched trap, on the stack
@@ -1163,6 +1280,29 @@ class Runner:
         cpu.restore(ctx)
         return value
 
+    def on_own_thread(self) -> bool:
+        """Whether the calling host thread is running the application's
+        code, with the processor held: its own thread, or a Thread Manager
+        thread's (glue_threads) while that has the processor."""
+        return self.holding and threading.get_ident() == self.thread_id
+
+    def call_grow_zone(self, proc: int, needed: int, protected: int) -> int:
+        """Call a zone's grow-zone function, FUNCTION MyGrowZone(cbNeeded:
+        Size): LongInt, for a block of needed bytes, GZRootHnd holding the
+        handle it mustn't move or purge, which GZSaveHnd returns (Inside
+        Macintosh: Memory): what it says it freed.  Only from the host thread
+        running its code (on_own_thread), and not at interrupt time; 0
+        otherwise."""
+        if not self.on_own_thread() or self.cpu.sr & m68k.INTERRUPT_MASK:
+            return 0
+        mem = self.mem
+        saved = mem.r32(lowmem.GZRootHnd)
+        mem.w32(lowmem.GZRootHnd, protected)
+        try:
+            return self.call(proc, (("l", needed),), "l")
+        finally:
+            mem.w32(lowmem.GZRootHnd, saved)
+
     def call_with(self, addr: int, **regs: int) -> int:
         """Call 68k code that takes its arguments in registers, a0=pb and
         so on, as a driver's routines do: what it leaves in D0.  The other
@@ -1223,6 +1363,10 @@ class Runner:
         if pc & ADDRESS_MASK == self.machine.a_line:
             self._vectored_trap()
             return
+        if pc & ADDRESS_MASK in self.machine.tick_waits:
+            self._wait_for_tick()
+            cpu.pc = pc + 2
+            return
         handler = self.mem.r32(4 * vector) if vector < 256 else 0
         if handler & ADDRESS_MASK not in (0, self.machine.bomb_stub):
             if (m68k.TRAP_0 <= vector < m68k.TRAP_0 + 16
@@ -1279,10 +1423,16 @@ class Runner:
 
     def unimplemented(self, name: str, word: int) -> None:
         self.unimplemented_calls[name] += 1
-        if name not in self.reported:
-            self.reported.add(name)
-            log.warning("%s: %s (trap $%04X) isn't implemented; skipped",
-                        self.process.name, name, word)
+        self.note_once(name, "%s (trap $%04X) isn't implemented; skipped", name, word)
+
+    def asked_missing(self, name: str) -> None:
+        self.missing_asked[name] += 1
+
+    def note_once(self, key: str, message: str, *args) -> None:
+        """Log message about the application the first time key comes up."""
+        if key not in self.reported:
+            self.reported.add(key)
+            log.warning("%s: " + message, self.process.name, *args)
 
     def system_error(self, error_id: int, detail: str = ""):
         raise SystemError68k(error_id, detail)
@@ -1335,9 +1485,13 @@ class Runner:
         """An EventRecord: what, message, when, where, modifiers."""
         if not p:
             return
+        mem = self.mem
+        if ev.qel:                  # PPostEvent's: as the program left its queue entry
+            ev.message, ev.when, ev.modifiers = mem.r32(ev.qel + 8), mem.r32(ev.qel + 12), \
+                mem.r16(ev.qel + 20)
+            ev.where = mem.r_point(ev.qel + 16)
         msg = ev.message
         msg = msg.addr if hasattr(msg, "addr") else int(msg or 0)
-        mem = self.mem
         mem.w16(p, ev.what)
         mem.w32(p + 2, msg)
         mem.w32(p + 6, ev.when)
@@ -1379,6 +1533,6 @@ from . import (  # noqa: E402,F401
     glue_fonts, glue_gworld, glue_help, glue_icons, glue_intl, glue_lists, glue_menucolors,
     glue_menus, glue_os, glue_palette, glue_picker, glue_pict, glue_pictinfo, glue_ppc, glue_print,
     glue_process, glue_quickdraw, glue_resources, glue_sane, glue_scrap, glue_script, glue_scsi,
-    glue_slots, glue_sony, glue_sound, glue_stdfile, glue_textedit, glue_utilities, glue_video,
-    glue_windows)
+    glue_slots, glue_sony, glue_sound, glue_stdfile, glue_textedit, glue_threads, glue_utilities,
+    glue_video, glue_windows)
 from . import controlpanel  # noqa: E402 - the host for control panels, which calls the glue

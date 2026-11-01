@@ -12,6 +12,17 @@ rectangle it was made with, as its PixMap's bounds are; made with depth
 0, the rectangle is a global one, which picks the screen, and the world
 is its size with its top left at 0,0.
 
+Made with noNewDevice on a program's device, a world has that device's
+depth and colour table (Inside Macintosh: Imaging With QuickDraw,
+NewGWorld): given no table, its PixMap's is the device's own handle, as
+OpenCPort gives a cGrafPort the current device's (Inside Macintosh V,
+Color QuickDraw), so that what's drawn in it is in the device's pixel
+values, and CopyBits copies them as they are.  Given a device,
+UpdateGWorld gives a world that device's depth and colour table, whatever
+pixelDepth and cTable are (Inside Macintosh: Imaging With QuickDraw,
+UpdateGWorld): a world made on it with noNewDevice has the device's own
+table then, as one made with no table has, and any other a copy.
+
 The pixels are in a handle, in the application heap, or in the System
 heap, as temporary memory, when there isn't room there (or a program asks
 with useTempMem).  macrt keeps it locked, so a PixMap's baseAddr is
@@ -203,28 +214,52 @@ def NewGWorld(t, gw_p, depth, bounds_p, ct_h, gdh, flags):
     # Given depth 0, the world is like the deepest screen, and aGDevice is
     # ignored, noNewDevice or not.
     own_device = depth == 0 or not flags & noNewDevice
+    device = _device_pixmap(t, gdh) if not own_device else None
+    if not own_device and device is None:
+        _qd_error(t, paramErr)
+        return paramErr
+    if device is not None:
+        depth = device.pixel_size
     got = _depth_and_table(t, depth, ct_h)
     if got is None:
         _qd_error(t, cDepthErr)
         return cDepthErr
     depth, table = got
-    if bounds.empty or not own_device and not _deref(t, gdh):
+    if bounds.empty:
         _qd_error(t, paramErr)
         return paramErr
-    err = _new_gworld(t, gw_p, depth, bounds, table, 0 if own_device else gdh, flags)
+    shared = device.pm_table if device is not None and not ct_h and depth <= 8 else 0
+    err = _new_gworld(t, gw_p, depth, bounds, table, 0 if own_device else gdh, flags, shared)
     _qd_error(t, err)
     return err
 
 
+def _device_pixmap(t, gdh: int) -> PixMap | None:
+    gd = _deref(t, gdh)
+    pm = _deref(t, GDevice(t.mem, gd).pmap) if gd else 0
+    return PixMap(t.mem, pm) if pm else None
+
+
+def _shares_table(t, port: GrafPort, ct_h: int) -> bool:
+    """Whether ct_h is the colour table of the device a world was made on
+    with noNewDevice, rather than one of its own."""
+    if port.gw_own_device or not ct_h:
+        return False
+    pm = _device_pixmap(t, port.gw_device)
+    return pm is not None and pm.pm_table & ADDRESS_MASK == ct_h & ADDRESS_MASK
+
+
 def _new_gworld(t, gw_p: int, depth: int, bounds: Rect, table: bytes, device: int,
-                flags: int) -> int:
+                flags: int, shared: int = 0) -> int:
+    """shared is the colour table handle of the device the world is made
+    on, if its PixMap is to have that one, not a copy of table."""
     mem, heap = t.mem, t.process.heap
     row_bytes = _row_bytes(bounds.width, depth)
     pix = _new_pixels(t, row_bytes * bounds.height, flags)
-    ct = heap.new_handle_with(table)
+    ct = shared or heap.new_handle_with(table)
     pm_h = heap.new_handle(PIXMAP_SIZE, clear=True)
     port_p = heap.new_ptr(GrafPort.SIZE, clear=True)
-    made = [h for h in (pix, ct, pm_h) if h]
+    made = [h for h in (pix, 0 if shared else ct, pm_h) if h]
     if not (pix and ct and pm_h and port_p):
         for h in made:
             _dispose(t, h)
@@ -318,7 +353,7 @@ def DisposeGWorld(t, gw):
         mem.w32(lowmem.TheGDevice, t.system.devices.main)
     pm_h = _pix_map_h(port)
     p = _deref(t, pm_h)
-    if p:
+    if p and not _shares_table(t, port, PixMap(mem, p).pm_table):
         _dispose(t, PixMap(mem, p).pm_table)
     _dispose(t, port.gw_pixels)
     if port.gw_own_device:
@@ -386,7 +421,9 @@ def GetGWorldPixMap(t, gw):
 def UpdateGWorld(t, gw_p, depth, bounds_p, ct_h, gdh, flags):
     """Change a world's depth, colour table or rectangle, keeping what's
     in it as clipPix or stretchPix say (and, for another colour table,
-    in the nearest colours it has); what it did."""
+    in the nearest colours it has); what it did.  Given a device, the
+    world takes its depth and colour table, whatever pixelDepth and
+    cTable are."""
     mem = t.mem
     port = gworld(t, mem.r32(gw_p))
     if port is None:
@@ -397,12 +434,24 @@ def UpdateGWorld(t, gw_p, depth, bounds_p, ct_h, gdh, flags):
     old_rb, old_table = pm.row_bytes & ROW_BYTES_MASK, read_table(mem, pm.pm_table)
     old_data = _deref(t, pm.pm_table)
     old_ct = mem.read(old_data, 8 + 8 * (max(0, mem.r16s(old_data + 6)) + 1)) if old_data else b""
-    bounds = _world_rect(mem.r_rect(bounds_p), depth)
+    gdh = gdh if port.is_color else 0
+    bounds = _world_rect(mem.r_rect(bounds_p), depth if not gdh else 1)
+    shared = 0                                  # the device's own table, for a world on it
     if not port.is_color:                       # basic QuickDraw's: 1 bit, no table
         if depth not in (0, 1):
             _qd_error(t, cDepthErr)
             return gwFlagErr
         depth, table = 1, old_ct
+    elif gdh:
+        device = _device_pixmap(t, gdh)
+        if device is None or device.pixel_size not in DEPTH_MODES:
+            _qd_error(t, paramErr)
+            return gwFlagErr
+        depth = device.pixel_size
+        table = _table_data(t, depth, device.pm_table)
+        if (depth <= 8 and not port.gw_own_device
+                and port.gw_device & ADDRESS_MASK == gdh & ADDRESS_MASK):
+            shared = device.pm_table
     elif depth == 0 or ct_h or depth != old_depth:
         got = _depth_and_table(t, depth, ct_h)
         if got is None:
@@ -419,6 +468,8 @@ def UpdateGWorld(t, gw_p, depth, bounds_p, ct_h, gdh, flags):
     if depth == old_depth and sized and not remap:
         if bounds != old_bounds:
             _move(t, port, bounds)
+        if shared:
+            _share_table(t, port, pm, shared)
         _qd_error(t, noErr)
         return 0
     row_bytes = _row_bytes(bounds.width, depth)
@@ -429,7 +480,17 @@ def UpdateGWorld(t, gw_p, depth, bounds_p, ct_h, gdh, flags):
     old_image = pixels.decode(mem.read(pm.base_addr & ADDRESS_MASK, old_rb * old_bounds.height),
                               old_bounds.width, old_bounds.height, old_rb, old_depth,
                               old_table).convertToFormat(QImage.Format.Format_ARGB32)
-    if pm.pm_table:
+    if shared:
+        _share_table(t, port, PixMap(mem, _deref(t, _pix_map_h(port))), shared)
+    elif pm.pm_table and _shares_table(t, port, pm.pm_table):
+        if table != old_ct:                 # its own table now, not the device's
+            ct = t.process.heap.new_handle_with(table)
+            if not ct:
+                _dispose(t, pix)
+                _qd_error(t, cNoMemErr)
+                return gwFlagErr
+            pm.pm_table = ct
+    elif pm.pm_table:
         heap = _heap(t, pm.pm_table)
         if not heap.set_handle_size(pm.pm_table, len(table)):
             _dispose(t, pix)
@@ -462,6 +523,15 @@ def UpdateGWorld(t, gw_p, depth, bounds_p, ct_h, gdh, flags):
             _new_itable(t, t.process.heap, port.gw_device)
     _qd_error(t, noErr)
     return done
+
+
+def _share_table(t, port: GrafPort, pm: PixMap, ct_h: int) -> None:
+    """Give a world made on a device with noNewDevice that device's colour
+    table, ct_h, in place of one of its own."""
+    if pm.pm_table & ADDRESS_MASK != ct_h & ADDRESS_MASK:
+        if pm.pm_table and not _shares_table(t, port, pm.pm_table):
+            _dispose(t, pm.pm_table)
+        pm.pm_table = ct_h
 
 
 def _move(t, port: GrafPort, bounds: Rect) -> None:

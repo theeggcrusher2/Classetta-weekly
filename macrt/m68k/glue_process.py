@@ -191,10 +191,15 @@ def GetProcessInformation(t, psn_p, info_p):
                           (52, 0)):
         mem.w32(info_p + offset, value)
     spec = mem.r32(info_p + 56) & ADDRESS_MASK if mem.r32(info_p) >= INFO_LENGTH else 0
-    if spec:                        # an FSSpec: the application, by name
+    if spec and proc.app is not None:   # an FSSpec: the application's file, where it is
+        node = t.system.files.node_for(proc.app)
+        mem.w16(spec, node.volume.vref)
+        mem.w32(spec + 2, node.parid)
+        t.set_str255(spec + 6, node.name[:63])
+    elif spec:                      # a Python application: by name only
         mem.w16(spec, 0)
         mem.w32(spec + 2, 0)
-        t.set_str255(spec + 6, (proc.app.name if proc.app is not None else proc.name)[:63])
+        t.set_str255(spec + 6, proc.name[:63])
     return noErr
 
 

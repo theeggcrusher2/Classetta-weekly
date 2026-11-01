@@ -19,7 +19,7 @@ from functools import partial
 
 from ..memory import ADDRESS_MASK
 from ..toolbox import lowmem
-from ..toolbox.color import color_rgb, standard_table
+from ..toolbox.color import color_rgb, highlight_table, standard_table
 from ..toolbox.constants import blackColor, whiteColor
 from ..toolbox.gdevice import (DEFAULT_MODE, DEPTH_MODES, ITAB_RES, GDevice, PixMap, deref,
                                gdDevType, make_itable, read_table)
@@ -29,6 +29,7 @@ from ..toolbox.types import Rect
 from .dispatch import trap
 from .glue_controls import scratch
 from .glue_common import _port
+from .glue_os import DisposeHandle
 
 HiliteRGB = lowmem.HiliteRGB    # the highlight colour, an RGBColor
 # QDError's results, as Imaging With QuickDraw lists them
@@ -299,7 +300,11 @@ def _new_colors(t, gdh: int, ct: int, seed: bool = True) -> None:
         _make_itable(t, pm.pm_table, gd.i_table, gd.res_pref or ITAB_RES)
     if gdh & ADDRESS_MASK == devices.main & ADDRESS_MASK:
         devices.changed()
-        t.system.screen.look()
+        # Shown in the new colours by the next tick: each trap and the
+        # clock look then, and QuickDraw looks before it draws in a window,
+        # so it matches to them.  A program that reserves entry after entry
+        # (Rebel Assault, 508 a pass) isn't shown each change in turn.
+        t.system.screen.tick()
 
 
 def _make_itable(t, ct_h: int, it_h: int, res: int) -> bool:
@@ -523,6 +528,17 @@ def DelSearch(t, proc):
         t.tb.qd.search = None
 
 
+@trap
+def SetClientID(t, client):
+    """Set the current device's gdID, which identifies the program to
+    its search procedures (Advanced Color Imaging Reference, Color
+    Manager Reference), and which ReserveEntry marks entries with."""
+    gdh = _device(t)
+    gd = _gd(t, gdh) if gdh else None
+    if gd is not None:
+        gd.id = client
+
+
 def _search_procs(t) -> list[int]:
     by_device = getattr(t.process, "search_procs", None)
     if by_device is None:
@@ -570,9 +586,9 @@ def RealColor(t, p):
 
 @trap
 def GetCTable(t, ct_id):
-    """A ColorTable handle: one of the standard ones, else a copy of the
-    clut resource of that ID."""
-    data = standard_table(ct_id)
+    """A ColorTable handle: one of the standard ones, with the highlight
+    colour if 64 + depth, else a copy of the clut resource of that ID."""
+    data = standard_table(ct_id) or highlight_table(ct_id, _rgb(t, HiliteRGB))
     if data is None:
         res = t.process.resources.GetResource("clut", ct_id)
         if not res or not t.mem.r32(res) & ADDRESS_MASK:
@@ -583,8 +599,12 @@ def GetCTable(t, ct_id):
 
 @trap
 def DisposeCTable(t, h):
+    """DisposeHandle for a colour table, MemErr and all: one in no heap
+    sets memWZErr.  The Secret Island of Dr. Quandary copies a PixMap
+    from its own data, pmTable ($FFFFFFFF) and all, and disposes of that
+    before it puts a table of its own there."""
     if h:
-        t.system.heap_of(h).dispose_handle(h)
+        DisposeHandle(t, h)
 
 
 @trap

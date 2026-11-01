@@ -62,23 +62,9 @@ def DrawPicture(t, h, r):
     # the frame first: the buffer below can move the handle (Winter Games'
     # pictures, in handles it has unlocked)
     frame = t.mem.r_rect(p + 2)
-    get_pic = _custom_proc(t, port, GET_PIC_PROC, 0xA8EE)
-    buf = 0
-    if get_pic:                         # spooled: the handle holds only the size and frame
-        buf = heap.new_ptr(SPOOL)
-        if not buf:
-            return
-
-        def read(n: int) -> bytes:
-            out = bytearray()
-            while len(out) < n:
-                k = min(n - len(out), SPOOL)
-                t.call(get_pic, (("p", buf), ("h", k)))
-                out += t.mem.read(buf, k)
-            return bytes(out)
-        reader = pict.Reader(read, 10)
-    else:                               # all of it, in case drawing moves the handle
-        reader = pict.Reader.of(t.mem.read(p, size), 10)
+    reader, buf = _picture_reader(t, port, heap, p, size)
+    if reader is None:
+        return
     proc = _custom_proc(t, port, COMMENT_PROC, 0xA8F1)
 
     def comment(kind: int, data: bytes | None) -> None:
@@ -91,6 +77,30 @@ def DrawPicture(t, h, r):
     finally:
         if buf:
             heap.dispose_ptr(buf)
+
+
+def _picture_reader(t, port, heap, p: int, size: int) -> tuple:
+    """A reader of a picture's opcodes, after its size and frame, and the
+    buffer it reads them into, to dispose of after (0 for none): through
+    the port's own getPicProc when it has one, for a picture spooled from
+    disk whose handle holds only its size and frame, or else all of it
+    from memory at once, in case drawing moves the handle.  (None, 0)
+    with no room for the buffer."""
+    get_pic = _custom_proc(t, port, GET_PIC_PROC, 0xA8EE) if port is not None else 0
+    if not get_pic:
+        return pict.Reader.of(t.mem.read(p, size), 10), 0
+    buf = heap.new_ptr(SPOOL)
+    if not buf:
+        return None, 0
+
+    def read(n: int) -> bytes:
+        out = bytearray()
+        while len(out) < n:
+            k = min(n - len(out), SPOOL)
+            t.call(get_pic, (("p", buf), ("h", k)))
+            out += t.mem.read(buf, k)
+        return bytes(out)
+    return pict.Reader(read, 10), buf
 
 
 def _picture_heap(t, h: int, p: int) -> tuple:

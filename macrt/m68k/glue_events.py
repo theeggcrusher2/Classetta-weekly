@@ -31,15 +31,22 @@ def WaitNextEvent(t, mask, event_p, sleep, mouse_rgn):
     glue_os.respond(t)
     glue_sony.put_back(t)
     sleep = glue_desk.time_wanted(t, max(sleep, 0))
+    if not sleep and t.null_tick == tick_count():
+        sleep = to_next_tick()          # as GetNextEvent does
     patch = t.patches.get(GET_NEXT_EVENT)
     if patch is not None and not t.in_gne_patch:
-        return _through_patch(t, patch, mask, event_p, sleep)
+        got = _through_patch(t, patch, mask, event_p, sleep)
+        if not got:
+            t.null_tick = tick_count()
+        return got
     rgn = _rgn(t, mouse_rgn) if mouse_rgn else None
     _stored_activates(t)
     window_pictures(t)
     _unanswered(t, mask)
     with t.yielding():
         got, ev = t.tb.WaitNextEvent(mask & 0xFFFF, sleep, rgn)
+    if not got:
+        t.null_tick = ev.when
     return _returned(t, event_p, got, ev)
 
 

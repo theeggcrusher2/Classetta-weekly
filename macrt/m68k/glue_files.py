@@ -24,7 +24,7 @@ from ..toolbox import lowmem, sysres
 from ..toolbox.files import Dir, File, FileError, noErr
 from ..toolbox.printing import PRINT_DRIVER
 from ..toolbox.gdevice import VIDEO_DRIVER
-from . import dispatch, glue_devices, glue_print, glue_sony, glue_video
+from . import dispatch, glue_cdrom, glue_devices, glue_print, glue_sony, glue_video
 from .dispatch import trap
 
 badUnitErr = -21                # not a driver's reference number
@@ -33,6 +33,7 @@ controlErr, statusErr = -17, -18
 abortErr = -27                  # a request KillIO took out of its driver's queue
 SOUND_DRIVER = -4               # the Sound Driver's reference number
 wrgVolTypErr = -123
+catChangedErr = -1304           # PBCatSearch: the catalog changed since the last call
 
 # Parameter blocks (IM IV, chapter 19; Inside Macintosh: Files, chapter 2).  The header:
 ioCompletion = 12
@@ -113,8 +114,19 @@ ioDestNamePtr = 28
 ioDestDirID = 36
 ioSrcDirID = 48
 ioFileID = 54
+# CSParam, PBCatSearch's
+ioMatchPtr = 24
+ioReqMatchCount = 28
+ioActMatchCount = 32
+ioSearchBits = 36
+ioSearchInfo1 = 40
+ioSearchInfo2 = 44
+ioCatPosition = 52
+CINFO_SIZE = 108                # a CInfoPBRec
+FSSPEC_SIZE = 70
 
 ioDirFlg = 0x10                 # ioFlAttrib: a directory
+bHasCatSearch = 1 << 7          # GetVolParmsInfoBuffer's vMAttrib
 # A volume control block's
 vcbVN = 44
 vcbDrvNum = 72
@@ -415,8 +427,8 @@ def _get_finfo(t, pb, hfs):
 def _set_finfo(t, pb, hfs):
     m = t.mem
     node = _files(t).lookup_file(*_where(t, pb, hfs))
-    if node.volume.locked:
-        raise FileError(fm.vLckdErr)
+    if node.volume.lock_error:
+        raise FileError(node.volume.lock_error)
     node.finfo[:] = m.read(pb + ioFlFndrInfo, 16)
     node.crdate, node.mddate = struct.unpack(">II", m.read(pb + ioFlCrDat, 8))
     _files(t).metadata_changed(node)
@@ -463,8 +475,8 @@ def put_cat_info(t, pb: int, node: fm.Node) -> None:
 def _set_cat_info(t, pb):
     m = t.mem
     node = _files(t).lookup(*_where(t, pb, True))
-    if node.volume.locked:
-        raise FileError(fm.vLckdErr)
+    if node.volume.lock_error:
+        raise FileError(node.volume.lock_error)
     node.finfo[:] = m.read(pb + ioFlFndrInfo, 16)
     node.crdate, node.mddate, node.bkdate = struct.unpack(">III", m.read(pb + ioFlCrDat, 12))
     node.xinfo[:] = m.read(pb + ioFlXFndrInfo, 16)
@@ -494,10 +506,11 @@ def _get_vinfo(t, pb, hfs):
     _put_name(t, pb, vol.name)
     files, dirs = vol.counts()
     root_files = sum(1 for n in vol.root.items() if not n.is_dir)
-    attrib = 0x8000 if vol.locked else 0
+    attrib = vol.attributes()
+    blocks, size, free = vol.allocation()
     m.write(pb + ioVCrDate, struct.pack(">IIHHHHHIIHIH", vol.crdate, vol.mddate, attrib,
-                                        min(root_files, 0xFFFF), 0, 0, fm.VOLUME_BLOCKS, fm.BLOCK,
-                                        fm.BLOCK, 0, vol.next_cnid, fm.FREE_BLOCKS))
+                                        min(root_files, 0xFFFF), 0, 0, blocks, size, size, 0,
+                                        vol.next_cnid, free))
     # A working directory's number stays, for PBGetVInfo (IM IV, chapter 19).
     keep = not hfs and m.r16s(pb + ioVolIndex) <= 0 and given in fs.wds
     m.w16(pb + ioVRefNum, given if keep else vol.vref)
@@ -628,7 +641,8 @@ DRIVERS = {".sound": SOUND_DRIVER, ".print": PRINT_DRIVER, ".sony": fm.SONY,
 SerGetBuf, SerStatus = 2, 8             # the serial drivers' Status calls
 # The hard disks' drivers, -33 less each disk's SCSI ID, answer for their
 # icons, each an ICN# (Inside Macintosh: Devices, the SCSI Manager): what
-# Startup Disk lists the disks with.
+# Startup Disk lists the disks with.  A CD-ROM's driver answers the calls
+# glue_cdrom has too.
 kDriveIcon, kMediaIcon = 21, 22
 csCode = 26
 csParam = 28
@@ -641,9 +655,10 @@ def _driver(t, pb) -> int:
     return refnum
 
 
-def _hard_disk(t, refnum: int) -> bool:
+def _hard_disk(t, refnum: int) -> fm.Volume | None:
+    """The hard disk or CD-ROM whose driver has that reference number."""
     fs = t.system.files
-    return any(not v.floppy and v.driver == refnum for v in fs.volumes + fs.offline)
+    return next((v for v in fs.volumes + fs.offline if not v.floppy and v.driver == refnum), None)
 
 
 def _hard_disk_icon(t) -> int:
@@ -688,11 +703,14 @@ def _kill_io(t, pb, immed):
 def _control(t, pb, immed):
     m = t.mem
     refnum = _driver(t, pb)
-    if refnum not in DRIVERS.values():              # a hard disk's
-        if m.r16s(pb + csCode) not in (kDriveIcon, kMediaIcon):
+    if refnum not in DRIVERS.values():              # a hard disk's or a CD-ROM's
+        if m.r16s(pb + csCode) in (kDriveIcon, kMediaIcon):
+            m.w32(pb + csParam, _hard_disk_icon(t))
+            return
+        vol = _hard_disk(t, refnum)
+        if not vol.cdrom:
             raise FileError(controlErr)
-        m.w32(pb + csParam, _hard_disk_icon(t))
-        return
+        return glue_cdrom.control(t, pb, vol)
     if refnum == fm.SONY:
         return glue_sony.control(t, pb)
     if refnum == VIDEO_DRIVER:
@@ -798,13 +816,107 @@ def _exchange(t, pb):
 
 
 def _get_vol_parms(t, pb):
-    """GetVolParmsInfoBuffer, version 2: nothing special about any volume."""
+    """GetVolParmsInfoBuffer, version 2: every volume can be searched with
+    PBCatSearch (bHasCatSearch), and there's nothing else special about any."""
     m = t.mem
     _files(t).volume_for(m.r16s(pb + ioVRefNum), _name(t, pb))
-    info = struct.pack(">HIIIIH", 2, 0, 0, 0, 0, 0)
+    info = struct.pack(">HIIIIH", 2, bHasCatSearch, 0, 0, 0, 0)
     n = max(0, min(m.r32s(pb + ioReqCount), len(info)))
     m.write(m.r32(pb + ioBuffer) & ADDRESS_MASK, info[:n])
     m.w32(pb + ioActCount, n)
+
+
+# ioSearchBits (Inside Macintosh: Files, chapter 2, "Searching a Volume").
+# Some mean one thing for a file and another for a directory: 8 is a
+# file's Finder information and a directory's, both at ioFlFndrInfo.
+fsSBPartialName, fsSBFullName, fsSBFlAttrib, fsSBFlFndrInfo = 1, 2, 4, 8
+fsSBDrNmFls = 16
+fsSBFlLgLen, fsSBFlPyLen, fsSBFlRLgLen, fsSBFlRPyLen = 32, 64, 128, 256
+fsSBFlCrDat, fsSBFlMdDat, fsSBFlBkDat, fsSBFlXFndrInfo, fsSBFlParID = 512, 1024, 2048, 4096, 8192
+fsSBNegate = 16384
+FILE_ONLY = fsSBFlLgLen | fsSBFlPyLen | fsSBFlRLgLen | fsSBFlRPyLen
+
+
+def _cat_search(t, pb):
+    """PBCatSearch: the files and directories on a volume that meet every
+    criterion ioSearchBits picks, from two catalog information records,
+    the first with the values and lower bounds, the second with the masks
+    and upper bounds; with fsSBNegate, those that don't.  FSSpecs for them
+    go in ioMatchPtr's array.  ioSearchTime isn't looked at: a search goes
+    until ioReqMatchCount are found, noErr, even at the catalog's last
+    entry, or else to its end, eofErr; ioCatPosition says where the next
+    call goes on from.  One that goes on in a catalog changed since gets
+    catChangedErr."""
+    m = t.mem
+    vol = _files(t).volume_for(m.r16s(pb + ioVRefNum), _name(t, pb))
+    m.w32(pb + ioActMatchCount, 0)
+    want = m.r32s(pb + ioReqMatchCount)
+    if want < 1:
+        raise FileError(fm.paramErr)
+    bits = m.r32(pb + ioSearchBits)
+    lo = m.read(m.r32(pb + ioSearchInfo1) & ADDRESS_MASK, CINFO_SIZE)
+    hi = m.read(m.r32(pb + ioSearchInfo2) & ADDRESS_MASK, CINFO_SIZE)
+    target = None
+    if bits & (fsSBPartialName | fsSBFullName):
+        name = struct.unpack_from(">I", lo, ioNamePtr)[0] & ADDRESS_MASK
+        if not name:
+            raise FileError(fm.paramErr)
+        target = fm.name_key(t.str255(name))
+    entries = vol.catalog()
+    start, changes = struct.unpack(">II", m.read(pb + ioCatPosition, 8))
+    if start and changes != vol.changes & 0xFFFFFFFF:
+        raise FileError(catChangedErr)
+    matches = m.r32(pb + ioMatchPtr) & ADDRESS_MASK
+    negate = bool(bits & fsSBNegate)
+    i, found = max(start - 1, 0), 0
+    while i < len(entries) and found < want:
+        node = entries[i]
+        i += 1
+        if _meets(node, bits, lo, hi, target) != negate:
+            put_spec(t, matches + found * FSSPEC_SIZE, vol.vref, node.parid, node.name)
+            found += 1
+    m.w32(pb + ioActMatchCount, found)
+    m.write(pb + ioCatPosition, struct.pack(">II", i + 1, vol.changes & 0xFFFFFFFF))
+    return noErr if found == want else fm.eofErr
+
+
+def _meets(node: fm.Node, bits: int, lo: bytes, hi: bytes, target: str | None) -> bool:
+    """Whether a catalog entry meets PBCatSearch's criteria.  Of the
+    attributes only bits 0, locked, and 4, a directory, are compared.  A
+    criterion only a file has, a fork's length, no directory meets, and
+    one only a directory has, its number of files, no file does."""
+    if target is not None:
+        key = fm.name_key(node.name)
+        if key != target if bits & fsSBFullName else target not in key:
+            return False
+    if bits & fsSBFlAttrib:
+        attrib = ioDirFlg if node.is_dir else 0x01 if node.locked else 0
+        if (attrib ^ lo[ioFlAttrib]) & hi[ioFlAttrib] & 0x11:
+            return False
+    for bit, at, info in ((fsSBFlFndrInfo, ioFlFndrInfo, node.finfo),
+                          (fsSBFlXFndrInfo, ioFlXFndrInfo, node.xinfo)):
+        if bits & bit and any((a ^ b) & c for a, b, c in zip(info, lo[at:], hi[at:at + 16])):
+            return False
+    ranges = [(fsSBFlCrDat, ioFlCrDat, node.crdate), (fsSBFlMdDat, ioFlMdDat, node.mddate),
+              (fsSBFlBkDat, ioFlBkDat, node.bkdate), (fsSBFlParID, ioFlParID, node.parid)]
+    if node.is_dir:
+        if bits & FILE_ONLY:
+            return False
+        if bits & fsSBDrNmFls:
+            low, high = (struct.unpack_from(">H", b, ioFlStBlk)[0] for b in (lo, hi))
+            if not low <= min(len(node.children), 0xFFFF) <= high:
+                return False
+    elif bits & fsSBDrNmFls:
+        return False
+    elif bits & FILE_ONLY:
+        data, rsrc = node.sizes()
+        ranges += [(fsSBFlLgLen, ioFlLgLen, data), (fsSBFlPyLen, ioFlPyLen, _physical(data)),
+                   (fsSBFlRLgLen, ioFlRLgLen, rsrc), (fsSBFlRPyLen, ioFlRPyLen, _physical(rsrc))]
+    for bit, at, value in ranges:
+        if bits & bit and not (struct.unpack_from(">I", lo, at)[0] <= value <=
+                               struct.unpack_from(">I", hi, at)[0]):
+            return False
+    return True
 
 
 def _close_wd(t, pb):
@@ -871,7 +983,8 @@ HFS_DISPATCH = {
     0x01: _open_wd, 0x02: _close_wd, 0x05: _cat_move, 0x06: _dir_create, 0x07: _get_wd_info,
     0x08: _get_fcb_info, 0x09: _get_cat_info, 0x0A: _set_cat_info, 0x0B: _set_vinfo,
     0x10: _lock_range, 0x11: _lock_range, 0x14: _create_file_id, 0x15: _delete_file_id,
-    0x16: _resolve_file_id, 0x17: _exchange, 0x1A: None, 0x30: _get_vol_parms,
+    0x16: _resolve_file_id, 0x17: _exchange, 0x18: _cat_search, 0x1A: None,
+    0x30: _get_vol_parms,
     0x38: lambda t, pb: _open_deny(t, pb, False), 0x39: lambda t, pb: _open_deny(t, pb, True),
 }
 
@@ -996,6 +1109,8 @@ def FSpGetFInfo(t, spec, info):
 def FSpSetFInfo(t, spec, info):
     def set_info():
         node = _files(t).lookup_file(*_spec(t, spec))
+        if node.volume.lock_error:
+            raise FileError(node.volume.lock_error)
         node.finfo[:] = t.mem.read(info, 16)
         _files(t).metadata_changed(node)
     return _fs_call(t, set_info)

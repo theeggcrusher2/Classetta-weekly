@@ -28,10 +28,18 @@ from .glue_quickdraw import _rgn
 # =========================================================================
 @trap
 def InitWindows(t):
-    if not t.system.wmgr_port_kept():       # the program threw the last port away, as
-        t.system.open_wmgr_port()           # Rogue's start does
+    # It opens the Window Manager port, which makes that the current port
+    # (IM I: OpenPort), for a program's first call or when the program has
+    # thrown the last one away, as Rogue's start does.  Called again, as
+    # Disk Copy's licence agreement does after SetPort to its dialog, it
+    # leaves thePort be.
+    opened = not t.system.wmgr_port_kept()
+    if opened:
+        t.system.open_wmgr_port()
     t.mem.w8(lowmem.WWExist, 0)
-    t.mem.w32(_the_port_var(t), t.mem.r32(lowmem.WMgrPort))
+    if opened or not t.process.windows_set_up:
+        t.mem.w32(_the_port_var(t), t.mem.r32(lowmem.WMgrPort))
+    t.process.windows_set_up = True
     if t.system.model.color:
         # With Color QuickDraw it makes the default auxiliary window and
         # control records (Inside Macintosh V); Microsoft Word 4 reads the

@@ -510,7 +510,7 @@ def _standard_opener(t, verb: int, pb: int) -> int:
     if verb == eoOpen:
         std = Std(node, False, parse(bytes(node.fork(False))) or [], st.commits.get(node, 0))
     else:
-        if node.locked or node.volume.locked:
+        if node.locked or node.volume.lock_error:
             return fLckdErr
         std = Std(node, True, [], creator=m.read(pb + eoFdCreator, 4))
     token = next(st.tokens)

@@ -31,7 +31,7 @@ from ..toolbox.types import Rect
 from .dispatch import trap
 from .glue_color import GetCTSeed
 from .glue_palette import _fill, _new_palette, _record, pmTolerant
-from .glue_pict import _picture_heap
+from .glue_pict import _picture_heap, _picture_reader
 from .glue_common import _port
 from .glue_fonts import family_name, family_named
 
@@ -150,16 +150,26 @@ def _write(t, p: int, survey: Survey, verb: int, colors: int, method: int,
 
 
 def _add_picture(t, survey: Survey, h: int) -> int:
+    """A picture, read as macrt's DrawPicture reads it: a spooled one,
+    whose handle holds only its size and frame, through the current
+    port's getPicProc (Jigsaw's)."""
     p = deref(t.mem, h)
     if not p:
         return pictureDataErr
-    _heap, size = _picture_heap(t, h, p)
+    heap, size = _picture_heap(t, h, p)
+    frame = pict.picture_frame(t.mem.read(p, min(size, 10)))
+    reader, buf = _picture_reader(t, _port(t), heap, p, size)
+    if reader is None:
+        return memFullErr
     item = Survey()
     try:
-        item.add_picture(t.mem.read(p, size))
+        item.add_picture(frame, reader)
     except pict.PictError as e:
         log.info("GetPictInfo: %s", e)
         return pictureDataErr
+    finally:
+        if buf:
+            heap.dispose_ptr(buf)
     survey.merge(item)
     return noErr
 

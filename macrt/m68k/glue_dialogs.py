@@ -29,15 +29,26 @@ from ..toolbox.dialogs import (
     DialogState,
     Item,
     cautionIcon,
+    control_colors,
+    doAddSize,
+    doBColor,
+    doColor,
+    doFace,
+    doFont,
+    doFontName,
+    doMode,
+    doSize,
     items,
     noteIcon,
     stopIcon,
     substitute,
+    text_style,
 )
 from ..toolbox.events import EventRecord
 from ..toolbox.memmgr import noErr
-from ..toolbox.qdraw import frame_path, read_rgn, rect_path, round_rect_path
+from ..toolbox.qdraw import frame_path, port_rgb, read_rgn, rect_path, round_rect_path
 from ..toolbox.quickdraw import BLACK_PAT, GRAY_PAT
+from ..toolbox.textedit import TERec
 from ..toolbox.templates import (
     editText,
     iconItem,
@@ -49,7 +60,7 @@ from ..toolbox.templates import (
     userItem,
 )
 from ..toolbox.types import Point, Rect
-from . import dispatch, glue_cport, glue_palette
+from . import dispatch, glue_cport, glue_palette, wdefs
 from .dispatch import raw, trap
 from .glue_controls import (
     ACTION_IN_RECORD,
@@ -66,7 +77,8 @@ from .glue_controls import (
     new_control,
     scratch,
 )
-from .glue_icons import PlotIcon
+from .glue_fonts import family_named
+from .glue_icons import GetCIcon, PlotCIcon, PlotIcon, is_cicon_record
 from .glue_pict import DrawPicture
 from .glue_windows import window_pictures
 
@@ -237,6 +249,7 @@ def _set_edit_field(t, w, item: Item) -> None:
     t.mem.w32(p + TE_HTEXT, item.handle)
     te.set_text(t, d.text_h, _text(t, item.handle))
     d.edit_field = item.number - 1
+    _style_record(t, w)
     if w.hilited:
         te.activate(t, d.text_h)
 
@@ -248,6 +261,82 @@ def _select_text(t, w, item: Item, start: int, end: int) -> None:
         te.set_select(t, d.text_h, start, end)
 
 
+@contextmanager
+def _styled(t, w, item: Item):
+    """Draw a text item in its style in the dialog's item colour table, if
+    it has one (Inside Macintosh V, the Dialog Manager): the dialog's font,
+    face, size, colours and mode, with the fields the style says changed.
+    A font named that no family has stays as it was; adding to size 0 adds
+    to 12, the system font's, as TextSize's 0 is (Inside Macintosh I)."""
+    style = text_style(w.dialog.item_colors, item.number) if w.dialog is not None else None
+    if style is None:
+        yield
+        return
+    qd, flags = t.tb.qd, style.flags
+    saved = w.tx_font, w.tx_face, w.tx_size, w.tx_mode, port_rgb(w, True), port_rgb(w, False)
+    if flags & doFontName:
+        w.tx_font = family_named(t, style.font_name.decode("mac_roman")) or w.tx_font
+    elif flags & doFont:
+        w.tx_font = style.font
+    if flags & doFace:
+        w.tx_face = style.face
+    if flags & doSize:
+        w.tx_size = style.size
+    elif flags & doAddSize:
+        w.tx_size = (w.tx_size or 12) + style.size
+    if flags & doMode:
+        w.tx_mode = style.mode
+    if flags & doColor:
+        qd.set_rgb_color(w, True, style.fore)
+    if flags & doBColor:
+        qd.set_rgb_color(w, False, style.back)
+    try:
+        yield
+    finally:
+        w.tx_font, w.tx_face, w.tx_size, w.tx_mode = saved[:4]
+        qd.set_rgb_color(w, True, saved[4])
+        qd.set_rgb_color(w, False, saved[5])
+
+
+def _style_record(t, w) -> None:
+    """In a dialog with an item colour table, the TextEdit record takes
+    the style of the editText item it's editing, the dialog's own if the
+    item has none."""
+    d = _rec(t, w)
+    item = _item(t, w, d.edit_field + 1)
+    if not w.dialog.item_colors or item is None or not d.text_h:
+        return
+    with _styled(t, w, item):
+        ascent, descent, _, leading = t.tb.qd.font_info(w)
+        rec = TERec(t.mem, t.mem.r32(d.text_h) & ADDRESS_MASK)
+        if rec.tx_size == -1:           # a styled record has its own styles
+            return
+        rec.tx_font, rec.tx_face, rec.tx_mode, rec.tx_size = (w.tx_font, w.tx_face, w.tx_mode,
+                                                              w.tx_size)
+        rec.line_height, rec.font_ascent = ascent + descent + leading, ascent
+        selection = rec.sel_start, rec.sel_end
+    te.set_text(t, d.text_h, _text(t, item.handle))        # its lines again
+    te.set_select(t, d.text_h, *selection)
+
+
+def _item_colors(t, w, items_id: int) -> None:
+    """A colour dialog's (or alert's) item colour table, the 'ictb' of its
+    item list's ID (Inside Macintosh V, the Dialog Manager): its text items
+    are drawn in their styles, and its controls get their colour tables,
+    as SetCtlColor gives them."""
+    h = t.process.resources.GetResource("ictb", items_id) if w.is_color else 0
+    if not h or not t.mem.r32(h) & ADDRESS_MASK:
+        return
+    data = w.dialog.item_colors = t.tb.contents(h)
+    for item in _items(t, w):
+        table = control_colors(data, item.number) if item.is_control else None
+        if table and _ctl(t, item.handle) is not None:
+            ct = t.process.heap.new_handle_with(table)
+            if ct:
+                glue_cport._set_aux_color(t, item.handle & ADDRESS_MASK, ct, lowmem.AuxCtlHead)
+    _style_record(t, w)
+
+
 # =========================================================================
 # Drawing
 # =========================================================================
@@ -257,15 +346,19 @@ def _frame(t, w, r: Rect, pen: int = 1, pat: bytes = BLACK_PAT, shape=rect_path)
 
 def _text_box(t, w, data: bytes, r: Rect) -> None:
     """A text item, drawn with TEUpdate, which doesn't erase first (IM I,
-    TextEdit): over the controls drawn before it, or what's under it."""
+    TextEdit): over the controls drawn before it, or what's under it.  An
+    empty one draws nothing (Hermes's empty static text items, its
+    buttons' click targets, are over its arrow pictures)."""
+    if not data:
+        return
     with _in_port(t, w):
         te.text_box(t, data, r, 0, erase=False)
 
 
-def _plot_icon(t, w, r: Rect, h: int) -> None:
+def _plot_icon(t, w, r: Rect, h: int, color: bool = False) -> None:
     with _in_port(t, w), scratch(t, 8) as rp:
         t.set_rect(rp, r)
-        PlotIcon(t, rp, h)
+        (PlotCIcon if color else PlotIcon)(t, rp, h)
 
 
 def _draw_picture(t, w, r: Rect, h: int) -> None:
@@ -302,17 +395,20 @@ def _draw_item(t, w, item: Item) -> None:
         if _ctl(t, item.handle) is not None:
             Draw1Control(t, item.handle)
     elif kind == statText:
-        _text_box(t, w, substitute(_text(t, item.handle), _params(t)), r)
+        with _styled(t, w, item):
+            _text_box(t, w, substitute(_text(t, item.handle), _params(t)), r)
     elif kind == editText:
         d = _rec(t, w)
-        if d.text_h and d.edit_field == item.number - 1:
-            t.tb.qd.fill(w, rect_path(r), w.bk_pat, k.patCopy)
-            te.update(t, d.text_h, r)
-        else:
-            _text_box(t, w, _text(t, item.handle), r)
+        with _styled(t, w, item):
+            if d.text_h and d.edit_field == item.number - 1:
+                t.tb.qd.fill(w, rect_path(r), w.bk_pat, k.patCopy)
+                te.update(t, d.text_h, r)
+            else:
+                _text_box(t, w, _text(t, item.handle), r)
         _frame(t, w, r.inset(-3, -3))
     elif kind == iconItem:
-        _plot_icon(t, w, r, item.handle)
+        h = item.handle & ADDRESS_MASK
+        _plot_icon(t, w, r, h, is_cicon_record(t, h))
     elif kind == picItem:
         _draw_picture(t, w, r, item.handle)
     elif kind == userItem and item.handle & ADDRESS_MASK:
@@ -327,23 +423,33 @@ def _redraw_item(t, w, item: Item) -> None:
 
 
 def draw_dialog(t, w, area: Rect | None = None) -> None:
-    """Draw the window's controls as DrawControls does, the dialog's and
-    any the program added with NewControl (Widget Workshop's puzzle
-    list's scroll bar), then the other items (those in area, local, if
-    given).  The text is drawn with TEUpdate (IM: Macintosh Toolbox
-    Essentials, Dialog Manager, DrawDialog), which doesn't erase: Apple's
-    own dialogs have text whose rect runs into a button (MacPaint's About
-    box, Font Mover's help), and ScreenChooser's has its check boxes'
-    labels inside their rects."""
+    """Draw the items (those in area, local, if given) in the order IM:
+    Macintosh Toolbox Essentials, Dialog Manager, DrawDialog, gives: "draws
+    all dialog items, calls the Control Manager procedure DrawControls to
+    draw all controls, and calls the TextEdit procedure TEUpdate to update
+    all static and editable text items".  So macrt draws the pictures,
+    icons and user items first, in item order; then the window's controls
+    as DrawControls does, the dialog's and any the program added with
+    NewControl (Widget Workshop's puzzle list's scroll bar); then the
+    text.  G-Netix's dialogs have a picture, after their buttons in the
+    item list, with blank 3D button faces where the buttons are and an
+    empty field where the message goes.  TEUpdate
+    doesn't erase: Apple's own dialogs have text whose rect runs into a
+    button (MacPaint's About box, Font Mover's help), and ScreenChooser's
+    has its check boxes' labels inside their rects."""
     def meets(r: Rect) -> bool:
         r = r.inset(-4, -4)
         return area is None or not (r.right <= area.left or area.right <= r.left or
                                     r.bottom <= area.top or area.bottom <= r.top)
+    items = [item for item in _items(t, w) if not item.is_control and meets(item.rect)]
+    for item in items:
+        if item.type not in (statText, editText):
+            _draw_item(t, w, item)
     for c in controls_of(t, w):
         if meets(c.rect):
             Draw1Control(t, c.handle)
-    for item in _items(t, w):
-        if not item.is_control and meets(item.rect):
+    for item in items:
+        if item.type in (statText, editText):
             _draw_item(t, w, item)
     state = w.dialog
     if state.icon >= 0:
@@ -389,7 +495,8 @@ def _make_items(t, w, first: int = 1) -> None:
             if kind == editText and first_edit is None:
                 first_edit = item
         elif kind == iconItem:
-            h = rm.GetResource("ICON", int.from_bytes(data[:2], "big", signed=True))
+            rid = int.from_bytes(data[:2], "big", signed=True)
+            h = (GetCIcon(t, rid) if t.system.model.color else 0) or rm.GetResource("ICON", rid)
         elif kind == picItem:
             h = rm.GetResource("PICT", int.from_bytes(data[:2], "big", signed=True))
         elif kind == userItem:
@@ -496,6 +603,7 @@ def GetNewDialog(t, dialog_id, storage, behind):
         return 0
     if ct:
         _colored(t, w, ct)
+        _item_colors(t, w, tmpl.items_id)
     if tmpl.visible:
         t.tb.ShowWindow(w)
     return w
@@ -704,6 +812,7 @@ def _modal(t, w, filter_proc: int, item_p: int) -> None:
     with scratch(t, 16) as ev_p:
         while True:
             window_pictures(t)
+            wdefs.refresh(t)            # as at GetNextEvent
             with t.yielding():
                 _, ev = t.process.events.get(mask, 1, _update_wanted(t, w))
             t.write_event(ev_p, ev)
@@ -1038,6 +1147,8 @@ def _alert(t, alert_id: int, filter_proc: int, icon: int = -1) -> int:
     alert, show it until the user picks an item."""
     h = t.process.resources.GetResource("ALRT", alert_id)
     if not h:
+        t.note_once(f"ALRT {alert_id}", "an alert asks for ALRT %d, which isn't in any open "
+                    "resource file; nothing shown", alert_id)
         return -1
     a = parse_alrt(t.tb.contents(h))
     world = t.process.world
@@ -1061,6 +1172,7 @@ def _alert(t, alert_id: int, filter_proc: int, icon: int = -1) -> int:
         return -1
     if ct:
         _colored(t, w, ct)
+        _item_colors(t, w, a.items_id)
     _rec(t, w).a_def_item = stage.bold_item
     w.dialog.outline, w.dialog.icon = True, icon
     t.tb.ShowWindow(w)

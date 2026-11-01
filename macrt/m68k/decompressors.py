@@ -39,7 +39,6 @@ the new application's file.
 from __future__ import annotations
 
 import struct
-import threading
 
 from ..resfork import COMPRESSED_TAG, InvalidForkError, open_fork
 
@@ -68,8 +67,7 @@ def expand(t, data: bytes, fork: bytes | None = None) -> bytes | None:
     the application isn't the one running.  The 'dcmp' is the one
     GetResource finds, or, given a resource fork, that fork's."""
     header = _parse(data)
-    if (header is None or not t.holding or threading.current_thread() is not t.process.thread
-            or t.expanding):
+    if header is None or not t.on_own_thread() or t.expanding:
         return None
     dcmp_id = header[2]
     if fork is None:

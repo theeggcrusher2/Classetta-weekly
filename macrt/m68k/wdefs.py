@@ -13,8 +13,10 @@ window a point is in (wHit).  The window's view on the host takes the
 shape of the structure region, and shows the frame drawn there.
 
 68k code runs on the application's thread, so the host only notes a
-window whose frame needs doing (Process.frames_due) and the application
-does it at its next trap.
+window whose frame needs doing (Process.frames_due), and the application
+does it at the end of its next call of the Window, Dialog or Event
+Manager's that macrt does it at (runtime.FRAMES_AT), or as ModalDialog
+waits.
 
 An application's WDEF may leave some of its messages to the System's
 (Excel's do), so system_wdef answers them for WDEF 0 and 1 with the
@@ -37,6 +39,7 @@ from ..toolbox.system import RTS
 from ..toolbox.types import Point
 from ..toolbox.windows import WindowRecord, describe_proc
 from ..ui import chrome
+from .cpu import INTERRUPT_MASK
 
 
 def entry(t, w: WindowRecord) -> int:
@@ -91,9 +94,11 @@ def _live(t, w: WindowRecord) -> bool:
 # Shape and frame
 # =========================================================================
 def refresh(t) -> None:
-    """Shape and draw the windows whose frames need it, between two of the
-    application's traps."""
+    """Shape and draw the windows whose frames need it, unless this is
+    a WDEF's own call or interrupts are masked."""
     due = t.process.frames_due
+    if not due or t.in_wdef or t.cpu.sr & INTERRUPT_MASK:
+        return
     while due:
         w = due.pop()
         if _live(t, w) and entry(t, w):

@@ -395,6 +395,14 @@ def MenuKey(t, ch):
 
 
 @trap
+def MenuChoice(t):
+    """After a MenuSelect that chose nothing: the menu ID and number of the
+    disabled item the mouse was released over, or 0 (Inside Macintosh:
+    Macintosh Toolbox Essentials, Menu Manager)."""
+    return t.process.menu_choice
+
+
+@trap
 def HiliteMenu(t, menu_id):
     t.tb.HiliteMenu(menu_id)
 

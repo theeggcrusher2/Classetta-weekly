@@ -7,8 +7,6 @@ macrt.toolbox.resources.
 
 from __future__ import annotations
 
-import threading
-
 from ..memory import ADDRESS_MASK
 from ..toolbox.memmgr import noErr
 from ..toolbox.resources import Entry, ResourceManager, ResourceMap
@@ -24,19 +22,19 @@ def _rm(t) -> ResourceManager:
 
 @trap
 def GetResource(t, rtype, rid):
-    return _rm(t).GetResource(rtype, rid)
+    return _rm(t).get(rtype, rid)
 
 
 @trap
 def RGetResource(t, rtype, rid):
     """GetResource, which on a Mac goes on to the ROM's resources after
     the System file's: here they're the System file's."""
-    return _rm(t).GetResource(rtype, rid)
+    return _rm(t).get(rtype, rid)
 
 
 @trap
 def Get1Resource(t, rtype, rid):
-    return _rm(t).Get1Resource(rtype, rid)
+    return _rm(t).get(rtype, rid, one=True)
 
 
 @trap
@@ -236,13 +234,28 @@ def ResourceStub(t, word):
     cpu.set_a(0, rm.read_in(m, Entry(m, cpu.a(2) & ADDRESS_MASK, b""), rm.res_load))
 
 
+GET_RESOURCE, GET1_RESOURCE = 0xA9A0, 0xA81F
+
+
+def get_resource(t, rtype: bytes, rid: int, one: bool) -> int | None:
+    """The Resource Manager's get hook: GetResource, or Get1Resource if
+    one, for macrt's own managers, through the application's patch on the
+    trap, as LoadSeg's is (macrt.m68k.segload): Prince of Destruction's
+    expands the dialogs and pictures it keeps compressed.  None if it hasn't
+    patched it, or the application isn't the one running."""
+    patch = t.patches.get(GET1_RESOURCE if one else GET_RESOURCE)
+    if patch is None or not t.on_own_thread():
+        return None
+    return t.call(patch, (("l", int.from_bytes(rtype, "big")), ("h", rid)), "p") & ADDRESS_MASK
+
+
 def load_resource(t, m: ResourceMap, e: Entry, force: bool) -> int | None:
     """The Resource Manager's load hook: the application's patch on
     _ResourceStub reads the resource in, with ResLoad set to force while
     it does.  None if there's no patch, or the application isn't the one
     running."""
     patch = t.patches.get(RESOURCE_STUB)
-    if patch is None or not t.holding or threading.current_thread() is not t.process.thread:
+    if patch is None or not t.on_own_thread():
         return None
     cpu, rm = t.cpu, _rm(t)
     ctx = cpu.context()

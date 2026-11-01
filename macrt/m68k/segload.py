@@ -136,13 +136,18 @@ def has_code(app: MacFile) -> bool:
     return fm.find(b"CODE", 0) is not None
 
 
+def has_powerpc_code(app: MacFile) -> bool:
+    """Whether it has a 'cfrg' resource, naming PowerPC code fragments."""
+    try:
+        return open_fork(app.rsrc).find(b"cfrg", 0) is not None
+    except InvalidForkError:
+        return False
+
+
 def why_no_code(app: MacFile) -> str:
     """Why an application without CODE 0 has none, for its error message."""
-    try:
-        if open_fork(app.rsrc).find(b"cfrg", 0) is not None:
-            return "it's a PowerPC application"
-    except InvalidForkError:
-        pass
+    if has_powerpc_code(app):
+        return "it's a PowerPC application"
     try:
         if open_fork(app.data).find(b"CODE", 0) is not None:
             # Copied by something that didn't keep the forks apart.
