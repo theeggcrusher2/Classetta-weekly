@@ -3,7 +3,7 @@ Run Mac applications headless, many at a time, and report what they did:
 whether each is still running, quit, or stopped with a system error;
 which traps it called that macrt doesn't implement; and screenshots
 along the way.  Comparing two surveys' reports and screenshots shows what
-a change to macrt changed (see docs/running-apps.md).
+a change to macrt changed (see docs/survey.md).
 
     python -m macrt.survey run titles.json --out OUT [--jobs N] [--resume]
     python -m macrt.survey one Disk.dsk --app NAME --steps "w 5;c 100,200;s a" --out OUT/x
@@ -16,9 +16,12 @@ run takes a list of titles as JSON: a list of runs, or an object with a
     name     what to call it: its folder in OUT (default: from app or file)
     file     the application, or a disk image, or a list of disk images
     app      which application on the disk image, or a document of one
-    model    "plus" (the default) or "ii"
-    depth    the screen's bits a pixel, with model "ii"
+    model    "plus" (the default), "ii" or "iix"
+    depth    the screen's bits a pixel, with model "ii" or "iix"
     size     the screen's size, "640x480" (the default)
+    row_bytes
+             how many bytes apart the screen's rows are, as macrt's
+             --row-bytes
     memory   the application's memory, in K, in place of its SIZE's
     system   a System file, or a disk image holding one
     speed    run 68k code at about this many times a Mac Plus's speed
@@ -28,6 +31,9 @@ run takes a list of titles as JSON: a list of runs, or an object with a
     timeout  seconds the run may take in all (default: its wait and steps
              take, and two minutes more)
     trace    log every trap the application calls
+    outside_port_rect
+             true to note drawing that lands outside a port's portRect,
+             which macrt doesn't clip to (result.json's outside_port_rect)
 
 Paths are relative to the list's folder.  Each run is a process of its own,
 so that one that crashes Python can't stop the others.  Steps, separated
@@ -53,16 +59,24 @@ Each run's folder has result.json, log.txt with what macrt printed, and
 its screenshots, ending with end.png, the screen when the steps are done.
 result.json lists each process's windows, and the text of any dialog or
 alert left up, so that one waiting at its own alert shows what it asked;
+with outside_port_rect, the ports drawn in outside their portRects;
 and first_window, how many seconds after launching the first window came;
 with settle, settled, how many seconds after launching the wait settled
-(null if it didn't).
+(null if it didn't); and busy, the share of one of the host's processors
+the run took in the last BUSY_WINDOW seconds of that wait, all its
+threads': near 1 for a title that keeps asking or drawing while it waits.
 A run that takes too long has its threads' stacks written to log.txt
 before it's stopped.
 OUT/report.json sums up the runs: how many had each outcome, the
-unimplemented traps by how many titles call them, and of the titles still
+unimplemented traps by how many titles call them, the traps titles asked
+GetTrapAddress for and the Gestalt selectors they asked about that macrt
+hasn't, by how many titles ask (missing_asked: one that looks first takes
+another way, or stops, without calling them), and of the titles still
 running, those with no window to show and those waiting at a dialog or
 alert, the application's or macrt's own (Standard File's), with what it
-says; and the runs slowest to show a window.  --resume keeps the
+says; the runs slowest to show a window; the runs still running that
+kept the host busiest at the end of their wait; and, of the runs with
+outside_port_rect, those that drew outside a portRect.  --resume keeps the
 runs already finished in OUT, those with a result.json, and runs the rest,
 so that a long survey that was stopped can carry on.
 """
@@ -97,18 +111,21 @@ from .macfile import open_application
 from .memory import ADDRESS_MASK
 from .toolbox import dialogs, lowmem
 from .toolbox.constants import dialogKind
+from .toolbox.system import MODELS
 from .toolbox.templates import statText
 from .toolbox.types import Point
-from .ui.display import Display, DisplayConfig
+from .ui.display import ROW_BYTES, Display, DisplayConfig, row_bytes_ok
 
 OUTCOMES = ("running", "quit", "system error", "internal error", "faulted", "no code",
             "can't open", "timeout", "crashed")
-FIELDS = {"name", "file", "app", "model", "depth", "size", "memory", "system", "speed",
-          "wait", "settle", "steps", "timeout", "trace"}
+FIELDS = {"name", "file", "app", "model", "depth", "size", "row_bytes", "memory", "system",
+          "speed", "wait", "settle", "steps", "timeout", "trace", "outside_port_rect"}
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]*")
 DEFAULT_WAIT = 6.0
 DIALOG_TEXT = 100           # characters of a dialog's text a report shows
 SLOWEST = 10                # runs a report names as slowest to a first window
+BUSY_WINDOW = 1.0           # seconds at a wait's end it measures the processor taken over
+BUSY = 0.5                  # a run's busy share, from which a report names it as busy
 SPARE_TIME = 120.0          # seconds a run may take beyond its wait and steps
 TYPING_PACE = 0.06          # seconds between keys typed
 CLICK_HOLD = 0.06           # seconds a click holds the button down
@@ -295,7 +312,7 @@ def check_runs(data, base: Path) -> list[dict]:
         for key in ("name", "app", "model", "size", "system", "steps"):
             if entry.get(key) is not None and not isinstance(entry[key], str):
                 raise ValueError(f"{where}: {key} is a string")
-        for key in ("trace", "settle"):
+        for key in ("trace", "settle", "outside_port_rect"):
             if not isinstance(entry.get(key, False), bool):
                 raise ValueError(f"{where}: {key} is true or false")
         if entry.get("size") is not None:
@@ -317,10 +334,11 @@ def check_runs(data, base: Path) -> list[dict]:
         names.add(entry["name"])
         if entry.get("model") is None:
             entry["model"] = "plus"
-        if entry["model"] not in ("plus", "ii"):
-            raise ValueError(f"{where}: model is \"plus\" or \"ii\"")
+        if entry["model"] not in MODELS:
+            raise ValueError(f"{where}: model is \"plus\", \"ii\" or \"iix\"")
         for key, kind in (("wait", (int, float)), ("timeout", (int, float)),
-                          ("memory", int), ("depth", int), ("speed", (int, float))):
+                          ("memory", int), ("depth", int), ("row_bytes", int),
+                          ("speed", (int, float))):
             value = entry.get(key)
             zero = key == "wait"
             if value is not None and (not isinstance(value, kind) or isinstance(value, bool)
@@ -329,9 +347,11 @@ def check_runs(data, base: Path) -> list[dict]:
                                  + ("0 or more" if zero else "more than 0"))
         if entry.get("depth") not in (None, 1, 2, 4, 8, 16, 32):
             raise ValueError(f"{where}: depth is 1, 2, 4, 8, 16 or 32")
-        if entry.get("depth") not in (None, 1) and entry["model"] != "ii":
+        if entry.get("depth") not in (None, 1) and not MODELS[entry["model"]].color:
             raise ValueError(f"{where}: a Mac Plus's screen is black and white: "
-                             "depth needs model \"ii\"")
+                             "depth needs model \"ii\" or \"iix\"")
+        if entry.get("row_bytes") is not None and not row_bytes_ok(entry["row_bytes"]):
+            raise ValueError(f"{where}: {ROW_BYTES}")
         try:
             parse_steps(entry.get("steps") or "")
         except StepError as e:
@@ -343,13 +363,16 @@ def check_runs(data, base: Path) -> list[dict]:
 def one_argv(entry: dict, out: Path) -> list[str]:
     """The command line of `one` for entry, writing to out."""
     argv = [*entry["file"], "--out", str(out), "--model", entry["model"]]
-    for key in ("app", "depth", "size", "memory", "system", "speed", "wait", "steps"):
+    for key in ("app", "depth", "size", "row_bytes", "memory", "system", "speed", "wait",
+                "steps"):
         if entry.get(key) not in (None, ""):
-            argv += [f"--{key}", str(entry[key])]
+            argv += [f"--{key.replace('_', '-')}", str(entry[key])]
     if entry.get("settle"):
         argv.append("--settle")
     if entry.get("trace"):
         argv.append("--trace-traps")
+    if entry.get("outside_port_rect"):
+        argv.append("--outside-port-rect")
     return argv
 
 
@@ -373,12 +396,13 @@ class Run:
         self.result = {
             "name": self.out.name, "file": args.file, "app": args.app, "model": args.model,
             "outcome": None, "elapsed": None, "first_window": None, "settled": None,
-            "processes": [],
+            "busy": None, "processes": [],
             "system_errors": [],
             "internal_errors": [], "gui_errors": self.gui_errors,
             "step_errors": self.step_errors, "steps_done": 0, "screenshots": self.shots,
         }
         self.d = None
+        self.busy = None                # the last wait's busy share
 
     # -- the record ------------------------------------------------------
     def finish(self, outcome: str | None = None, error: str | None = None) -> dict:
@@ -392,6 +416,10 @@ class Run:
             r["internal_errors"] = [{"app": p["name"], "error": p["internal_error"]}
                                     for p in r["processes"] if p["internal_error"]]
             r["host_dialogs"] = self._host_dialogs()
+            seen = self.d.system.outside_port_rect
+            if seen is not None:
+                r["outside_port_rect"] = sorted(
+                    list(seen.values()), key=lambda n: (-n["times"], n["port"], n["via"]))
         r["outcome"] = outcome or self._outcome()
         r["elapsed"] = round(time.monotonic() - self.started, 2)
         return r
@@ -412,6 +440,7 @@ class Run:
         rec = {"name": proc.name, "running": running, "faulted": proc.faulted,
                "windows": self._windows(proc) if running else [],
                "unimplemented": dict(runner.unimplemented_calls) if runner else {},
+               "missing_asked": dict(runner.missing_asked) if runner else {},
                "internal_error": runner.internal_error if runner else None}
         return rec
 
@@ -478,9 +507,12 @@ class Run:
         try:
             self.d = d = SurveyDisplay(self.seen, DisplayConfig(
                 host="screen", screen_size=size, system_file=system_file, speed=args.speed,
-                model=args.model, depth=args.depth, disks=disks, sound=False))
+                model=args.model, depth=args.depth, row_bytes=args.row_bytes, disks=disks,
+                sound=False))
         except (OSError, ValueError) as e:
             return self.finish("can't open", str(e))
+        if args.outside_port_rect:
+            d.system.outside_port_rect = {}
         d.show()
         logging.basicConfig(format="macrt: %(message)s")
         logging.getLogger("macrt").setLevel(logging.DEBUG if args.trace_traps else logging.INFO)
@@ -495,6 +527,7 @@ class Run:
             return self.finish("can't open", str(e))
         if self.wait(args.wait, args.settle):
             self.result["settled"] = round(time.monotonic() - self.launched, 2)
+        self.result["busy"] = self.busy
         for step in self.steps:
             if not d.processes:
                 break
@@ -518,22 +551,33 @@ class Run:
 
     def wait(self, secs: float, settle: bool = False) -> bool:
         """Wait secs; with settle, only until the screen has settled, if
-        that's sooner (see SETTLE_QUIET).  Whether it had."""
+        that's sooner (see SETTLE_QUIET).  Whether it had.  self.busy is
+        the share of a processor taken in its last BUSY_WINDOW."""
         deadline = time.monotonic() + secs
         looks: collections.deque = collections.deque()
         look = 0.0
-        while self.d.processes and time.monotonic() < deadline:
-            QTest.qWait(20)
-            if self.result["first_window"] is None and any(
-                    rec.visible for p in list(self.d.processes) for rec in list(p.windows)):
-                self.result["first_window"] = round(time.monotonic() - self.launched, 2)
-            now = time.monotonic()
-            if settle and now >= look:
-                look = now + SETTLE_LOOK
-                picture = hash(self._picture_bytes()) if self._asking(now) else None
-                if settled(looks, now, picture):
-                    return True
-        return False
+        load = collections.deque([(time.monotonic(), time.process_time())])
+        try:
+            while self.d.processes and time.monotonic() < deadline:
+                QTest.qWait(20)
+                if not self.d.processes:        # the last has quit: its screen may be gone
+                    break
+                if self.result["first_window"] is None and any(
+                        rec.visible for p in list(self.d.processes) for rec in list(p.windows)):
+                    self.result["first_window"] = round(time.monotonic() - self.launched, 2)
+                now = time.monotonic()
+                load.append((now, time.process_time()))
+                while now - load[1][0] >= BUSY_WINDOW:
+                    load.popleft()
+                if settle and now >= look:
+                    look = now + SETTLE_LOOK
+                    picture = hash(self._picture_bytes()) if self._asking(now) else None
+                    if settled(looks, now, picture):
+                        return True
+            return False
+        finally:
+            (t0, p0), (t1, p1) = load[0], load[-1]
+            self.busy = round((p1 - p0) / (t1 - t0), 2) if t1 > t0 else None
 
     def _asking(self, now: float) -> bool:
         """Whether every process is asking for input: or macrt's own dialog
@@ -828,21 +872,28 @@ def read_results(out: Path) -> list[dict]:
     return results
 
 
-def summarize(results: list[dict]) -> dict:
-    """What the runs did, in all: how many had each outcome, and the
-    unimplemented calls by how many runs made them."""
-    outcomes = collections.Counter(r.get("outcome") for r in results)
+def _ranked(results: list[dict], key: str) -> list[dict]:
+    """The names in each process's key counts, by how many runs have
+    them, then how many times in all."""
     calls: dict[str, dict] = {}
     for r in results:
         made = collections.Counter()
         for p in r.get("processes", []):
-            made.update(p.get("unimplemented", {}))
+            made.update(p.get(key, {}))
         for name, n in made.items():
             c = calls.setdefault(name, {"name": name, "runs": 0, "calls": 0, "examples": []})
             c["runs"] += 1
             c["calls"] += n
             if len(c["examples"]) < 5:
                 c["examples"].append(r["name"])
+    return sorted(calls.values(), key=lambda c: (-c["runs"], -c["calls"], c["name"]))
+
+
+def summarize(results: list[dict]) -> dict:
+    """What the runs did, in all: how many had each outcome, the
+    unimplemented calls by how many runs made them, and the traps and
+    Gestalt selectors asked for that macrt hasn't by how many runs asked."""
+    outcomes = collections.Counter(r.get("outcome") for r in results)
     errors = collections.Counter(e["id"] for r in results for e in r.get("system_errors", [])
                                  if r.get("outcome") == "system error")
     no_window, at_a_dialog = [], {}
@@ -861,17 +912,24 @@ def summarize(results: list[dict]) -> dict:
             at_a_dialog[r["name"]] = fronts[0]["text"]
     timed = sorted((r for r in results if r.get("first_window") is not None),
                    key=lambda r: (-r["first_window"], r["name"]))
+    busy = sorted((r for r in results
+                   if r.get("outcome") == "running" and (r.get("busy") or 0) >= BUSY),
+                  key=lambda r: (-r["busy"], r["name"]))
+    outside = [[r["name"], len(r["outside_port_rect"])] for r in results
+               if r.get("outside_port_rect")]
     return {
         "runs": len(results),
         "outcomes": {k: outcomes[k] for k in OUTCOMES if outcomes[k]},
         "by_outcome": {k: [r["name"] for r in results if r.get("outcome") == k]
                        for k in OUTCOMES if outcomes[k] and k not in ("running", "quit")},
-        "unimplemented": sorted(calls.values(),
-                                key=lambda c: (-c["runs"], -c["calls"], c["name"])),
+        "unimplemented": _ranked(results, "unimplemented"),
+        "missing_asked": _ranked(results, "missing_asked"),
         "system_error_ids": {str(k): n for k, n in sorted(errors.items())},
         "no_window": no_window,
         "at_a_dialog": at_a_dialog,
         "slowest_to_a_window": [[r["name"], r["first_window"]] for r in timed[:SLOWEST]],
+        "busy": [[r["name"], r["busy"]] for r in busy],
+        "outside_port_rect": outside,
     }
 
 
@@ -883,11 +941,13 @@ def format_report(report: dict, top: int = 20) -> str:
     if report["system_error_ids"]:
         lines.append("system error IDs: " + ", ".join(
             f"{k} ({n})" for k, n in report["system_error_ids"].items()))
-    if report["unimplemented"]:
-        lines.append("unimplemented, by how many runs call it:")
-        for c in report["unimplemented"][:top]:
-            lines.append(f"  {c['runs']:4} runs {c['calls']:8} calls  {c['name']}"
-                         f"  ({', '.join(c['examples'])})")
+    for key, heading in (("unimplemented", "unimplemented, by how many runs call it:"),
+                         ("missing_asked", "asked for but missing, by how many runs ask:")):
+        if report.get(key):
+            lines.append(heading)
+            for c in report[key][:top]:
+                lines.append(f"  {c['runs']:4} runs {c['calls']:8} calls  {c['name']}"
+                             f"  ({', '.join(c['examples'])})")
     if report.get("no_window"):
         lines.append(f"running with no window: {', '.join(report['no_window'])}")
     if report.get("at_a_dialog"):
@@ -900,6 +960,12 @@ def format_report(report: dict, top: int = 20) -> str:
     if report.get("slowest_to_a_window"):
         lines.append("slowest to show a window: " + ", ".join(
             f"{name} ({secs:.1f} s)" for name, secs in report["slowest_to_a_window"]))
+    if report.get("busy"):
+        lines.append(f"busy at the end of their wait ({len(report['busy'])}): " + ", ".join(
+            f"{name} ({share:.0%})" for name, share in report["busy"][:top]))
+    if report.get("outside_port_rect"):
+        lines.append(f"drew outside a portRect ({len(report['outside_port_rect'])}): "
+                     + ", ".join(f"{name} ({n})" for name, n in report["outside_port_rect"]))
     return "\n".join(lines)
 
 
@@ -1006,9 +1072,11 @@ def parse_args(argv=None):
     one.add_argument("--out", required=True, help="the folder for its results")
     one.add_argument("--app", action="append", default=[],
                      help="which application on the disk image, or a document of one")
-    one.add_argument("--model", choices=["plus", "ii"], default="plus")
+    one.add_argument("--model", choices=list(MODELS), default="plus")
     one.add_argument("--depth", type=int, choices=[1, 2, 4, 8, 16, 32])
     one.add_argument("--size", help="the screen's size, e.g. 640x480")
+    one.add_argument("--row-bytes", type=int, metavar="N",
+                     help="how many bytes apart the screen's rows are, as macrt's --row-bytes")
     one.add_argument("--memory", type=int, metavar="K")
     one.add_argument("--system", metavar="FILE")
     one.add_argument("--speed", type=float)
@@ -1018,6 +1086,8 @@ def parse_args(argv=None):
                      help="end that wait sooner, once the screen has settled (W)")
     one.add_argument("--steps", default="", help="what to do then, as in a list")
     one.add_argument("--trace-traps", action="store_true")
+    one.add_argument("--outside-port-rect", action="store_true",
+                     help="note drawing that lands outside a port's portRect")
     report = sub.add_parser("report", help="sum up the runs in a folder again")
     report.add_argument("out")
     report.add_argument("--top", type=int, default=20,
@@ -1033,8 +1103,10 @@ def parse_args(argv=None):
                 _size(args.size)
         except ValueError as e:
             ap.error(str(e))
-        if args.depth not in (None, 1) and args.model != "ii":
-            ap.error("a Mac Plus's screen is black and white: --depth needs --model ii")
+        if args.depth not in (None, 1) and not MODELS[args.model].color:
+            ap.error("a Mac Plus's screen is black and white: --depth needs --model ii or iix")
+        if args.row_bytes is not None and not row_bytes_ok(args.row_bytes):
+            ap.error(f"--{ROW_BYTES}")
     if args.command == "run" and args.jobs < 1:
         ap.error("--jobs is 1 or more")
     return args

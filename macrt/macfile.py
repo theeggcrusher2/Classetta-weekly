@@ -11,7 +11,9 @@ flags, from whichever form they were kept in.
     Executor                app, with %app
     a bare resource fork    app.rsrc, or a file that is one
     macOS                   app/..namedfork/rsrc
-    HFS disk images         raw or DiskCopy 4.2, through machfs
+    HFS disk images         raw or DiskCopy 4.2, through machfs; a CD's
+                            also as raw 2352-byte sectors
+    HFS Plus disk images    read here, into the same form as HFS ones
     MFS disk images         the 400K floppies of System 1 to 4, read here
     MOOF disk images        Applesauce's, of a floppy's tracks: macrt.moof
 
@@ -30,6 +32,8 @@ import binascii
 import mmap
 import os
 import struct
+import time
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Protocol
@@ -53,9 +57,16 @@ DISKCOPY_HEADER = 84
 APM_SIGNATURE = b"ER"                   # block 0 of a partitioned disk
 APM_ENTRY = b"PM"                       # each partition map entry
 HFS_SIGNATURE = b"BD"
+HFS_PLUS_SIGNATURES = (b"H+", b"HX")    # HFS Plus, and HFSX, its case-sensitive kind
 MFS_SIGNATURE = b"\xd2\xd7"
+VOLUME_SIGNATURES = (HFS_SIGNATURE, *HFS_PLUS_SIGNATURES, MFS_SIGNATURE)
+MAC_1904 = 2082844800                   # seconds from 1904 to 1970
 SECTOR, TAG = 512, 12                   # a floppy sector, and the tag the drive keeps with it
 MAPPED = 16 << 20                       # an image this big is mapped, not read
+CD_IMAGES = (".iso", ".cdr", ".toast")  # the names an image macrt mounts as a CD-ROM ends in
+ISO_9660_AT = 16 * 2048 + 1             # the first volume descriptor's "CD001" (ECMA-119)
+CD_SECTOR, CD_DATA = 2352, 2048         # a CD sector whole, and the data in it (ECMA-130)
+CD_SYNC = b"\x00" + b"\xff" * 10 + b"\x00"  # what each whole sector starts with
 
 
 @dataclass(eq=False)
@@ -79,6 +90,10 @@ class MacFile:
     @property
     def is_application(self) -> bool:
         return self.type == b"APPL"
+
+    def cut_short(self, fork: str) -> bool:
+        """Whether the disk image it's on ends before all of the fork."""
+        return False
 
 
 class Folder(Protocol):
@@ -240,6 +255,9 @@ class _VolumeFile(MacFile):
     def _set(self, fork: str, value: bytes | None) -> None:
         self._forks[fork] = value                       # None: what's on the volume
 
+    def cut_short(self, fork: str) -> bool:
+        return isinstance(self._node, OnDisk) and self._node.cut_short(fork)
+
     data = property(lambda self: self._get("data"), lambda self, v: self._set("data", v))
     rsrc = property(lambda self: self._get("rsrc"), lambda self, v: self._set("rsrc", v))
 
@@ -268,10 +286,30 @@ class Disk:
         return self.tracks.unreadable.get(sector) if self.tracks else None
 
 
+def _raw_cd(data: bytes) -> bool:
+    """Whether it's a raw CD image, one that keeps each of the disc's
+    2352-byte sectors whole: 12 bytes of sync, a 4-byte header whose last
+    byte is the sector's mode, and then its data (ECMA-130)."""
+    return len(data) >= CD_SECTOR and not len(data) % CD_SECTOR and data[:12] == CD_SYNC
+
+
+def _cd_data(data: bytes) -> bytearray:
+    """The data in each of a raw CD image's sectors, as the disc's driver
+    reads it: 2048 bytes after the header in a mode 1 sector, and after
+    8 more, the subheader, in a mode 2 one."""
+    out = bytearray(len(data) // CD_SECTOR * CD_DATA)
+    for n, i in enumerate(range(0, len(data), CD_SECTOR)):
+        at = i + (16 if data[i + 15] == 1 else 24)
+        out[n * CD_DATA:(n + 1) * CD_DATA] = data[at:at + CD_DATA]
+    return out
+
+
 def _sectors(data: bytes) -> tuple[bytes, bytes]:
     """The sectors a disk image holds, and their tags if it kept them,
     else b"": a DiskCopy 4.2 image has them after its sectors, and some
     raw images keep each with its sector, in 524-byte records."""
+    if _raw_cd(data):
+        return _cd_data(data), b""
     if len(data) > DISKCOPY_HEADER and data[82:84] == b"\x01\x00" and data[0] < 64:
         size, tag_size = struct.unpack_from(">II", data, 64)
         if DISKCOPY_HEADER + size <= len(data):
@@ -290,11 +328,21 @@ def _sectors(data: bytes) -> tuple[bytes, bytes]:
 
 
 def _hfs_partition(data: bytes) -> tuple[int, int] | None:
-    """Where the first HFS partition in an Apple partition map (a hard disk
-    or CD-ROM image) starts and ends, if data starts with one."""
-    if data[:2] != APM_SIGNATURE or len(data) < 1024:
+    """Where the first HFS or HFS Plus partition in an Apple partition map
+    (a hard disk or CD-ROM image) starts and ends, if data starts with one.
+
+    The map starts at block 1 (Inside Macintosh: Devices, SCSI Manager),
+    in blocks of the size block 0's driver descriptor map gives.  Some CD-ROM
+    images have nothing in block 0; their map is read in 512-byte blocks."""
+    if len(data) < 1024:
         return None
-    for size in dict.fromkeys((struct.unpack_from(">H", data, 2)[0], 512)):
+    if data[:2] == APM_SIGNATURE:
+        sizes = dict.fromkeys((struct.unpack_from(">H", data, 2)[0], 512))
+    elif data[512:514] == APM_ENTRY:
+        sizes = {512: None}
+    else:
+        return None
+    for size in sizes:
         if size < 512 or data[size:size + 2] != APM_ENTRY:
             continue
         count = struct.unpack_from(">I", data, size + 4)[0]
@@ -304,8 +352,8 @@ def _hfs_partition(data: bytes) -> tuple[int, int] | None:
                 break
             start, blocks = struct.unpack_from(">II", entry, 8)
             start, end = start * size, min((start + blocks) * size, len(data))
-            if (entry[48:80].split(b"\0")[0] == b"Apple_HFS"
-                    and data[start + 1024:start + 1026] == HFS_SIGNATURE):
+            if (entry[48:80].split(b"\0")[0] in (b"Apple_HFS", b"Apple_HFSX")
+                    and data[start + 1024:start + 1026] in VOLUME_SIGNATURES[:-1]):
                 return start, end
     return None
 
@@ -314,7 +362,7 @@ def _volume_start(data: bytes) -> tuple[int, bytes] | None:
     """Where the volume starts (its boot blocks, two before the MDB) and
     its signature."""
     for i in range(0, min(len(data), 64 * 512), 512):
-        if data[i + 1024:i + 1026] in (HFS_SIGNATURE, MFS_SIGNATURE):
+        if data[i + 1024:i + 1026] in VOLUME_SIGNATURES:
             return i, bytes(data[i + 1024:i + 1026])
     return None
 
@@ -396,10 +444,17 @@ def _startup_name(boot: bytes) -> str | None:
 
 
 def is_disk_image(data: bytes) -> bool:
-    if moof.is_moof(data):
+    if moof.is_moof(data) or _raw_cd(data):     # load_volume says what's on a CD
         return True
     data = _sectors(data)[0]
-    return _hfs_partition(data) is not None or _volume_start(data) is not None
+    return (_hfs_partition(data) is not None or _volume_start(data) is not None
+            or _iso_9660(data))
+
+
+def _iso_9660(data: bytes) -> bool:
+    """Whether it's an ISO 9660 disc: its volume descriptors start at the
+    sixteenth 2048-byte sector, each with "CD001" after its type (ECMA-119)."""
+    return bytes(data[ISO_9660_AT:ISO_9660_AT + 5]) == b"CD001"
 
 
 def _link_aliases(vol_cr_date, cnids):
@@ -431,12 +486,18 @@ class OnDisk(machfs.File):
             got = self._read[fork] = b"".join(self._disk[a:b] for a, b in spans)[:length]
         return got
 
-    def _length(self, fork: str) -> int:
-        if fork in self._read:
-            return len(self._read[fork])
+    def _on_disk(self, fork: str) -> int:
         length, spans = self._forks[fork]
         n = len(self._disk)                 # an image cut short has less of it
         return min(length, sum(len(range(a, min(b, n))) for a, b in spans))
+
+    def _length(self, fork: str) -> int:
+        return len(self._read[fork]) if fork in self._read else self._on_disk(fork)
+
+    def cut_short(self, fork: str) -> bool:
+        """Whether the image ends before all of the fork: an image copied
+        only in part."""
+        return self._on_disk(fork) < self._forks[fork][0]
 
     def sizes(self) -> tuple[int, int]:
         """Its forks' lengths, without reading them."""
@@ -459,20 +520,21 @@ class OnDisk(machfs.File):
         self._read["rsrc"] = value
 
 
-def _node(tree, n: int) -> tuple[int, list[bytes]]:
+def _node(tree, n: int, size: int = 512) -> tuple[int, list[bytes]]:
     """A B*-tree node's forward link (ndFLink) and its records."""
-    at = 512 * n
+    at = size * n
     link, count = struct.unpack_from(">L6xH", tree, at)
-    offsets = struct.unpack_from(f">{count + 1}H", tree, at + 512 - 2 * (count + 1))[::-1]
+    offsets = struct.unpack_from(f">{count + 1}H", tree, at + size - 2 * (count + 1))[::-1]
     return link, [bytes(tree[at + a:at + b]) for a, b in zip(offsets, offsets[1:])]
 
 
-def _leaf_records(tree) -> Iterator[bytes]:
+def _leaf_records(tree, size: int = 512) -> Iterator[bytes]:
     """A B*-tree's leaf records in order, as machfs's dump_btree reads them:
     from bthFNode through each leaf's ndFLink to bthLNode.  But no node is
     read twice, so a damaged tree whose links go round is a damaged tree,
-    not one read for ever."""
-    header = _node(tree, 0)[1][0]
+    not one read for ever.  An HFS tree's nodes are 512 bytes; an HFS Plus
+    one's are the size its header node gives."""
+    header = _node(tree, 0, size)[1][0]
     first, last = struct.unpack_from(">LL", header, 10)
     seen: set[int] = set()
     n = first
@@ -480,7 +542,7 @@ def _leaf_records(tree) -> Iterator[bytes]:
         if n in seen:
             raise ValueError("its B*-tree's leaves link round in a circle")
         seen.add(n)
-        n_next, records = _node(tree, n)
+        n_next, records = _node(tree, n, size)
         yield from records
         if n == last:
             return
@@ -576,6 +638,150 @@ def _read_hfs(data) -> machfs.Volume:
     return vol
 
 
+def _embedded(volume) -> int | None:
+    """Where the HFS Plus volume an HFS one holds starts in it, if it holds
+    one: the HFS wrapper of Technote 1150, whose MDB names the embedded
+    volume's signature (drEmbedSigWord) and its extent (drEmbedExtent)."""
+    mdb = 1024
+    if volume[mdb + 0x7C:mdb + 0x7E] != b"H+":
+        return None
+    block_size, = struct.unpack_from(">I", volume, mdb + 20)
+    first, = struct.unpack_from(">H", volume, mdb + 28)
+    start, = struct.unpack_from(">H", volume, mdb + 0x7E)
+    return first * 512 + start * block_size
+
+
+def _gmt_to_local(when: int) -> int:
+    """An HFS Plus date, in GMT (TN1150's "HFS Plus Dates"), in the local
+    time an HFS one is in."""
+    if not when:
+        return 0
+    try:
+        offset = time.localtime(when - MAC_1904).tm_gmtoff
+    except (OverflowError, OSError, ValueError):
+        offset = 0
+    return (when + offset) & 0xFFFFFFFF
+
+
+def _mac_name(name: str, cnid: int, folder: machfs.Folder, limit: int = 31) -> str:
+    """An HFS Plus name, in Unicode, as the File Manager hands it to a
+    program: Mac Roman, at most 31 characters.  One that won't go, or that
+    another file or folder in its folder already has, is cut short and
+    given its catalog node ID after a "#": macrt's own way to keep it
+    apart, as the volume does."""
+    name = unicodedata.normalize("NFC", name)
+    try:
+        mac = name.encode("mac_roman")
+        fits = len(mac) <= limit and ":" not in name and name not in folder
+    except UnicodeEncodeError:
+        mac, fits = name.encode("mac_roman", "replace"), False
+    if fits:
+        return name
+    tag = f"#{cnid:X}".encode()
+    return (mac.replace(b":", b"?")[:limit - len(tag)] + tag).decode("mac_roman")
+
+
+def _read_hfs_plus(disk) -> machfs.Volume:
+    """An HFS Plus volume (Technote 1150, "HFS Plus Volume Format") as the
+    HFS reader has one, so the rest of macrt can't tell them apart: its
+    catalog's folders and files, their Finder information, dates (in GMT
+    on the disk, in local time as HFS keeps them) and flags, each file's
+    forks left on the disk until they're wanted, and its names as
+    _mac_name has them.  A hard link is the file it links to, and the
+    folder that keeps those, the metadata directory, isn't seen, as the
+    Technote has it of an implementation that follows hard links."""
+    vh = 1024
+    crdate, mddate, bkdate = struct.unpack_from(">III", disk, vh + 16)
+    block_size, = struct.unpack_from(">I", disk, vh + 40)
+    if not block_size or block_size % 512:
+        raise ValueError(f"its allocation blocks are {block_size} bytes")
+    overflow: dict[tuple[int, int, int], bytes] = {}    # (fork type, file, block): extents
+
+    def spans(length: int, extents: bytes, cnid: int, kind: int) -> list[tuple[int, int]]:
+        """Where a fork's bytes are on the disk: its first eight extents',
+        then the extents overflow file's."""
+        out, blocks, wanted = [], 0, -(-length // block_size)
+        looked: set[int] = set()
+        while True:
+            for i in range(0, 64, 8):
+                start, count = struct.unpack_from(">LL", extents, i)
+                if count:
+                    out.append((start * block_size, (start + count) * block_size))
+                    blocks += count
+            if blocks >= wanted:
+                return out
+            if blocks in looked:                # an overflow record of no blocks
+                raise ValueError(f"file {cnid}'s extents end at block {blocks}")
+            looked.add(blocks)
+            extents = overflow[kind, cnid, blocks]
+
+    def fork(value: bytes, at: int, cnid: int, kind: int) -> tuple[int, list[tuple[int, int]]]:
+        """A fork's length, and where its bytes are, from its HFSPlusForkData."""
+        length, = struct.unpack_from(">Q", value, at)
+        return length, spans(length, value[at + 16:at + 80], cnid, kind)
+
+    def tree(at: int, cnid: int) -> tuple[bytes, int]:
+        """One of the volume's own B-tree files, and its node size."""
+        length, where = fork(bytes(disk[vh:vh + 512]), at, cnid, 0)
+        data = b"".join(disk[a:b] for a, b in where)[:length]
+        return data, struct.unpack_from(">H", data, 14 + 18)[0]
+
+    for rec in _leaf_records(*tree(192, 3)):            # the extents overflow file
+        klen, kind, cnid, start = struct.unpack_from(">HBxLL", rec)
+        if klen >= 10 and kind in (0, 0xFF):            # a data fork's, a resource fork's
+            overflow[kind, cnid, start] = rec[2 + klen:2 + klen + 64]
+    cnids: dict[int, machfs.Folder | machfs.File] = {}
+    children, links = [], []
+    for rec in _leaf_records(*tree(272, 4)):            # the catalog
+        klen, parent, length = struct.unpack_from(">HLH", rec)
+        name = rec[8:8 + 2 * length].decode("utf-16-be", "replace")
+        value = rec[(2 + klen + 1) & ~1:]
+        kind = struct.unpack_from(">h", value)[0] if len(value) >= 2 else 0
+        if kind not in (1, 2):                          # a thread
+            continue
+        flags, cnid, *dates = struct.unpack_from(">2xH4xLLL8xL", value)
+        if kind == 1:                                   # a folder
+            node = machfs.Folder()
+        elif kind == 2:                                 # a file
+            node = OnDisk(disk, {"data": fork(value, 88, cnid, 0),
+                                 "rsrc": fork(value, 168, cnid, 0xFF)})
+            node.type, node.creator, node.flags, v, h = struct.unpack_from(">4s4sHhh", value, 48)
+            node.y, node.x = v, h
+            node.locked = bool(flags & 1)               # its other flags aren't HFS's
+            if (node.type, node.creator) == (b"hlnk", b"hfs+"):
+                links.append((node, struct.unpack_from(">L", value, 44)[0]))
+        node.crdate, node.mddate, node.bkdate = map(_gmt_to_local, dates)
+        cnids[cnid] = node
+        children.append((parent, name, cnid, node))
+    hidden = next((cnid for parent, name, cnid, node in children if parent == 2
+                   and name == "\0\0\0\0HFS+ Private Data"
+                   and isinstance(node, machfs.Folder)), None)
+    inodes = {name: node for parent, name, cnid, node in children if parent == hidden}
+    targets = {id(link): inodes.get(f"iNode{n}", link) for link, n in links}
+    vol_name = "Untitled"
+    for parent, name, cnid, node in children:
+        if parent == 1:                                 # the top folder: the volume's name
+            vol_name = _mac_name(name, cnid, {}, 27)
+        elif cnid != hidden and parent != hidden:
+            folder = cnids[parent]
+            folder[_mac_name(name, cnid, folder)] = targets.get(id(node), node)
+    seen, todo = set(), [cnids[2]]
+    while todo:                                         # a folder that is in itself?
+        folder = todo.pop()
+        if id(folder) in seen:
+            raise ValueError("a folder on it is inside itself")
+        seen.add(id(folder))
+        todo.extend(v for v in folder.values() if isinstance(v, machfs.Folder))
+    vol = machfs.Volume()
+    vol.update(cnids[2])
+    for name in ("Desktop", "Desktop DB", "Desktop DF"):
+        vol.pop(name, None)
+    _link_aliases(crdate, cnids)
+    vol.crdate, vol.mddate, vol.bkdate = crdate, _gmt_to_local(mddate), _gmt_to_local(bkdate)
+    vol.name = vol_name
+    return vol
+
+
 def _image(path: Path) -> bytes | mmap.mmap:
     """A disk image's bytes.  A big one, a hard disk's or a CD's, is mapped
     copy-on-write rather than read: only what's looked at is in memory, and
@@ -596,26 +802,49 @@ def load_volume(source: str | os.PathLike | bytes | mmap.mmap) -> machfs.Volume:
         disk = Disk(bytearray(tracks.image), bytearray(tracks.tags), tracks)
     else:
         sectors, tags = _sectors(data)
-        disk = Disk(sectors if isinstance(sectors, mmap.mmap) else bytearray(sectors),
-                    bytearray(tags))
+        own = (isinstance(sectors, mmap.mmap)          # the disk's own already: not copied
+               or sectors is not data and isinstance(sectors, bytearray))
+        disk = Disk(sectors if own else bytearray(sectors), bytearray(tags))
         disk.tracks = moof.Formatted.of(disk.sectors, disk.tags)
     data = memoryview(disk.sectors)     # read through, not copied
     part = _hfs_partition(data)
     if part is not None:
         data = data[part[0]:part[1]]
     start = _volume_start(data)
+    if part is None and start is None and _iso_9660(data):
+        raise ValueError("it's an ISO 9660 disc, with no HFS, HFS Plus or MFS volume "
+                         "on it for macrt to read")
     startup = _startup_name(bytes(data[start[0]:start[0] + 1024])) if start else None
+    allocation = _allocation(data, start)
     if start and start[1] == MFS_SIGNATURE:
         vol = _read_mfs(bytes(data[start[0]:]), start[0] // SECTOR)
-        vol.size, vol.startup, vol.disk = len(data), startup, disk
+        vol.size, vol.startup, vol.disk, vol.allocation = len(data), startup, disk, allocation
         return vol
     try:
-        vol = _read_hfs(data)
+        if start and start[1] == HFS_SIGNATURE and _embedded(data[start[0]:]) is not None:
+            start = start[0] + _embedded(data[start[0]:]), b"H+"
+        if start and start[1] in HFS_PLUS_SIGNATURES:
+            vol = _read_hfs_plus(data[start[0]:])
+        else:
+            vol = _read_hfs(data)
     except Exception as e:      # noqa: BLE001 - a damaged catalog trips over anything
         raise ValueError(f"the disk image is damaged ({type(e).__name__}: {e})") from None
     vol.size = len(data)                # the disk's: whether it's a floppy's
-    vol.startup, vol.disk = startup, disk
+    vol.startup, vol.disk, vol.allocation = startup, disk, allocation
     return vol
+
+
+def _allocation(data, start: tuple[int, bytes] | None) -> tuple[int, int, int] | None:
+    """An MFS or HFS volume's allocation blocks, their size and how many are
+    free, as its MDB has them (drNmAlBlks, drAlBlkSiz and drFreeBks, at the
+    same places in both): an HFS Plus volume's wrapper's, if it has one."""
+    if not start or start[1] not in (HFS_SIGNATURE, MFS_SIGNATURE):
+        return None
+    mdb = bytes(data[start[0] + 1024:start[0] + 1024 + 36])
+    if len(mdb) < 36:
+        return None
+    (blocks, size), (free,) = struct.unpack_from(">HI", mdb, 18), struct.unpack_from(">H", mdb, 34)
+    return (blocks, size, free) if size and not size % 512 else None
 
 
 def volume_files(volume: machfs.Volume) -> Iterator[MacFile]:
@@ -884,7 +1113,8 @@ def open_disks(paths, names=()) -> tuple[list[MacFile], list[machfs.Volume]]:
     that isn't a disk image is an application; from the images, the names
     found on them (each name is looked for on the images in turn, and
     taken from the first that has it), or with no names each image's only
-    application.  A name that's a document's is the application that made
+    application, unless an application file is among them, whose disks the
+    images then are.  A name that's a document's is the application that made
     it (its creator), launched with it, as when it's opened in the Finder;
     documents of the same application are opened by one launch of it, and
     one whose creator is an application named before it is opened by that
@@ -927,6 +1157,7 @@ def open_disks(paths, names=()) -> tuple[list[MacFile], list[machfs.Volume]]:
             found.documents = (doc,)
         picked.setdefault(i, []).append(found)
     apps: list[MacFile] = []
+    disks_only = len(images) < len(opened)  # an application file's disks, with no names
     i = 0
     for path, volume, f in opened:
         if volume is None:
@@ -934,7 +1165,7 @@ def open_disks(paths, names=()) -> tuple[list[MacFile], list[machfs.Volume]]:
             continue
         if i in picked:
             apps += picked[i]
-        elif not names and not _runs_nothing(volume):
+        elif not names and not disks_only and not _runs_nothing(volume):
             apps.append(_only_application(volume, path))
         i += 1
     if not apps and images:
@@ -952,6 +1183,7 @@ def _volume_or_file(path: str | os.PathLike) -> tuple[machfs.Volume | None, MacF
         except ValueError as e:
             problem = e
     if volume is not None:
+        volume.cdrom = path.suffix.lower() in CD_IMAGES or _raw_cd(raw)
         return volume, None
     f = load_file(path)
     if problem is not None and not f.rsrc:
@@ -1050,6 +1282,13 @@ def fonts_beside(system: MacFile | None) -> list[MacFile]:
         return []
     return [f for f in VolumeFolder(folder.volume, folder.path + (stored,)).files()
             if f.type == b"FFIL"]
+
+
+def finder_beside(system: MacFile | None) -> MacFile | None:
+    """The Finder in the folder system, a disk's System file, is in."""
+    folder = system.folder if system is not None else None
+    finder = folder.find("Finder") if folder is not None else None
+    return finder if finder is not None and finder.type == b"FNDR" else None
 
 
 def _startup_program(volume: machfs.Volume) -> MacFile | None:

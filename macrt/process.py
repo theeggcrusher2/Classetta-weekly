@@ -33,7 +33,7 @@ from .toolbox.menus import (HELP_ITEM_COUNT, MenuColors, MenuInfo, MenuList, mct
 from .toolbox.quickdraw import QD_GLOBALS_SIZE
 from .toolbox.resources import ResourceManager
 from .toolbox.system import (ALTERNATE_ROOM, APP_PARAMS, DEFAULT_PARTITION, DEFAULT_STACK,
-                             MIN_HEAP, System)
+                             MIN_HEAP, SIZE_STACK, System)
 from .toolbox.windows import WindowList
 
 if TYPE_CHECKING:
@@ -114,6 +114,7 @@ class Process:
         self.world = self.partition.world
         self.world.w16(lowmem.CurPageOption, page_option)  # Launch's: < 0 for the alternate screen
         self.windows = WindowList(system, self.world)     # front to back
+        self.windows_set_up = False                       # InitWindows has been called
         self.frames_due: set[WindowRecord] = set()        # for their own WDEFs to shape and draw
         self.menus = MenuList(system, self.world)         # the menu bar, InsertMenu order
         self.menus.init(self.heap)
@@ -148,6 +149,7 @@ class Process:
         # it wants; -1's, the application's own default palette.
         self.palettes: dict[int, tuple[int, int]] = {}
         self.last_bar: MenuBarWidget | None = None  # where HiliteMenu applies
+        self.menu_choice = 0                        # what MenuChoice returns
         # Its cursor's shape (macrt.toolbox.cursors), the one the display
         # was last told to show, and whether it's obscured till the mouse moves.
         self.cursor = None
@@ -185,19 +187,22 @@ class Process:
             return self.system.open_partition(self.name, DEFAULT_PARTITION + room, **world)
         # As the Finder does: the preferred size if there's room, else as
         # much as there is, as long as that's at least the minimum.  The
-        # stack comes on top: the sizes were worked out for a Mac that gave
-        # applications 8K or 24K of stack, and this one gives DEFAULT_STACK.
+        # sizes hold SIZE_STACK of stack and this Mac gives DEFAULT_STACK,
+        # so the difference comes on top, and the heap is the one the
+        # sizes leave room for.  GNU Chess Pro halves the two tables it
+        # makes until both fit; in a heap 8K bigger they fit at 160K each
+        # and leave too little for the rest of what it makes.
         # And room for the A5 world and the least heap there is: Beyond Dark
         # Castle's launcher asks for 20K.
         # (Rounding A5 and ApplLimit down to longs can take 6 bytes.)
         least = (MIN_HEAP + world.get("above_a5", APP_PARAMS)
                  + world.get("below_a5", QD_GLOBALS_SIZE) + 8)
-        preferred, minimum = (max(n, least) + DEFAULT_STACK + room for n in sizes)
+        preferred, minimum = (max(n - SIZE_STACK, least) + DEFAULT_STACK + room for n in sizes)
         free = self.system.largest_free()
         if free < minimum:
             raise MemoryError(f"{self.name} needs {sizes[1] // 1024}K of memory and "
-                              f"{DEFAULT_STACK // 1024}K for its stack, and only "
-                              f"{free // 1024}K is free")
+                              f"{(DEFAULT_STACK - SIZE_STACK) // 1024}K more for its stack, "
+                              f"and only {free // 1024}K is free")
         return self.system.open_partition(self.name, min(max(preferred, minimum), free),
                                           **world)
 

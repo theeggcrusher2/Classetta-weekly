@@ -16,6 +16,7 @@ System 7 compressed resources.
 
 from __future__ import annotations
 
+import io
 import struct
 from dataclasses import dataclass
 
@@ -179,11 +180,23 @@ def read_fork(data: bytes) -> list[Resource]:
 
 
 def decompress(data: bytes) -> bytes:
-    """Expand a resource stored with resCompressed set."""
+    """Expand a resource stored with resCompressed set.  Once it has come
+    to the length its header gives, whatever is stored after is left
+    alone: MacBrickout 3.1's segments have a byte more after the end
+    marker."""
+    stream = io.BytesIO(data)
+    out = bytearray()
     try:
-        return rsrcfork.compress.decompress(data)
+        header = rsrcfork.compress.CompressedHeaderInfo.parse_stream(stream)
     except Exception as e:      # noqa: BLE001 - as in open_fork
         raise DecompressError(str(e)) from e
+    try:
+        for chunk in rsrcfork.compress.decompress_stream_parsed(header, stream):
+            out += chunk
+    except Exception as e:      # noqa: BLE001 - as in open_fork
+        if len(out) != header.decompressed_length:
+            raise DecompressError(str(e)) from e
+    return bytes(out)
 
 
 def build_fork(resources: list[Resource], file_attrs: int = 0) -> bytes:

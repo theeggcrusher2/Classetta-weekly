@@ -37,8 +37,9 @@ from .macfile import is_control_panel, open_application, open_disks
 from .resfork import is_fork
 from .toolbox import constants as k
 from .toolbox.api import Toolbox
+from .toolbox.system import MODELS
 from .toolbox.types import Rect
-from .ui.display import Display, DisplayConfig
+from .ui.display import ROW_BYTES, Display, DisplayConfig, row_bytes_ok
 from .viewer import describe, viewer_main
 
 # No "(" in these: AppendMenu reads it as "disable this item", as on a Mac.
@@ -273,13 +274,14 @@ def parse_args(argv=None):
     ap.add_argument("--speed", type=float, default=None, metavar="N",
                     help="run 68k code at about N times a Mac Plus's speed, for games that "
                          "run as fast as the processor goes (default: as fast as it goes)")
-    ap.add_argument("--model", choices=["plus", "ii"], default="plus",
-                    help="the Mac it says it is: a Mac Plus's 68000, or a Mac II's 68020 and "
-                         "68881, for programs that need one (default: plus)")
+    ap.add_argument("--model", choices=list(MODELS), default="plus",
+                    help="the Mac it says it is: a Mac Plus's 68000, a Mac II's 68020 and "
+                         "68881, or a Mac IIx's 68030 and 68882, for programs that need one "
+                         "(default: plus)")
     ap.add_argument("--depth", type=int, choices=[1, 2, 4, 8, 16, 32], default=None,
-                    help="with --model ii, the screen's bits a pixel: 1 for black and white, "
-                         "2 to 8 for colours by a colour table, 16 and 32 for direct colour "
-                         "(default: 8)")
+                    help="with --model ii or iix, the screen's bits a pixel: 1 for black and "
+                         "white, 2 to 8 for colours by a colour table, 16 and 32 for direct "
+                         "colour (default: 8)")
     ap.add_argument("--row-bytes", type=int, metavar="N", default=None,
                     help="how many bytes apart the screen's rows are at the depth it starts "
                          "at (and at another, as many pixels apart), for a program that writes "
@@ -319,10 +321,10 @@ def parse_args(argv=None):
     args = ap.parse_args(argv)
     if args.memory is not None and args.memory <= 0:
         ap.error("--memory is a size in K, more than 0")
-    if args.depth not in (None, 1) and args.model != "ii":
-        ap.error("a Mac Plus's screen is black and white: --depth needs --model ii")
-    if args.row_bytes is not None and (args.row_bytes & 1 or not 0 < args.row_bytes < 0x4000):
-        ap.error("--row-bytes is an even number of bytes, less than 16384")
+    if args.depth not in (None, 1) and not MODELS[args.model].color:
+        ap.error("a Mac Plus's screen is black and white: --depth needs --model ii or iix")
+    if args.row_bytes is not None and not row_bytes_ok(args.row_bytes):
+        ap.error(f"--{ROW_BYTES}")
     if args.size is not None:
         args.size = _screen_size(args.size)
         if args.size is None:
@@ -356,6 +358,9 @@ def open_targets(args):
             print(f"Opening {doc.name} with it.")
         if args.list:
             continue
+        if f.cut_short("rsrc"):
+            return None, None, (f"{f.name}'s resource fork goes past the end of the disk image: "
+                                "the image holds only part of its disk.")
         if not f.rsrc and is_fork(f.data):
             return None, None, (f"{f.name}'s resource fork is in its data fork: it was copied "
                                 "by something that didn't keep its two forks apart.")
