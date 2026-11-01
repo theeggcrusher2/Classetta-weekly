@@ -1,22 +1,29 @@
 """A program's own device control entries, DriverInstall and DriverRemove
-(Inside Macintosh: Devices, the Device Manager); what's set up for an
-application at launch; and SEvtEnb, which the THINK C console clears so
-that GetNextEvent leaves its console's events to it (Burtonia)."""
+(Inside Macintosh: Devices, the Device Manager); the video driver's entry;
+what's set up for an application at launch; and SEvtEnb, which the THINK C
+console clears so that GetNextEvent leaves its console's events to it
+(Burtonia)."""
 
-from macrt.m68k import glue_desk
+import struct
+
+from macrt.m68k import glue_desk, glue_slots
 from macrt.m68k import glue_devices as dev
+from macrt.memory import ADDRESS_MASK
 from macrt.toolbox import lowmem
+from macrt.toolbox.gdevice import VIDEO_DRIVER, VIDEO_SLOT
 
 from guest import Guest, Processor
 
 CONSOLE = -28                           # Burtonia's .console, at unit 27
 INSTALL, INSTALL_KEEPING_A0 = b"\xa0\x3d", b"\xa1\x3d"
 REMOVE = b"\xa0\x3e"
+STATUS = b"\xa0\x05"
+GET_GAMMA = 8
 
 
-def processor() -> Processor:
+def processor(**system) -> Processor:
     """A Processor with an empty unit table, as the runtime sets it up."""
-    p = Processor()
+    p = Processor(**system)
     p.machine.system = p.system
     p.machine.io_done = p.ptr(b"\x4e\x75")
     p.machine.drivers = {}
@@ -63,6 +70,38 @@ def test_drvr_install_wants_a_refnum_in_the_table(qapp):
     for refnum in (0, 5, -dev.UNITS - 1):
         assert call(p, INSTALL, refnum, p.ptr(bytes(0x2A))) == dev.badUnitErr
     assert p.machine.drivers == {}
+
+
+def test_the_unit_table_goes_up_to_unit_127(qapp):
+    """IM Devices' reserved unit numbers: 48 through 127 for slot and other
+    drivers.  Disk Copy puts its own driver at 48 on, in the table."""
+    p = processor()
+    assert p.mem.r16(lowmem.UnitNtryCnt) == 128
+    for refnum in (-49, -128):
+        assert call(p, INSTALL, refnum, p.ptr(bytes(0x2A))) == dev.noErr
+        assert p.system.sys_heap.is_handle(entry(p, refnum))
+
+
+def test_the_video_driver_has_a_slot_devices_entry(qapp):
+    """On a colour machine the screen's video driver has an entry in the
+    unit table, with its card's slot fields (Inside Macintosh V, the Device
+    Manager): Powerball takes the slot from it for SlotVInstall.  Its calls
+    are still macrt's own."""
+    assert entry(processor(), VIDEO_DRIVER) == 0          # a Plus has none
+    p = processor(model="ii")
+    m = p.mem
+    dce = m.r32(entry(p, VIDEO_DRIVER)) & ADDRESS_MASK
+    assert m.r16s(dce + dev.dCtlRefNum) == VIDEO_DRIVER
+    assert m.r16(dce + dev.dCtlFlags) & dev.dOpened
+    assert m.r8(dce + dev.dCtlSlot) == VIDEO_SLOT
+    assert m.r8(dce + dev.dCtlSlotId) == glue_slots.VIDEO
+    assert m.r32(dce + dev.dCtlDevBase) == p.system.screen_bits.base
+    driver = m.r32(dce + dev.dCtlDriver)
+    assert m.r_pstr(driver + dev.drvrName) == b".Display_Video_Apple_TFB"
+    pb, record = p.ptr(bytes(50)), p.ptr(bytes(4))
+    m.write(pb + 24, struct.pack(">hhL", VIDEO_DRIVER, GET_GAMMA, record))
+    assert call(p, STATUS, 0, pb) == dev.noErr
+    assert m.r32(record) != 0                              # the driver's gamma table
 
 
 def test_drvr_remove_takes_out_a_closed_driver_but_not_an_open_one(qapp):

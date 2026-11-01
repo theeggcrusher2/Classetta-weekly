@@ -18,7 +18,7 @@ from macrt.toolbox.types import Rect
 
 from guest import Guest, Room
 from test_dialogs import NoDisplay
-from test_pict import direct_bits, rect, tall_pix_pat, v2
+from test_pict import direct_bits, procs_of, rect, tall_pix_pat, v2
 
 returnColorTable, returnPalette, recordComments, recordFontInfo = 1, 2, 4, 8
 suppressBlackAndWhite = 16
@@ -155,6 +155,30 @@ def test_an_extended_header_gives_the_resolution_and_source_rectangle(g):
     assert (got["hRes"], got["vRes"]) == (144 << 16, 144 << 16)
     assert (got["top"], got["left"], got["bottom"], got["right"]) == (0, 0, 20, 40)
     assert got["depth"] == 1
+
+
+def test_a_spooled_picture_is_read_through_the_ports_get_pic_proc(g, monkeypatch):
+    """A picture whose handle holds only its size and frame is read, as
+    DrawPicture reads it, through the current port's getPicProc (Jigsaw's
+    picture from its data fork); with no room for the buffer that needs,
+    GetPictInfo is a memFullErr."""
+    data = v2((0, 0, 4, 16), (0x0030, rect(0, 0, 2, 2)), (0x001A, struct.pack(">HHH", *GREEN)))
+    stream = bytearray(data[10:])
+    port, _ = g.port()
+    procs_of(g, port, _44=0x1234)
+
+    def get_pic(buf, n):
+        g.mem.write(buf, bytes(stream[:n]))
+        del stream[:n]
+    g.procs[0x1234] = get_pic
+    header = g.handle(data[:10])
+    info = g.ptr(bytes(PICT_INFO.size))
+    assert g("GetPictInfo", header, info, returnColorTable, 2, 0, 0) == 0
+    got = info_of(g, info)
+    assert got["rectCount"] == 1 and (got["bottom"], got["right"]) == (4, 16)
+    assert GREEN in ctab_colors(g, got["theColorTable"]) and not stream
+    Room(monkeypatch, g).limit(0)
+    assert g("GetPictInfo", header, info, 0, 0, 0, 0) == memFullErr
 
 
 @pytest.mark.parametrize("verb, colors, method, version, err", [

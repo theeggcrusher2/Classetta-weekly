@@ -4,19 +4,22 @@ while it runs alongside a Python application."""
 from contextlib import nullcontext
 from types import SimpleNamespace
 
+import machfs
 import pytest
 from guest import Guest, Processor
 from test_dialogs import NoDisplay
 from test_m68k_apps import launch_hello
 
 from macrt.m68k import dispatch
+from macrt.m68k.glue_files import FSMakeFSSpec
 from macrt.m68k.glue_os import Gestalt, trap_address
 from macrt.m68k.glue_process import (GetCurrentProcess, GetFrontProcess, GetNextProcess,
                                      GetProcessInformation, SameProcess, SetFrontProcess,
                                      TempDisposeHandle, TempFreeMem, TempHLock, TempHUnlock,
                                      TempMaxMem, TempNewHandle, TempTopMem, WakeUpProcess,
                                      kCurrentProcess, paramErr, procNotFound)
-from macrt.resfork import Resource
+from macrt.macfile import VolumeFolder, load_volume
+from macrt.resfork import Resource, build_fork
 from macrt.toolbox.memmgr import memFullErr, memWZErr, noErr
 from macrt.toolbox.system import RAM_SIZE
 
@@ -236,8 +239,11 @@ def test_a_process_named_in_its_fsspec(qapp):
     g.mem.w32(info + 56, spec | 0xFF000000)
     g.mem.w32(p + 4, kCurrentProcess)
     assert GetProcessInformation(g, p, info) == noErr
-    assert g.mem.read(spec, 6) == bytes(6) and g.mem.r_pstr(spec + 6) == b"Test App"
+    node = g.system.files.node_for(g.process.app)
+    assert g.mem.r16s(spec) == node.volume.vref and g.mem.r32(spec + 2) == node.parid
+    assert g.mem.r_pstr(spec + 6) == b"Test App"
 
+    # A Python application has no file: it's named, on no volume.
     g.mem.w32(p + 4, other.serial_number)
     g.mem.w32(info + 4, name := g.ptr(b"\xee" * 40))
     assert GetProcessInformation(g, p, info) == noErr
@@ -245,3 +251,28 @@ def test_a_process_named_in_its_fsspec(qapp):
     assert g.mem.r_pstr(name) == other.name[:31].encode()
     assert g.mem.r_pstr(spec + 6) == other.name[:63].encode()
     assert g.mem.read(spec + 70, 10) == b"\xee" * 10     # past the Str63
+
+
+def test_the_fsspec_is_where_the_applications_file_is(qapp):
+    """Play-Doh Creations makes an FSSpec of "Play-Doh Creations
+    CD-ROM:PDAPP" and checks it's on the volume its own FSSpec names."""
+    v = machfs.Volume()
+    v.name = "Disc"
+    v["Game"] = machfs.Folder()
+    f = machfs.File()
+    f.type, f.creator, f.rsrc = b"APPL", b"GAME", build_fork([])
+    v["Game"]["Play"] = f
+    g, _, _ = guests()
+    disc = load_volume(v.write(800 * 1024, desktopdb=False, bootable=False))
+    g.process.app = VolumeFolder(disc, ("Game",)).find("Play")
+    p, info, spec = g.ptr(bytes(8)), g.ptr(bytes(60)), g.ptr(bytes(70))
+    g.mem.w32(info, 60)
+    g.mem.w32(info + 56, spec)
+    g.mem.w32(p + 4, kCurrentProcess)
+    assert GetProcessInformation(g, p, info) == noErr
+    vol = g.system.files.volume_named("Disc")
+    assert g.mem.r16s(spec) == vol.vref and g.mem.r32(spec + 2) == vol.root.child("Game").cnid
+    assert g.mem.r_pstr(spec + 6) == b"Play"
+    found = g.ptr(bytes(70))
+    assert FSMakeFSSpec(g, 0, 0, g.ptr(b"\x0eDisc:Game:Play"), found) == noErr
+    assert g.mem.read(found, 70) == g.mem.read(spec, 70)

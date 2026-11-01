@@ -23,7 +23,7 @@ from macrt.toolbox.events import EventQueue
 from macrt.toolbox.memmgr import LOCKED, PURGEABLE, RESOURCE, Heap
 from macrt.toolbox.menus import MENU_PROC, read_mbdf_id, read_menu_list
 from macrt.toolbox.resources import ResourceMap
-from macrt.toolbox.system import DEFAULT_STACK, MIN_HEAP, System
+from macrt.toolbox.system import DEFAULT_STACK, MIN_HEAP, SIZE_STACK, System
 from macrt.toolbox.templates import (
     alertPositionMainScreen, btnCtrl, centerMainScreen, ctrlItem, editText, iconItem,
     noAutoCenter, parse_alrt, parse_cntl, parse_ditl, parse_dlog, parse_mbar, parse_str_list,
@@ -268,11 +268,18 @@ def test_application_file_is_open_and_current():
 def test_size_resource_sets_the_partition():
     system, proc, res = make()
     # What it asks for, and room for macrt's bigger stack.
-    assert proc.partition.end - proc.partition.start == 640 * 1024 + DEFAULT_STACK
+    size = proc.partition.end - proc.partition.start
+    assert size == 640 * 1024 - SIZE_STACK + DEFAULT_STACK
+    # The heap is the one the SIZE leaves room for, with its 8K stack and
+    # the A5 world: GNU Chess Pro halves its tables to fit that heap.
+    appl_limit, stack_base = (proc.world.r32(a) for a in (lowmem.ApplLimit, lowmem.CurStackBase))
+    assert stack_base - appl_limit - DEFAULT_STACK in range(4)
+    heap, world = appl_limit - proc.partition.start, proc.partition.end - stack_base
+    assert 640 * 1024 - (heap + SIZE_STACK + world) in range(8)
     # Short of the preferred size, an app gets what's free if that's its minimum.
     free = system.largest_free()
-    greedy = build_fork([Resource(b"SIZE", -1,
-                                  size_res(64 << 20, free - DEFAULT_STACK - 1024))])
+    greedy = build_fork([Resource(b"SIZE", -1, size_res(
+        64 << 20, free - DEFAULT_STACK + SIZE_STACK - 1024))])
     _, proc, _ = make(greedy, system=system)
     assert proc.partition.end - proc.partition.start == free
     too_big = build_fork([Resource(b"SIZE", -1, size_res(64 << 20, 32 << 20))])
@@ -462,6 +469,32 @@ def test_release_and_detach():
     assert proc.heap.is_handle(again) and not system.mem.r8(again) & RESOURCE
     assert res.HomeResFile(again) == -1 and res.ResError() == rm.resNotFound
     assert res.GetResource("STR ", 129) != again
+
+
+def test_a_released_system_resource_is_read_in_again():
+    """macrt's own System resources are only in memory, but one that's
+    released is read in again, as GetCursor needs when a program has
+    released the watch (Aladdin Activity Centre)."""
+    system, proc, res = make()
+    h = res.GetResource("CURS", 4)
+    assert h and contents(system, h) == sysres.WATCH_CURSOR
+    res.ReleaseResource(h)
+    assert res.ResError() == rm.noErr and not system.sys_heap.is_handle(h)
+    res.SetResLoad(False)
+    empty = res.GetResource("CURS", 4)
+    assert res.SizeResource(empty) == len(sysres.WATCH_CURSOR)
+    res.SetResLoad(True)
+    again = res.GetResource("CURS", 4)
+    assert again == empty and contents(system, again) == sysres.WATCH_CURSOR
+    # Given another ID it's still read in again; removed, it's gone.
+    res.SetResInfo(again, 300)
+    res.ReleaseResource(again)
+    renamed = res.GetResource("CURS", 300)
+    assert contents(system, renamed) == sysres.WATCH_CURSOR
+    assert res.GetResource("CURS", 4) == 0
+    res.UseResFile(res.sys_refnum)
+    res.RemoveResource(renamed)
+    assert res.ResError() == rm.noErr and res.GetResource("CURS", 300) == 0
 
 
 def test_rsrc_map_entry_is_where_the_resource_is_in_its_map():
@@ -840,7 +873,7 @@ def test_the_users_size_comes_first():
     fork = build_fork([Resource(b"SIZE", -1, size_res(32 * 1024, 32 * 1024)),
                        Resource(b"SIZE", 0, size_res(800 * 1024, 32 * 1024))])
     _, proc, _ = make(fork)
-    assert proc.partition.end - proc.partition.start == 800 * 1024 + DEFAULT_STACK
+    assert proc.partition.end - proc.partition.start == 800 * 1024 - SIZE_STACK + DEFAULT_STACK
 
 
 def test_a_memory_size_given_at_launch_beats_the_size_resource():
@@ -848,10 +881,10 @@ def test_a_memory_size_given_at_launch_beats_the_size_resource():
     for 96K, too little for its FORTH dictionary."""
     fork = build_fork([Resource(b"SIZE", -1, size_res(96 * 1024, 96 * 1024))])
     _, proc, _ = make(fork, memory=384 * 1024)
-    assert proc.partition.end - proc.partition.start == 384 * 1024 + DEFAULT_STACK
+    assert proc.partition.end - proc.partition.start == 384 * 1024 - SIZE_STACK + DEFAULT_STACK
     # And an application with no SIZE resource gets it too.
     _, proc, _ = make(build_fork([Resource(b"STR ", 128, pstr("Hello"))]), memory=200 * 1024)
-    assert proc.partition.end - proc.partition.start == 200 * 1024 + DEFAULT_STACK
+    assert proc.partition.end - proc.partition.start == 200 * 1024 - SIZE_STACK + DEFAULT_STACK
 
 
 def test_d0_and_the_flags_after_a_resource_call_are_reserrs(qapp, tmp_path, monkeypatch):

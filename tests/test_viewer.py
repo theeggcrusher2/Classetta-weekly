@@ -1,19 +1,22 @@
 """Opening a real application from the command line: the resource listing,
 the errors, and ResourceViewer standing in for the app's code."""
 
+import gc
 import struct
 import threading
 
+import machfs
 import pytest
 
 from builders import alrt, ditl, dlog, menu, pstr, size_res, vers, wind
-from macrt.demo import main, parse_args
-from macrt.m68k.segload import why_no_code
-from macrt.macfile import MacFile
+from macrt.demo import main, open_targets, parse_args
+from macrt.m68k.segload import has_powerpc_code, why_no_code
+from macrt.macfile import MacFile, load_volume
 from macrt.resfork import Resource, build_fork
 from macrt.toolbox import constants as k
 from macrt.toolbox.templates import btnCtrl, ctrlItem, editText, statText
 from macrt.toolbox.types import Rect
+from macrt.ui.display import InputRouter, ScreenWindow
 from macrt.viewer import ResourceViewer, describe
 from test_files import macbinary
 
@@ -113,6 +116,34 @@ def test_command_line_errors(tmp_path, capsys):
     assert "No such file" in fails(app, "--system", tmp_path / "System")
 
 
+def test_an_application_past_the_end_of_a_disk_image_cut_short(tmp_path):
+    """An image that holds only part of its disk has an application whose
+    resource fork goes past its end: macrt says so, rather than that the
+    fork was lost in copying.  One whose forks are on what the image holds
+    runs as ever."""
+    v = machfs.Volume()
+    v.name = "Part"
+    for name in ("First", "Last"):
+        f = v[name] = machfs.File()
+        f.type, f.creator, f.rsrc = b"APPL", b"TEST", APP_FORK + bytes(64 * 1024)
+    image = bytearray(v.write(800 * 1024, desktopdb=False, bootable=False))
+    # Last's fork moved to the end of the disk, past its catalog.
+    vol = load_volume(bytes(image))
+    (at, end), = vol["Last"]._forks["rsrc"][1]
+    blocks = struct.pack(">HH", (at - 2048) // 512, (end - at) // 512)
+    assert image.count(blocks) == 1
+    i, moved = image.index(blocks), 2048 + 1400 * 512
+    image[i:i + 2] = struct.pack(">H", 1400)
+    image[moved:moved + end - at] = image[at:end]
+    part = tmp_path / "Part.img"
+    part.write_bytes(image[:moved + 1024])
+    _, _, error = open_targets(parse_args([str(part), "--app", "Last"]))
+    assert error == ("Last's resource fork goes past the end of the disk image: "
+                     "the image holds only part of its disk.")
+    [(first, _)], _, error = open_targets(parse_args([str(part), "--app", "First"]))
+    assert error is None and first.rsrc == APP_FORK + bytes(64 * 1024)
+
+
 def test_why_an_application_has_no_68k_code():
     code = build_fork([Resource(b"CODE", 0, bytes(16))])
     ppc = build_fork([Resource(b"cfrg", 0, bytes(32))])
@@ -120,6 +151,14 @@ def test_why_an_application_has_no_68k_code():
     assert why_no_code(MacFile("Copied", code, b"")) == \
         "no CODE resources: its resource fork is in its data fork"
     assert why_no_code(MacFile("Plain", b"", APP_FORK)) == "no CODE resources"
+
+
+def test_an_application_with_powerpc_code():
+    """A 'cfrg' resource names PowerPC code, with CODE resources or not."""
+    both = build_fork([Resource(b"CODE", 0, bytes(16)), Resource(b"cfrg", 0, bytes(32))])
+    assert has_powerpc_code(MacFile("Fat", b"", both))
+    assert not has_powerpc_code(MacFile("Plain", b"", APP_FORK))
+    assert not has_powerpc_code(MacFile("Bare", b"", b""))
 
 
 def test_screen_size_and_speed_options(tmp_path, capsys, qapp):
@@ -133,9 +172,16 @@ def test_screen_size_and_speed_options(tmp_path, capsys, qapp):
             parse_args(bad)
     err = capsys.readouterr().err
     assert "--size is a width and height in pixels" in err and "--speed is a number" in err
-    # What the machine can't be built with is said, not a traceback
+    # What the machine can't be built with is said, not a traceback, and
+    # leaves no window or input filter for the garbage collector: destroying
+    # the window under the filter takes the host down.
+
+    def left():
+        return sum(isinstance(o, (ScreenWindow, InputRouter)) for o in gc.get_objects())
+    before = left()
     assert main(["--size", "32000x32000", "--host", "screen", "--no-sound"]) == 2
     assert "a 32000x32000 screen leaves no room for applications" in capsys.readouterr().err
+    assert left() <= before
     assert main(["--record-sound", str(tmp_path / "no" / "such.wav"),
                  "--host", "screen", "--no-sound"]) == 2
     assert "No such file" in capsys.readouterr().err
@@ -147,7 +193,7 @@ def test_an_app_too_big_for_memory(tmp_path, capsys, qapp):
     big.write_bytes(macbinary("Big App", b"", fork))
     assert main([str(big), "--host", "screen"]) == 2
     err = capsys.readouterr().err
-    assert "Big App needs 32768K of memory and 32K for its stack, and only" in err
+    assert "Big App needs 32768K of memory and 24K more for its stack, and only" in err
 
 
 # -- ResourceViewer in a running display -------------------------------------

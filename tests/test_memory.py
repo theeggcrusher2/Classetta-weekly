@@ -2,15 +2,18 @@
 
 import random
 import struct
+import threading
 
 import pytest
-from guest import Guest
+from guest import Guest, Processor
 
+from macrt.m68k import dispatch, runtime
 from macrt.m68k.glue_common import _heap
 from macrt.memory import RAM, BusError
 from macrt.toolbox import lowmem
 from macrt.toolbox.memmgr import (
-    FREE, H_FST_FREE, HEADER, LOCKED, MORE_MAST, NONRELOCATABLE, RELOCATABLE, ZCB_FREE, Heap,
+    FREE, GROW_ZONE_CALLS, GZ_PROC, H_FST_FREE, HEADER, LOCKED, MIN_BLOCK, MORE_MAST,
+    NONRELOCATABLE, RELOCATABLE, ZCB_FREE, Heap,
     memFullErr, memLockedErr, memWZErr, nilHandleErr, noErr,
 )
 from macrt.toolbox.types import Point, Rect
@@ -349,6 +352,33 @@ def test_a_pointer_goes_low_into_free_blocks_the_handles_move_out_from_between()
     assert contents(m, h, hs) == held
 
 
+def test_a_pointer_goes_low_though_a_free_block_higher_up_would_hold_it():
+    """The handles in the way move up into that free block, and the zone
+    doesn't grow: Excel 1.5 jumps from the 128K block it asks for into its
+    first segment with 16-bit offsets."""
+    m = RAM(0x10000)
+    h = Heap(m, 0x1000, 0x3000, 0x8000)
+    hs = filled(m, h, 0x100, 0x100, 0x800)
+    h.dispose_handle(hs.pop(2))
+    low, end, top, held = h.deref(hs[0]), h.end, h.deref(hs[2]), contents(m, h, hs)
+    p = h.new_ptr(0x180, low=True)
+    assert p == low and h.end == end and h.deref(hs[2]) == top
+    assert all(p + 0x180 < h.deref(hd) < top for hd in hs[:2])
+    assert contents(m, h, hs) == held
+
+
+def test_a_pointer_goes_low_taking_part_of_a_free_block_the_handles_moving_into_the_rest():
+    m = RAM(0x10000)
+    h = Heap(m, 0x1000, 0x3000, 0x8000)
+    hs = filled(m, h, 0x100, 0x100, 0x800)
+    h.dispose_handle(hs.pop(2))
+    low, end, top, held = h.deref(hs[0]), h.end, h.deref(hs[2]), contents(m, h, hs)
+    p = h.new_ptr(0x400, low=True)
+    assert p == low and h.end == end and h.deref(hs[2]) == top
+    assert all(p + 0x400 < h.deref(hd) < top for hd in hs[:2])
+    assert contents(m, h, hs) == held
+
+
 def test_reserve_makes_room_low_the_handles_moving_up():
     """ResrvMem, for a block a program will keep locked: room as low in the
     zone as can be had, though there's a free block higher up (Inside
@@ -397,6 +427,159 @@ def test_move_hhi_leaves_a_locked_handle_and_says_so(qapp):
     before = g.heap.deref(hd)
     g("MoveHHi", hd)
     assert g.mem_err == noErr and g.heap.deref(hd) > before and g.contents(hd) == b"moves up"
+
+
+def test_move_hhi_goes_where_the_headers_above_say(qapp):
+    """Over zones of all sorts: into the top of the highest free block that
+    holds it below the first block above it that's locked or
+    nonrelocatable, as the headers and master pointers in memory have them,
+    with what every handle holds kept."""
+    rng = random.Random(11)
+    for _ in range(150):
+        m, h = heap()
+        hs = []
+        while h.max_block(grow=False) > 0x300:
+            if rng.random() < 0.15:
+                h.new_ptr(rng.randrange(1, 0x80))
+            hs.append(h.new_handle(rng.randrange(1, 0x200)))
+        for hd in rng.sample(hs, len(hs) // 3):
+            hs.remove(hd)
+            h.dispose_handle(hd)
+        for i, hd in enumerate(hs):
+            m.write(h.deref(hd), bytes([i]) * h.handle_size(hd))
+        for _ in range(6):
+            for hd in hs:
+                (h.lock if rng.random() < 0.2 else h.unlock)(hd)
+            a = rng.choice([hd for hd in hs if not m.r8(hd) & LOCKED] or hs)
+            if m.r8(a) & LOCKED:
+                continue
+            data, size = h.deref(a), h.handle_size(a)
+            need = max((size + HEADER + 3) & -4, MIN_BLOCK)
+            want = data
+            at = data - HEADER + (m.r32(data - HEADER) & 0xFFFFFF)
+            while at < h.end:
+                kind, n = m.r8(at) >> 6, m.r32(at) & 0xFFFFFF
+                if kind == FREE and (n == need or n - need >= MIN_BLOCK):
+                    want = at + n - need + HEADER
+                elif kind == NONRELOCATABLE or (
+                        kind == RELOCATABLE and m.r8(h.start + m.r32(at + 4)) & LOCKED):
+                    break
+                at += n
+            held, free = contents(m, h, hs), h.free_bytes()
+            h.move_high(a)
+            assert h.error == noErr and h.deref(a) == want
+            assert contents(m, h, hs) == held and h.free_bytes() == free
+
+
+def test_move_hhi_reads_the_zone_back_if_a_header_above_has_changed(qapp):
+    """A program that takes the free block after one of its handles into
+    the handle's block, by its header, leaves MoveHHi no room there."""
+    m, h = heap()
+    a, b, gap, wall = (h.new_handle(0x40) for _ in range(4))
+    h.lock(wall)
+    h.dispose_handle(gap)
+    at = h.deref(b) - HEADER
+    m.w32(at, m.r32(at) + (m.r32(h.deref(wall) - HEADER) & 0xFFFFFF))   # gap: as big as wall
+    before = h.deref(a)
+    h.move_high(a)
+    assert h.error == noErr and h.deref(a) == before
+    assert h.deref(b) - HEADER + (m.r32(at) & 0xFFFFFF) == h.deref(wall) - HEADER
+
+
+def test_move_hhi_leaves_a_handle_whose_block_a_program_has_taken_into_another(qapp):
+    m, h = heap()
+    before, a, b, gap, wall = (h.new_handle(0x40) for _ in range(5))
+    h.lock(wall)
+    h.dispose_handle(gap)
+    for low, high in ((before, a), (b, wall)):          # each takes the block after it
+        at = h.deref(low) - HEADER
+        m.w32(at, m.r32(at) + (m.r32(h.deref(high) - HEADER) & 0xFFFFFF))
+    was = h.deref(a)
+    h.move_high(a)
+    assert h.deref(a) == was and h.error == noErr
+
+
+def test_move_hhi_reads_back_the_free_block_below_before_joining_it(qapp):
+    """Macintosh Pascal makes blocks of its own at the top of a free block:
+    the room a handle leaves when it moves up doesn't join that free block
+    over one there."""
+    m, h = heap()
+    low, gap, a = (h.new_handle(0x40) for _ in range(3))
+    h.dispose_handle(gap)
+    free_at = h.deref(low) - HEADER + (m.r32(h.deref(low) - HEADER) & 0xFFFFFF)
+    own = h.deref(a) - HEADER - 0x20
+    m.w32(own, NONRELOCATABLE << 30 | 0x20)             # $18 bytes
+    m.w32(own + 4, h.start)
+    m.w32(free_at, own - free_at)
+    h.move_high(a)
+    assert h.error == noErr and h.deref(a) + 0x40 == h.end
+    assert m.r32(free_at) == own - free_at and h.ptr_size(own + HEADER) == 0x18
+
+
+def test_move_hhi_reads_back_the_free_blocks_above(qapp):
+    """A block a program made at the top of the free block above, or a
+    handle it moved there itself, as MacWrite 4.5 and Macintosh Pascal do,
+    stops it there."""
+    m, h = heap()
+    a = h.new_handle(0x40)
+    free_at = h.deref(a) + 0x40
+    own = h.end - 0x20
+    m.w32(own, NONRELOCATABLE << 30 | 0x20)
+    m.w32(own + 4, h.start)
+    m.w32(free_at, own - free_at)
+    h.move_high(a)
+    assert h.deref(a) + 0x40 == own and h.ptr_size(own + HEADER) == 0x18
+    m, h = heap()
+    a, b = h.new_handle(0x40), h.new_handle(0x40)
+    data = h.deref(b)
+    m.write(data, b"b" * 0x40)
+    phys = m.r32(data - HEADER) & 0xFFFFFF
+    to = h.end - phys
+    m.move(data - HEADER, to, phys)
+    m.w32(data - HEADER, phys)                    # free, where it was
+    m.w32(data - HEADER + phys, to - (data - HEADER + phys))
+    m.w32(b, to + HEADER)
+    h.move_high(a)
+    assert h.deref(a) + 0x40 == to and m.read(h.deref(b), 0x40) == b"b" * 0x40
+
+
+def test_a_zone_reads_its_headers_through_a_mirror_over_it(qapp):
+    """Its checks read hundreds of headers at a time straight from RAM's
+    bytes, but not where a mirror lies over the zone: there its addresses
+    aren't where its bytes are."""
+    m = RAM(0x10000)
+    m.mirror(0x8000, 0x10000, 0x0000)
+    m._b[0x9000:0xD000] = b"\xff" * 0x4000          # what the mirror hides
+    h = Heap(m, 0x9000, 0xD000)
+    a = h.new_handle(0x40)
+    h.move_high(a)
+    at = h.deref(a) - 8
+    assert h._longs()(at) == m.r32(at) != 0xFFFFFFFF
+    assert h.deref(a) + 0x40 == h.end and h.start + m.r32(at + 4) == a
+    m2, h2 = heap()
+    assert h2._longs()(h2.start) == m2.r32(h2.start)
+
+
+def test_move_hhi_moves_a_block_whose_header_names_another_master_pointer(qapp):
+    """And names its own in the header where it goes."""
+    m, h = heap()
+    a = h.new_handle(0x40)
+    m.w32(h.deref(a) - 4, 0x1234)
+    h.move_high(a)
+    assert h.deref(a) + 0x40 == h.end and h.start + m.r32(h.deref(a) - 4) == a
+
+
+def test_move_hhi_goes_into_the_room_a_program_grew_the_zone_by(qapp):
+    """PackIt III grows the zone itself, with a free block where it ended
+    and bkLim past it."""
+    m = RAM(0x10000)
+    h = Heap(m, 0x1000, 0x2000, 0x8000)
+    a = h.new_handle(0x40)
+    old, new = h.end, 0x6000
+    m.w32(old, FREE << 30 | (new - old))
+    m.w32(h.start, new)
+    h.move_high(a)
+    assert h.error == noErr and h.deref(a) + 0x40 == new == h.end
 
 
 def test_max_mem_compacts_the_zone(qapp):
@@ -452,6 +635,147 @@ def test_purge_mem_says_when_there_is_no_room(qapp):
     assert g.mem_err == noErr and not g.process.heap.is_empty(hd)
     g("PurgeMem", 0x7FFFFFFF, 0)
     assert g.mem_err == memFullErr and g.process.heap.is_empty(hd)
+
+
+def test_purge_space_counts_what_a_purge_would_free_and_purges_nothing():
+    """Inside Macintosh IV, Memory Manager: PurgeSpace gives "the total
+    amount of space in bytes that could be obtained by a general purge
+    (without actually doing the purge)", what's already free included, and
+    the most of it to be had in one piece.  HyperCard 1.2 fills its heap
+    with purgeable blocks, then asks it whether it has room to go on."""
+    m, h = heap(0x1800)
+    first, second, kept, locked = (h.new_handle(0x500) for _ in range(4))
+    for hd in (first, second, locked):
+        h.set_purgeable(hd)
+    h.lock(locked)
+    block = h._physical(0x500)
+    free = h.free_bytes()
+    assert free < block
+    assert h.purge_space() == (free + 2 * block, 2 * block - HEADER)
+    assert not any(h.is_empty(hd) for hd in (first, second, kept, locked))
+    h.set_purgeable(kept)
+    assert h.purge_space() == (free + 3 * block, 3 * block - HEADER)
+
+
+def test_purge_space_counts_what_the_zone_could_grow_by():
+    m = RAM(0x10000)
+    h = Heap(m, 0x1000, 0x2000, 0x8000)
+    hd = h.new_handle(0x400)
+    h.set_purgeable(hd)
+    total, contig = h.purge_space()
+    assert total == h.free_bytes() + h._physical(0x400)
+    assert contig == h.max_block() + h._physical(0x400)
+    h.lock(hd)
+    assert h.purge_space() == (h.free_bytes(), h.max_block())
+
+
+def test_an_allocation_compacts_the_zone_before_it_purges_anything():
+    """"The Memory Manager first tries to obtain the requested amount of
+    space by compacting the heap" (Inside Macintosh: Memory, "Heap Purging
+    and Compaction"): a block more than either gap but less than both."""
+    m, h = heap()
+    hs = filled(m, h, 0x100, 0x100, 0x100, 0x100)
+    h.set_purgeable(hs[1])
+    h.dispose_handle(hs[0])
+    h.dispose_handle(hs[2])
+    assert h.new_handle(0x180)
+    assert not h.is_empty(hs[1])
+    assert contents(m, h, hs[3:]) == [bytes([3]) * 0x100, bytes([4]) * h.handle_size(hs[4])]
+    assert contents(m, h, hs[1:2]) == [bytes([1]) * 0x100]
+
+
+def test_a_handle_grown_into_the_compacted_zone_keeps_what_it_held():
+    """Compacting for it moves it too, before it's copied."""
+    m, h = heap()
+    hs = filled(m, h, 0x100, 0x100, 0x100, 0x100)
+    h.dispose_handle(hs[0])
+    h.dispose_handle(hs[2])
+    assert h.set_handle_size(hs[3], 0x200)
+    assert m.read(h.deref(hs[3]), 0x100) == bytes([3]) * 0x100
+    assert contents(m, h, [hs[1], hs[4]]) == [bytes([1]) * 0x100,
+                                              bytes([4]) * h.handle_size(hs[4])]
+
+
+def grow_zone(h, answer, proc=0x4000):
+    """A grow-zone function at proc for zone h: answer(cbNeeded, handle)
+    says what it freed.  The calls it gets, with what was purgeable and
+    still there each time."""
+    calls = []
+
+    def call(at, needed, protected):
+        assert at == proc
+        calls.append((needed, protected))
+        return answer(needed, protected)
+    h.mem.w32(h.start + GZ_PROC, proc)
+    h.grow_zone = call
+    return calls
+
+
+def test_the_grow_zone_function_is_called_last_and_again_while_it_frees_something():
+    """Once compacting and purging can't make room, with the block's
+    physical size, and again, after compacting and purging again, only
+    while it says it freed something (Inside Macintosh: Memory,
+    "MyGrowZone")."""
+    m, h = heap()
+    hs = filled(m, h, 0x100, 0x100, 0x100)
+    h.set_purgeable(hs[1])
+    gone = [hs[0], hs[2]]
+    purged = []
+
+    def answer(needed, protected):
+        purged.append(h.is_empty(hs[1]))
+        if not gone:
+            return 0
+        g = gone.pop(0)
+        h.dispose_handle(g)
+        return 0x108
+    calls = grow_zone(h, answer)
+    assert h.new_handle(0x300)
+    assert calls == [(0x308, 0), (0x308, 0)] and purged == [True, True]
+    calls.clear()
+    assert not h.new_handle(0x1000) and h.error == memFullErr
+    assert calls == [(0x1008, 0)]                   # it said it freed nothing
+
+
+def test_the_grow_zone_function_is_given_the_handle_being_grown():
+    """In GZRootHnd, which GZSaveHnd returns, for it to leave alone."""
+    m, h = heap()
+    hs = filled(m, h, 0x100)
+    calls = grow_zone(h, lambda needed, protected: 0)
+    assert not h.set_handle_size(hs[0], 0x200)
+    assert calls == [(0x208, hs[0])]
+    assert m.read(h.deref(hs[0]), 0x100) == bytes([0]) * 0x100
+
+
+def test_a_handle_its_grow_zone_function_takes_is_not_grown():
+    """Though it shouldn't: the block isn't copied into what it freed."""
+    m, h = heap()
+    hs = filled(m, h, 0x100)
+    free = h.free_bytes()
+
+    def answer(needed, protected):
+        h.dispose_handle(hs[1])
+        h.empty_handle(protected)
+        return 1
+    grow_zone(h, answer)
+    assert not h.set_handle_size(hs[0], 0x200) and h.error == memFullErr
+    assert h.is_empty(hs[0]) and h.free_bytes() > free
+
+
+def test_no_grow_zone_function_is_called_without_one_or_from_itself():
+    """None with a gzProc of 0, and none for what it allocates itself,
+    which it isn't to do (Inside Macintosh: Memory, "MyGrowZone"); one
+    that always says it freed something is called only so many times."""
+    m, h = heap()
+    filled(m, h)
+    calls = grow_zone(h, lambda needed, protected: 1, proc=0)
+    assert not h.new_ptr(0x100) and calls == []
+    inner = []
+    calls = grow_zone(h, lambda needed, protected: inner.append(h.new_ptr(0x200)) or 0)
+    assert not h.new_ptr(0x100)
+    assert calls == [(0x108, 0)] and inner == [0]
+    calls = grow_zone(h, lambda needed, protected: 1)
+    assert not h.new_ptr(0x100) and len(calls) == GROW_ZONE_CALLS
 
 
 def test_blocks_a_program_moved_itself_are_found_where_they_are():
@@ -953,14 +1277,101 @@ def test_dequeue_from_a_queue_that_goes_round_ends(qapp):
 def test_a_limit_past_the_stack_leaves_the_stack(qapp):
     """Macify 2.7 sets ApplLimit 128K past ApplZone, past the stack of its
     75K partition, then calls MaxApplZone and loads a segment: the heap
-    stops where the stack starts, and the segment can't land on it."""
+    stops DefltStack short of the stack's base, and the segment can't land
+    on the stack."""
     g = Guest()
     proc = g.process
     heap, world = proc.heap, proc.world
     limit, stack_base = world.r32(lowmem.ApplLimit), proc.partition.stack_base
+    assert limit == (stack_base - g.mem.r32(lowmem.DefltStack)) & ~3
     g("SetApplLimit", stack_base + 0x10000)
-    assert g.mem_err == noErr and world.r32(lowmem.ApplLimit) == stack_base + 0x10000
+    assert g.mem_err == noErr and world.r32(lowmem.ApplLimit) == limit
     g("MaxApplZone")
     assert heap.end == heap.limit == limit == world.r32(lowmem.HeapEnd)
-    g("SetApplLimit", stack_base - 0x100)        # below the base: a smaller stack, as asked
-    assert g.mem_err == noErr and heap.limit == (stack_base - 0x100) & ~3
+
+
+def test_set_appl_limit_leaves_a_stack_of_defltstack(qapp):
+    """SetApplLimit "enforces a minimum stack size equal to DefltStack"
+    (Inside Macintosh: Memory errata).  Bumptz Science Carnival sets the
+    limit at its stack pointer, then calls MaxApplZone and moves a new
+    handle high: the block lands below the stack, not on it."""
+    g = Guest()
+    proc = g.process
+    heap, world = proc.heap, proc.world
+    stack_base = proc.partition.stack_base
+    g("SetApplLimit", stack_base - 0x100)
+    least = (stack_base - g.mem.r32(lowmem.DefltStack)) & ~3
+    assert g.mem_err == noErr and world.r32(lowmem.ApplLimit) == heap.limit == least
+    g("SetApplLimit", least - 0x1000)                          # a bigger stack, as asked
+    assert world.r32(lowmem.ApplLimit) == heap.limit == least - 0x1000
+    g.mem.w32(lowmem.DefltStack, 0x4000)
+    g("SetApplLimit", stack_base)
+    assert world.r32(lowmem.ApplLimit) == heap.limit == (stack_base - 0x4000) & ~3
+    g.mem.w32(lowmem.DefltStack, 0x8000)
+    g("SetApplLimit", stack_base - 0x1E)                       # where its stack pointer is
+    g("MaxApplZone")
+    assert heap.end == least
+    h = g("NewHandle", 0x1F4, 0, 0)
+    g("MoveHHi", h)
+    assert g.mem_err == noErr and g.heap.deref(h) + 0x1F4 <= least
+
+
+# FUNCTION MyGrowZone(cbNeeded: Size): LongInt, logging cbNeeded and
+# GZRootHnd at the address patched in at 2, then disposing of the handle
+# after them, if there is one, and answering its size.
+GROW_ZONE = bytes.fromhex(
+    "207C00000000 20EF0004 20F80328 2610 4290 4A83 6710"
+    "2043 A025 2800 2043 A023 2F440008 6004"
+    "42AF0008 205F 588F 4ED0")
+
+
+class Runner(Processor):
+    """A Processor whose calls to 68k code run it, nested, as the
+    runtime's do."""
+
+    call = runtime.Runner.call
+
+    def __init__(self):
+        super().__init__()
+        self.stack_top = self.ptr(bytes(0x1000)) + 0x1000
+        self.cpu.sp = self.stack_top
+        self.cpu.sr = 0x2000
+        self.stop = self.ptr(bytes(4))
+        self.thread_id = threading.get_ident()
+
+    def _jsr(self, addr):
+        cpu = self.cpu
+        pc = cpu.pc
+        cpu.push32(self.stop)
+        cpu.pc = addr
+        while (ev := cpu.run(self.stop)).kind == "trap":
+            auto_pop = dispatch.is_toolbox(ev.code) and ev.code & 0x400
+            cpu.pc = cpu.pop32() if auto_pop else ev.pc + 2
+            dispatch.dispatch(self, ev.code, ev.pc)
+        assert ev.kind == "until", ev
+        cpu.pc = pc
+
+
+def test_set_grow_zone_installs_a_function_the_memory_manager_calls(qapp):
+    """In the current zone's gzProc; called from 68k with cbNeeded, the
+    handle being grown in GZRootHnd while it runs (Inside Macintosh:
+    Memory, "MyGrowZone")."""
+    g = Runner()
+    heap = g.process.heap
+    log = g.ptr(bytes(12))
+    code = bytearray(GROW_ZONE)
+    code[2:6] = struct.pack(">I", log)
+    proc = g.ptr(bytes(code))
+    g("SetGrowZone", proc)
+    assert g.mem_err == noErr and g.mem.r32(heap.start + GZ_PROC) == proc
+    grown = g("NewHandle", 0x100, 0, 0)
+    spare = g("NewHandle", 0x400, 0, 0)
+    g.mem.w32(log + 8, spare)
+    g.mem.w32(lowmem.GZRootHnd, 0x1234)
+    g("SetApplLimit", heap.end)
+    g("NewPtr", heap.max_block(grow=False), 0, 0)
+    g("SetHandleSize", grown, 0x300)
+    assert g.mem_err == noErr
+    assert struct.unpack(">III", g.mem.read(log, 12)) == (0x308, grown, 0)
+    assert not heap.is_handle(spare) and heap.handle_size(grown) == 0x300
+    assert g.mem.r32(lowmem.GZRootHnd) == 0x1234 and g.cpu.sp == g.stack_top

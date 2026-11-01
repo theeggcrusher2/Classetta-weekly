@@ -364,7 +364,8 @@ def test_a_check_box_value_or_hilite_redraws_only_its_box(qapp):
     HiliteControl for the part: a check box's box.  What's drawn over the
     rest of its rect stays: ScreenChooser's check boxes have no titles,
     and its dialog's static text, drawn inside their rectangles, says
-    what they're for.  Drawn whole, the check box erases its rect."""
+    what they're for.  Drawn whole, an untitled check box erases only its
+    box too, and a titled one its rect."""
     g = Guest()
     g.yielding = nullcontext
     content = Rect(80, 60, 140, 260)
@@ -385,5 +386,10 @@ def test_a_check_box_value_or_hilite_redraws_only_its_box(qapp):
     assert img.pixel(60, 18) & 0xFFFFFF == 0
     assert img.pixel(16, 17) & 0xFFFFFF == 0
     g("DrawControls", w.addr)
-    assert img.pixel(60, 18) & 0xFFFFFF == 0xFFFFFF
+    assert img.pixel(60, 18) & 0xFFFFFF == 0
     assert img.pixel(16, 17) & 0xFFFFFF == 0
+    titled = glue_controls.new_control(g, w, Rect(30, 10, 48, 130), b"\x01M", True, 0, 0, 1,
+                                       k.radioButProc, 0)
+    img.setPixel(100, 38, 0)
+    g("Draw1Control", titled)
+    assert img.pixel(100, 38) & 0xFFFFFF == 0xFFFFFF

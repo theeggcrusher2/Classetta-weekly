@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from macrt.m68k import dispatch, sound_manager as sm
+from macrt.m68k import dispatch, runtime, sound_manager as sm
 from macrt.m68k.hardware import vBufB
 from macrt.m68k.sound import FRAME, SILENCE, SILENT_FRAME, vSndEnb
 from macrt.macfile import MacFile, MemoryFolder
@@ -420,7 +420,7 @@ def test_the_error_sound_s_procedure_and_a_resource_that_isn_t_a_sound(g):
 # -- SndPlay, from 68k code ------------------------------------------------------
 class Player(Processor):
     """A Processor whose ticks come, while the Sound Manager is busy, as
-    the runtime's do."""
+    the runtime's do, and when the ROM's loop waits for one."""
 
     def __init__(self, resources=()):
         super().__init__(resources)
@@ -435,7 +435,10 @@ class Player(Processor):
             if ev.kind == "trap":
                 self.cpu.pc = ev.pc + 2
                 dispatch.dispatch(self, ev.code, ev.pc)
-            elif ev.kind == "interrupted":
+            elif ev.kind in ("interrupted", "exception"):
+                if ev.kind == "exception":      # the ROM's loop waits for the tick: here it is
+                    assert ev.pc == self.machine.sound_wait + runtime.SOUND_WAIT_TICK, ev
+                    self.cpu.pc = ev.pc + 2
                 self.frames.append(tick(self))
                 assert len(self.frames) < ticks
             else:
@@ -533,6 +536,81 @@ def test_there_is_no_sound_input_device(g):
     assert g("SPBOpenDevice", g.ptr(b"\x00"), 1, ref) == -221
     assert g("SndRecord", 0, 0, 0, g.ptr(bytes(4))) == -220         # siNoSoundInHardware
     assert g("SndRecordToFile", 0, 0, 0, 1) == -220
+    assert g("SPBCloseDevice", 1) == -229                           # siBadRefNum
+    spb, long = g.ptr(bytes(42)), g.ptr(bytes(4))
+    assert g("SPBRecord", spb, False) == -221
+    assert g("SPBRecordToFile", 1, spb, True) == -221
+    for routine in ("SPBPauseRecording", "SPBResumeRecording", "SPBStopRecording"):
+        assert g(routine, 1) == -221
+    assert g("SPBGetRecordingStatus", 1, *[long] * 6) == -221
+    assert g("SPBGetDeviceInfo", 1, 0x636F6E74, long) == -221      # 'cont'
+    assert g("SPBSetDeviceInfo", 1, 0x636F6E74, long) == -221
+    assert g("SPBMillisecondsToBytes", 1, long) == -221
+    assert g("SPBBytesToMilliseconds", 1, long) == -221
+    assert g("SPBSignInDevice", -40, g.ptr(b"\x04Mike")) == -221
+    assert g("SPBSignOutDevice", -40) == -221
+
+
+def code(kind: bytes) -> int:
+    return struct.unpack(">I", kind)[0]
+
+
+def test_setup_snd_header_for_one_channel_of_8_bit_samples(g):
+    """A format 1 'snd ': the sampled synthesizer, a bufferCmd for the
+    header after it, and a standard header, the samples to go after it;
+    the handle isn't resized."""
+    snd, length = g.handle(bytes(200)), g.ptr(bytes(2))
+    assert g("SetupSndHeader", snd, 1, sm.rate22khz, 8, code(b"NONE"), 60, 1000, length) == 0
+    assert g.mem.r16(length) == 42 and len(g.tb.contents(snd)) == 200
+    data = g.tb.contents(snd)
+    assert data[:20] == struct.pack(">hhhIh", 1, 1, sm.sampledSynth, 0, 1) + command(
+        sm.dataPointerFlag | sm.bufferCmd, 0, 20)
+    assert data[20:42] == header(b"", base=60)[:4] + struct.pack(">I", 1000) + header(
+        b"", base=60)[8:]
+    assert sm.parse_snd(data)[2] == [(sm.dataPointerFlag | sm.bufferCmd, 0, 20)]
+    out = g.ptr(bytes(4))
+    assert g("GetSoundHeaderOffset", snd, out) == 0 and g.mem.r32(out) == 20
+
+
+def test_setup_snd_header_extended_and_compressed(g):
+    """Extended for 16-bit or stereo samples, its frames the bytes over
+    each frame's; compressed for MACE, its frames the packets."""
+    snd, length = g.handle(bytes(100)), g.ptr(bytes(2))
+    rate = 44100 << 16
+    assert g("SetupSndHeader", snd, 2, rate, 16, code(b"NONE"), 60, 4000, length) == 0
+    assert g.mem.r16(length) == 84
+    h = g.tb.contents(snd)[20:84]
+    assert struct.unpack(">IiI", h[:12]) == (0, 2, rate) and h[20] == sm.extSH and h[21] == 60
+    assert struct.unpack(">I", h[22:26])[0] == 1000                         # frames
+    assert h[26:36] == extended(44100) and struct.unpack(">h", h[48:50])[0] == 16
+    assert sm.read_header(g.mem, g.mem.r32(snd) + 20)[1] == rate
+    assert g("SetupSndHeader", snd, 1, sm.rate22khz, 8, code(b"MAC3"), 60, 300, length) == 0
+    h = g.tb.contents(snd)[20:84]
+    assert h[20] == 0xFE and struct.unpack(">I", h[22:26])[0] == 150         # cmpSH, 2-byte packets
+    assert h[40:44] == b"MAC3" and struct.unpack(">4h", h[56:64]) == (3, 16, 0, 8)
+    assert g("SetupSndHeader", snd, 1, sm.rate22khz, 8, code(b"MAC6"), 60, 300, length) == 0
+    assert struct.unpack(">I", g.tb.contents(snd)[42:46])[0] == 300
+    assert g("SetupSndHeader", snd, 1, sm.rate22khz, 8, code(b"ABCD"), 60, 0, length) == \
+        sm.siInvalidCompression
+    small = g.handle(bytes(50))
+    assert g("SetupSndHeader", small, 2, rate, 16, code(b"NONE"), 60, 0, length) == -50
+    assert g.tb.contents(small) == bytes(50)
+
+
+def test_get_sound_header_offset_of_a_format_2_resource(g):
+    out = g.ptr(bytes(4))
+    assert g("GetSoundHeaderOffset", g.handle(format_2(b"\x80" * 10)), out) == 0
+    assert g.mem.r32(out) == 14
+    assert g("GetSoundHeaderOffset", g.handle(struct.pack(">hh", 2, 0) + bytes(4)), out) == \
+        sm.badFormat
+    assert g("GetSoundHeaderOffset", g.handle(b"\x00\x07"), out) == sm.badFormat
+
+
+def test_unsigned_fixed_mul_div(g):
+    """The interfaces' value, multiplier and divisor: a rate scaled."""
+    assert g("UnsignedFixedMulDiv", 22254 << 16, 3 << 16, 2 << 16) == 33381 << 16
+    assert g("UnsignedFixedMulDiv", 0xFFFF0000, 2 << 16, 1 << 16) == 0xFFFFFFFF
+    assert g("UnsignedFixedMulDiv", 1 << 16, 1 << 16, 0) == 0xFFFFFFFF
 
 
 @pytest.mark.parametrize("routine", ["Exp1to3", "Exp1to6"])
@@ -600,6 +678,36 @@ def open_file(g, data: bytes) -> int:
 def file_play(g, chan: int, refnum: int, res: int = 0, selection: int = 0,
               completion: int = 0, asynch: bool = True) -> int:
     return g("SndStartFilePlay", chan, refnum, res, 0, 0, selection, completion, asynch)
+
+
+def test_setup_aiff_header_writes_at_the_mark(g):
+    """FORM, COMM and SSND, and FVER for AIFF-C, at the mark, which is
+    left after them, the sound to go after: SndStartFilePlay plays it."""
+    files = FileManager(g.system.files, None, g.system.files.dir_for(
+        MemoryFolder([MacFile("Rec", data=b"", type=b"AIFF", creator=b"TEST")])))
+    refnum = files.open(0, 0, "Rec", False, fm.fsRdWrPerm).refnum
+    assert g("SetupAIFFHeader", refnum, 1, sm.rate22khz, 8, code(b"NONE"), 0, 0) == 0
+    first = files.get_fpos(refnum)
+    files.set_fpos(refnum, fm.fsFromStart, 0)
+    assert g("SetupAIFFHeader", refnum, 1, sm.rate22khz, 8, code(b"NONE"), 4, 0) == 0
+    assert files.get_fpos(refnum) == first == 54
+    files.write(refnum, bytes([0x00, 0x7F, 0x80, 0xFF]))
+    data = bytes(g.system.files.fcb(refnum).fork)
+    assert data[:12] == b"FORM" + struct.pack(">I", 50) + b"AIFF"
+    assert data[12:38] == chunk(b"COMM", struct.pack(">hIh", 1, 4, 8) + extended(sm.MAC_RATE))
+    assert sm.parse_aiff(data) == (bytes([0x80, 0xFF, 0x00, 0x7F]), pytest.approx(sm.MAC_RATE))
+    chan = channel(g)
+    assert file_play(g, chan, refnum) == 0
+    files.set_fpos(refnum, fm.fsFromStart, 0)
+    assert g("SetupAIFFHeader", refnum, 2, sm.rate22khz, 8, code(b"MAC6"), 9, 0) == 0
+    data = bytes(g.system.files.fcb(refnum).fork)
+    assert data[8:24] == b"AIFCFVER" + struct.pack(">II", 4, 0xA2805140)
+    assert data[24:32] == b"COMM" + struct.pack(">I", 34)
+    assert struct.unpack(">hIh", data[32:40]) == (2, 4, 8)                  # 9 bytes: 4 frames
+    assert data[50:66] == b"MAC6\x0bMACE 6-to-1"
+    assert struct.unpack(">I", data[4:8])[0] == 4 + 12 + 42 + 16 + 10      # with the pad byte
+    assert g("SetupAIFFHeader", refnum, 1, sm.rate22khz, 8, code(b"ABCD"), 0, 9) == \
+        sm.siInvalidCompression
 
 
 def test_a_file_plays_on_a_channel_then_its_completion_is_called(g):
@@ -672,12 +780,20 @@ def test_a_file_play_s_selection_and_what_it_can_t_play(g):
 
 
 def test_a_snd_resource_plays_from_disk(qapp):
+    """Read from its file, with no handle made for it in the heap; or if
+    the program has it in memory, from its handle."""
     samples = bytes(i % 200 + 20 for i in range(300))
     g = Guest([Resource(b"snd ", 128, format_2(samples))])
     chan = channel(g)
+    free = g.heap.free_bytes()
     assert file_play(g, chan, 0, 128) == 0
+    assert g.heap.free_bytes() == free
     assert tick(g) == samples + SILENT * (FRAME - 300)
     assert file_play(g, chan, 0, 129) == sm.resProblem
+    h = g("GetResource", code(b"snd "), 128)
+    g.mem.write(g.mem.r32(h) + 14 + 22, bytes(range(40, 140)))
+    assert file_play(g, chan, 0, 128) == 0
+    assert tick(g) == bytes(range(40, 140)) + samples[100:] + SILENT * (FRAME - 300)
 
 
 def test_a_file_play_with_no_channel_waits_for_its_end(p):

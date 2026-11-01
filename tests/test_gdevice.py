@@ -4,6 +4,7 @@ Manager's calls."""
 
 import random
 import struct
+import time
 
 import pytest
 from PyQt6.QtCore import Qt
@@ -12,7 +13,7 @@ from PyQt6.QtGui import QImage
 from macrt.demo import parse_args
 from macrt.m68k.glue_os import (QD32TRAP, SLOT_TRAPS, UNIMPLEMENTED, VIDEO_DEFAULT, Gestalt,
                                 SysEnvirons, trap_address)
-from macrt.toolbox import lowmem, pixels
+from macrt.toolbox import gdevice, lowmem, pixels
 from macrt.toolbox.color import CT_DEVICE, STANDARD_8BIT, standard_table
 from macrt.toolbox.gdevice import (ITAB_RES, PIXMAP_FLAG, GDevice, PixMap, allInit, apart,
                                    deref, gdDevType, mainScreen, make_itable, noDriver,
@@ -234,7 +235,8 @@ def test_a_mac_plus_has_no_devices(qapp):
 
 
 def test_gestalt_and_sysenvirons_say_whether_there_is_color_quickdraw(g, qapp):
-    assert Gestalt(g, 0x71642020) == (noErr, 0x220)            # 'qd  ', 32-Bit QuickDraw
+    # 'qd  ', gestalt32BitQD13: System 7's Color QuickDraw
+    assert Gestalt(g, 0x71642020) == (noErr, 0x230)
     assert Gestalt(g, 0x71647277) == (noErr, 7)                # 'qdrw'
     p = g.ptr(bytes(16))
     assert SysEnvirons(g, 2, p) == noErr
@@ -469,7 +471,8 @@ def test_a_reserved_entry_is_no_match_for_a_colour(g):
     assert read_table(g.mem, pm.pm_table)[index] == RED
     ct = deref(g.mem, pm.pm_table)
     seed = g.mem.r32(ct)
-    gd.id = 7
+    g("SetClientID", 7)
+    assert gd.id == 7
     g("ReserveEntry", index, True)
     assert g("QDError") == noErr and g.mem.r32(ct) != seed
     assert g.mem.r16(ct + 8 + 8 * index) & 0x40FF == 0x4007
@@ -478,12 +481,64 @@ def test_a_reserved_entry_is_no_match_for_a_colour(g):
     assert g("QDError") == cProtectErr                  # already
     g("SetEntries", index, 0, specs(g, (0, 0xFFFF, 0, 0)))      # its own gdID's change
     assert g("QDError") == noErr
-    gd.id = 8
+    g("SetClientID", 8)
     g("SetEntries", index, 0, specs(g, (0, 0, 0, 0)))           # another's doesn't
     assert g("QDError") == cProtectErr
     assert read_table(g.mem, pm.pm_table)[index] == RED
     g("ReserveEntry", index, False)
     assert g("Color2Index", red) == index and not g.mem.r16(ct + 8 + 8 * index) & 0x4000
+
+
+def test_set_client_id_sets_the_current_devices_gdid_only(g):
+    gdh, gd, pm = main_device(g)
+    other = g("NewGDevice", 0, 0x83)
+    g("SetGDevice", other)
+    g("SetClientID", 9)
+    assert GDevice(g.mem, deref(g.mem, other)).id == 9 and gd.id != 9
+
+
+def test_reserving_entry_after_entry_shows_the_screen_once_a_tick(g, monkeypatch):
+    """Each reservation is a new seed and a new inverse table, but the same
+    colours: the table's indexes are made once.  The screen is shown in
+    its new colours at the next tick, not at each one."""
+    gdh, gd, pm = main_device(g)
+    screen, looked = g.system.screen, []
+    monkeypatch.setattr(type(screen), "look", lambda self: looked.append(1))
+    monkeypatch.setattr(screen, "_last", time.monotonic())
+    made = gdevice._itable_indexes.cache_info().misses
+    seeds = set()
+    for index in range(1, 40):
+        g("ReserveEntry", index, True)
+        seeds.add(g.mem.r32(deref(g.mem, gd.i_table)))
+    assert len(seeds) == 39 and gdevice._itable_indexes.cache_info().misses <= made + 1
+    assert len(looked) <= 1
+    monkeypatch.setattr(screen, "_last", time.monotonic() - 1)
+    g("ReserveEntry", 40, True)
+    assert looked
+
+
+def test_a_window_draws_in_colours_not_yet_shown(harness):
+    """QuickDraw matches what it draws in a window to the screen's colours
+    as they are, shown yet or not: an entry reserved a moment before is no
+    match."""
+    h = harness(model="ii", depth=8)
+    rec = Recorder("Colour")
+    h.launch(rec)
+    system = h.d.system
+    bits, devices = system.screen_bits, system.devices
+    w = rec.tb.FrontWindow()
+    c = w.content
+    at = bits.base + (c.top + 12) * bits.row_bytes + c.left
+    with system.lock:
+        rec.tb.SetPort(w)
+        w.fg_color = REDCOLOR
+        rec.tb.PaintRect(Rect(10, 20, 14, 36))
+        red = system.mem.r8(at + 25)
+        devices.held = devices.held | {red}
+        devices.changed()
+        rec.tb.PaintRect(Rect(10, 40, 14, 56))
+        assert system.mem.r8(at + 45) != red
+    devices.held = devices.held - {red}
 
 
 def test_entries_alike_are_told_apart():

@@ -6,6 +6,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from conftest import Recorder
 from guest import Processor
 from PyQt6.QtCore import QEvent, QPoint, Qt
 from PyQt6.QtGui import QKeyEvent
@@ -19,11 +20,12 @@ from macrt.m68k.hardware import (CA0_ON, CA1, CA1_ON, CA2, CA2_ON, IWM, IWM_BASE
                                  vPage2, vSW, vT1C, vT1CH, vT1L, vT1LH, vT2C, vT2CH)
 from macrt.m68k.runtime import machine_for
 from macrt.memory import RAM
+from macrt.toolbox import constants as k
 from macrt.toolbox import lowmem
 from macrt.toolbox.events import InputGlobals, tick_count
 from macrt.toolbox.system import (CLASSIC_ALTERNATE, CLASSIC_SCREEN, PLUS_SCREENS,
                                   PLUS_SCREENS_END, System)
-from macrt.toolbox.types import Point
+from macrt.toolbox.types import Point, Rect
 from macrt.ui.keymap import key_message
 
 CODE = 0x10000
@@ -832,6 +834,68 @@ def test_with_the_cursor_shown_the_mouse_is_back_under_the_pointer():
     assert (mem.r16(lowmem.Mouse), mem.r16(lowmem.Mouse + 2)) == (150, 250)
     mouse.mouse(Point(101, 200), False)
     assert (mem.r16(lowmem.Mouse), mem.r16(lowmem.Mouse + 2)) == (101, 200)
+
+
+def test_the_mouse_a_program_has_moved_stays_on_the_screen():
+    """Away from the pointer, the mouse stops at the screen's edge, and what
+    the pointer moves past it is lost: the mouse comes back from the edge
+    as soon as the pointer does, so the pointer can bring it anywhere."""
+    mem = RAM(0x2000)
+    mem.w8(lowmem.CrsrCouple, 0xFF)
+    mouse = InputGlobals(mem, Rect(0, 0, 480, 640))
+    mouse.cursor(-1)
+    mouse.mouse(Point(0, 0), False)
+    mem.w32(lowmem.RawMouse, 248 << 16 | 312)
+    mem.w8(lowmem.CrsrNew, 0xFF)
+    mouse.tick()
+    mouse.mouse(Point(90, 320), True)
+    assert mouse.position == Point(338, 632)
+    mouse.mouse(Point(300, 400), False)
+    assert mouse.position == Point(479, 639)
+    assert (mem.r16(lowmem.Mouse), mem.r16(lowmem.Mouse + 2)) == (479, 639)
+    assert mouse.moved == Point(179, 239)
+    mouse.mouse(Point(250, 350), False)
+    assert mouse.position == Point(429, 589)
+    mouse.mouse(Point(479, 639), False)
+    assert mouse.moved == Point(0, 0)
+    mouse.mouse(Point(90, 320), False)
+    assert mouse.position == Point(90, 320)
+    assert (mem.r16(lowmem.Mouse), mem.r16(lowmem.Mouse + 2)) == (90, 320)
+
+
+class Clicks(Recorder):
+    """Logs where its clicks are."""
+
+    def __init__(self, name):
+        super().__init__(name)
+        self.wheres = []
+
+    def handle(self, ev):
+        if ev.what in (k.mouseDown, k.mouseUp):
+            self.wheres.append((ev.what, ev.where))
+            return False
+        return super().handle(ev)
+
+
+def test_a_click_is_where_the_program_has_moved_the_mouse(harness):
+    """Labyrinth of Crete hides the cursor, draws its own where it has put
+    the mouse and takes a click by where its event says it is."""
+    h = harness()
+    rec = Clicks("App")
+    h.launch(rec)
+    mouse, mem = h.d.system.input, h.d.system.mem
+    h.move(280, 190)
+    mouse.cursor(-1)
+    mem.w32(lowmem.RawMouse, 240 << 16 | 380)
+    mem.w8(lowmem.CrsrNew, 0xFF)
+    mouse.tick()
+    h.click(290, 195)
+    h.wait_until(lambda: len(rec.wheres) == 2, what="the click")
+    assert rec.wheres == [(k.mouseDown, Point(245, 390)), (k.mouseUp, Point(245, 390))]
+    mouse.cursor(1)                         # and with it shown, where the pointer is
+    h.click(290, 195)
+    h.wait_until(lambda: len(rec.wheres) == 4, what="the second click")
+    assert rec.wheres[2:] == [(k.mouseDown, Point(195, 290)), (k.mouseUp, Point(195, 290))]
 
 
 def test_the_display_keeps_them(harness):

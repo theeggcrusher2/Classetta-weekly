@@ -14,15 +14,18 @@ import pytest
 import rsrcfork
 
 import builders
-from builders import SYNC, binhex, gcr_sector, mfs_image, moof_image
+from builders import (
+    SYNC, HFSPlusFile, HFSPlusFolder, binhex, gcr_sector, hfs_plus_image, hfs_wrapper, mfs_image,
+    moof_image,
+)
 from macrt import moof
 from macrt.macfile import (
     HostFolder, MacFile, MemoryFolder, VolumeFolder, is_control_panel, is_disk_image, load_file,
     load_volume, open_application, open_applications, open_disks, volume_files,
 )
 from macrt.resfork import (
-    InvalidForkError, Resource, build_fork, is_fork, read_fork, resLocked, resPurgeable,
-    restype,
+    DecompressError, InvalidForkError, Resource, build_fork, decompress, is_fork, read_fork,
+    resCompressed, resLocked, resPurgeable, restype,
 )
 from macrt.ui.display import Display, DisplayConfig
 
@@ -77,6 +80,27 @@ def test_empty_fork_and_garbage():
     assert is_fork(FORK) and not is_fork(b"hello" * 100)
     with pytest.raises(InvalidForkError):
         read_fork(FORK[:300])
+
+
+def _dcmp0(stream: bytes, size: int) -> bytes:
+    """A resource compressed with 'dcmp' 0: the header, then the stream."""
+    return (b"\xa8\x9f\x65\x72" + struct.pack(">HBBI", 18, 8, 1, size)
+            + struct.pack(">BBhxx", 0x80, 0, 0) + stream)
+
+
+def test_compressed_resources_expand_up_to_their_length():
+    """A literal of four bytes, then the end marker; what follows it
+    is left alone once the four bytes have come (MacBrickout 3.1's
+    segments end with a byte more), but not when they haven't."""
+    stream = b"\x02ABCD\xff"
+    assert decompress(_dcmp0(stream, 4)) == b"ABCD"
+    assert decompress(_dcmp0(stream + b"\xff", 4)) == b"ABCD"
+    with pytest.raises(DecompressError):
+        decompress(_dcmp0(stream + b"\xff", 6))
+    with pytest.raises(DecompressError):
+        decompress(_dcmp0(b"\x02AB", 4))
+    fork = build_fork([Resource(b"CODE", 1, _dcmp0(stream + b"\xff", 4), None, resCompressed)])
+    assert [(r.data, r.attrs) for r in read_fork(fork)] == [(b"ABCD", 0)]
 
 
 def _map_at(fork):
@@ -734,6 +758,17 @@ def test_a_partitioned_hard_disk_image(tmp_path):
     assert open_application(img).key == "Test Disk:Games:Test App"
 
 
+def test_a_partition_map_with_no_driver_descriptor_map(tmp_path):
+    # A CD-ROM image whose block 0 is empty: its map is still at block 1.
+    disk = bytearray(partitioned(hfs_image(), start=96))
+    disk[:512] = bytes(512)
+    img = _write(tmp_path / "cd.iso", bytes(disk))
+    assert is_disk_image(img.read_bytes())
+    assert open_application(img).key == "Test Disk:Games:Test App"
+    disk[512:514] = b"\0\0"            # and with no map, there's no volume
+    assert not is_disk_image(bytes(disk))
+
+
 def test_a_damaged_disk_image(tmp_path):
     junk = bytearray(64 * 1024)
     junk[1024:1026] = b"BD"
@@ -743,6 +778,133 @@ def test_a_damaged_disk_image(tmp_path):
     lucky = bytearray(macbinary("Lucky", bytes(2000), FORK))
     lucky[1024:1026] = b"BD"
     assert open_application(_write(tmp_path / "lucky.bin", bytes(lucky))).rsrc == FORK
+
+
+def test_an_iso_9660_disc(tmp_path):
+    """A CD image with only an ISO 9660 volume, a PC's or one with no Mac
+    volume beside it, is a disk image macrt can't read, and it says why."""
+    disc = bytes(16 * 2048) + b"\x01CD001\x01" + bytes(2041) + b"\xffCD001\x01" + bytes(2041)
+    with pytest.raises(ValueError, match="pc.iso: it's an ISO 9660 disc, with no HFS, HFS Plus "
+                                         "or MFS volume on it for macrt to read"):
+        open_application(_write(tmp_path / "pc.iso", disc))
+
+
+def raw_cd(disc, mode):
+    """An image of a CD's whole 2352-byte sectors (ECMA-130): each its sync,
+    its header and then 2048 bytes of the disc, after an 8-byte subheader
+    in a mode 2 sector."""
+    sync, sub = b"\x00" + b"\xff" * 10 + b"\x00", bytes(8 if mode == 2 else 0)
+    return b"".join((sync + bytes([0, 2, n // 2048 % 75, mode]) + sub + disc[n:n + 2048])
+                    .ljust(2352, b"\0") for n in range(0, len(disc), 2048))
+
+
+def test_a_raw_cd_image(tmp_path):
+    """An image that keeps a CD's sectors whole: the disc is the data in
+    them, and it's mounted as a CD whatever the image is called."""
+    disc = partitioned(hfs_image(), start=96)
+    for mode in (1, 2):
+        img = _write(tmp_path / f"mode{mode}.bin", raw_cd(disc, mode))
+        assert is_disk_image(img.read_bytes())
+        assert load_volume(img).disk.sectors == disc
+        apps, (volume,) = open_disks([img])
+        assert [f.key for f in apps] == ["Test Disk:Games:Test App"] and volume.cdrom
+    iso = bytes(16 * 2048) + b"\x01CD001\x01" + bytes(2041) + b"\xffCD001\x01" + bytes(2041)
+    with pytest.raises(ValueError, match="pc.bin: it's an ISO 9660 disc"):
+        open_application(_write(tmp_path / "pc.bin", raw_cd(iso, 1)))
+
+
+# -- HFS Plus -----------------------------------------------------------------
+WHEN = 0xB3BA1C00                           # in 1999, in seconds since 1904
+
+
+def local(when):
+    """An HFS Plus date, in GMT, in local time."""
+    return when + time.localtime(when - 2082844800).tm_gmtoff
+
+
+def hfs_plus(*more, **kw):
+    return hfs_plus_image("Plus Disk", [
+        HFSPlusFolder(16, 2, "Games", crdate=WHEN),
+        HFSPlusFile(17, 16, "Test App", b"APPL", b"TEST", b"d", FORK, finder_flags=0x2100,
+                    where=(40, 60), crdate=WHEN, mddate=WHEN + 60),
+        HFSPlusFile(18, 16, "Test Prefs", b"pref", b"TEST", rsrc=FORK, flags=1),
+        HFSPlusFile(19, 2, "Desktop DB", b"BTFL", b"DMGR", data=bytes(600)),
+        *more], crdate=WHEN, **kw)
+
+
+@pytest.mark.parametrize("block_size, node_size", [(512, 512), (4096, 4096)])
+def test_hfs_plus_volume(block_size, node_size):
+    img = hfs_plus(block_size=block_size, node_size=node_size, mddate=WHEN + 120)
+    assert is_disk_image(img)
+    vol = load_volume(img)
+    assert vol.name == "Plus Disk" and list(vol) == ["Games"]      # no Desktop DB
+    files = {f.key: f for f in volume_files(vol)}
+    app = files["Plus Disk:Games:Test App"]
+    assert (app.rsrc, app.data, app.type, app.creator, app.flags) == (
+        FORK, b"d", b"APPL", b"TEST", 0x2100)
+    assert app.folder.find("test prefs").type == b"pref"
+    node = vol["Games"]["Test App"]
+    assert (node.y, node.x, node.locked) == (40, 60, False)
+    assert vol["Games"]["Test Prefs"].locked
+    # Its dates are in GMT, made local as an HFS disk keeps them; but not
+    # the volume's creation date, which the volume header keeps in local time.
+    assert (node.crdate, node.mddate) == (local(WHEN), local(WHEN + 60))
+    assert vol["Games"].crdate == local(WHEN) and vol.crdate == WHEN
+    assert (vol.mddate, vol.bkdate) == (local(WHEN + 120), 0)
+
+
+def test_hfs_plus_names_as_the_mac_has_them():
+    """Unicode names in Mac Roman: one that won't go, or is too long, or
+    that its folder has already, is cut short and given its CNID."""
+    vol = load_volume(hfs_plus(
+        HFSPlusFile(20, 2, "Cafe\u0301"),                  # decomposed, as HFS Plus keeps it
+        HFSPlusFile(21, 2, "\u65e5\u672c"),
+        HFSPlusFile(22, 2, "A Name Far Too Long For An HFS Disk"),
+        HFSPlusFile(23, 2, "Read Me"),
+        HFSPlusFile(24, 2, "READ ME"),                     # HFSX tells them apart
+        HFSPlusFile(25, 2, "a:b"), signature=b"HX"))
+    assert sorted(vol) == sorted(["Games", "Caf\u00e9", "??#15", "A Name Far Too Long For An H#16",
+                                  "Read Me", "READ ME#18", "a?b#19"])
+    assert all(len(name) <= 31 for name in vol)
+
+
+def test_hfs_plus_fork_in_many_extents():
+    """A fork in more than eight extents has the rest in the extents
+    overflow file; one that says there are more where there are none is
+    a damaged disk."""
+    big = bytes(range(256)) * 40                            # 20 blocks, an extent each
+    img = hfs_plus(HFSPlusFile(20, 2, "Big", data=big, rsrc=big[::-1]), extent_blocks=1)
+    big_file = load_volume(img)["Big"]
+    assert (big_file.data, big_file.rsrc) == (big, big[::-1])
+    damaged = bytearray(img)
+    rec = damaged.find(struct.pack(">HBxII", 10, 0, 20, 8))  # the data fork's first overflow
+    damaged[rec + 4:rec + 8] = struct.pack(">I", 99)         # now another file's
+    with pytest.raises(ValueError, match="damaged"):
+        load_volume(bytes(damaged))
+
+
+def test_hfs_plus_hard_links_are_the_files_they_link_to():
+    hidden = "\0\0\0\0HFS+ Private Data"
+    vol = load_volume(hfs_plus(
+        HFSPlusFolder(30, 2, hidden),
+        HFSPlusFile(31, 30, "iNode123", b"APPL", b"LINK", b"linked", FORK),
+        HFSPlusFile(32, 16, "Alias App", b"hlnk", b"hfs+", special=123),
+        HFSPlusFile(33, 2, "Dangling", b"hlnk", b"hfs+", special=7)))
+    assert hidden not in vol
+    linked = vol["Games"]["Alias App"]
+    assert (linked.type, linked.creator, linked.data, linked.rsrc) == (
+        b"APPL", b"LINK", b"linked", FORK)
+    assert vol["Dangling"].type == b"hlnk"                  # links to nothing: itself
+
+
+def test_hfs_plus_in_an_hfs_wrapper_on_a_partitioned_disk(tmp_path):
+    """The HFS wrapper's MDB says where the HFS Plus volume in it is."""
+    wrapped = hfs_wrapper(hfs_plus(block_size=4096, node_size=4096))
+    for img in (wrapped, partitioned(wrapped, start=96)):
+        assert is_disk_image(img)
+        assert load_volume(img)["Games"]["Test App"].rsrc == FORK
+    disk = _write(tmp_path / "plus.img", partitioned(wrapped, start=96))
+    assert open_application(disk).key == "Plus Disk:Games:Test App"
 
 
 # -- what the command line opens ---------------------------------------------
@@ -805,7 +967,8 @@ def test_several_applications_at_once(tmp_path):
     assert [f.name for f in apps] == ["Lone", "Two", "One"]
     assert apps[1].key == "Two Apps:Two"
     with pytest.raises(ValueError, match="2 applications"):
-        open_applications([lone, two])
+        open_applications([two])
+    assert [f.name for f in open_applications([lone, two])] == ["Lone"]   # with its disk
     with pytest.raises(ValueError, match="nothing called 'Three' on two.img"):
         open_applications([two], ["Three"])
     with pytest.raises(ValueError, match="no.* disk image|none here"):
@@ -826,6 +989,17 @@ def test_a_disk_of_documents_goes_in_a_drive(tmp_path, qapp):
     assert [f.name for f in apps] == ["Lone"] and [d.name for d in disks] == ["Disk 2"]
     with pytest.raises(ValueError, match="0 applications"):
         open_disks([two])
+    # With an application file, an image with one of its own is its disk
+    # too, as a CD is for a copy of its program on the host.
+    disc = machfs.Volume()
+    disc.name = "Disc"
+    g = machfs.File()
+    g.type, g.rsrc = b"APPL", bytearray(FORK)
+    disc["Disc's Own"] = g
+    cd = _write(tmp_path / "disc.img", disc.write(400 * 1024))
+    apps, disks = open_disks([lone, cd])
+    assert [f.name for f in apps] == ["Lone"] and [d.name for d in disks] == ["Disc"]
+    assert [f.name for f in open_disks([cd])[0]] == ["Disc's Own"]
     # With names, an image none of them is on is a disk of documents.
     v = machfs.Volume()
     v.name = "Apps"

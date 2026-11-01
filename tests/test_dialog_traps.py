@@ -39,6 +39,7 @@ RETURN, ENTER, ESCAPE, TAB = 0x0D, 0x03, 0x1B, 0x09
 BLACK_ICON = bytes([0xFF]) * 128
 PICTURE = (struct.pack(">H4h", 22, 0, 0, 20, 20) + b"\x11\x01"     # version 1
            + b"\x31" + struct.pack(">4h", 0, 0, 20, 20) + b"\xFF")  # paintRect, the end
+BLANK = PICTURE.replace(b"\x31", b"\x32")                           # eraseRect
 
 
 class Host(NoDisplay):
@@ -67,6 +68,7 @@ class Host(NoDisplay):
 @pytest.fixture
 def g(qapp):
     g = Guest([Resource(b"ICON", 128, BLACK_ICON), Resource(b"PICT", 128, PICTURE),
+               Resource(b"PICT", 129, BLANK),
                Resource(b"DLOG", 200, dlog(BOUNDS, "", 999)),      # its DITL isn't there
                Resource(b"DITL", 300, ditl(*ITEMS[:2])),
                Resource(b"ALRT", 300, alrt(BOUNDS, 300, 0x0321)),   # beeps 1, 2, 3, 0 times
@@ -467,6 +469,71 @@ def test_drawing_the_items(g, monkeypatch):
     assert drawn == [(w, Rect(5, 6, 7, 8)), (w, None)]
 
 
+def test_a_picture_after_the_buttons_and_text_is_drawn_under_them(g):
+    """DrawDialog draws the pictures, then the controls, then the text (IM:
+    Macintosh Toolbox Essentials, Dialog Manager, DrawDialog).  G-Netix's
+    dialogs end with a picture that fills them, with blank button faces
+    where the buttons are and an empty field for the message."""
+    w = new_dialog(g, (ctrlItem + btnCtrl, (70, 230, 90, 290), b"OK"),
+                   (statText, (10, 10, 26, 200), b"Message"),
+                   (picItem, (0, 0, 100, 300), struct.pack(">h", 129)))
+    g("DrawDialog", w.addr)
+    assert any_black(w, (10, 10, 26, 200)) and black(w, 80, 230)
+
+
+def test_an_empty_static_text_item_draws_nothing(g):
+    """Hermes's arrow pictures are under empty static text items, its
+    buttons' click targets: with nothing to draw, they don't erase."""
+    w = new_dialog(g, (statText, (10, 10, 26, 60), b""),
+                   (picItem, (10, 10, 30, 60), struct.pack(">h", 128)))
+    g("DrawDialog", w.addr)
+    assert black(w, 18, 30)
+
+
+def test_an_icon_item_with_a_colour_icon(qapp):
+    """On a colour machine an icon item whose ICON has a cicn of the same
+    ID is that colour icon: its handle the CIcon record GetCIcon makes,
+    which the program can dispose of (Odell Down Under does, then gives
+    the item one of its own); on a Plus it's the ICON."""
+    from test_icons import red_cicn
+    resources = [Resource(b"ICON", 128, BLACK_ICON), Resource(b"cicn", 128, red_cicn())]
+    rid = struct.pack(">h", 128)
+    g = Guest(resources, model="ii", depth=8)
+    g.tb._d = Host()
+    w = new_dialog(g, (iconItem, (10, 10, 14, 14), rid), (iconItem, (20, 10, 24, 14), rid))
+    icon = g.process.resources.GetResource("ICON", 128)
+    h = item(g, w, 1).handle
+    assert h not in (0, icon, item(g, w, 2).handle)
+    p = g.heap.deref(h)
+    ctab, pixels = g.mem.r32(p + 42), g.mem.r32(p + 78)
+    assert g.heap.is_handle(ctab) and g.heap.is_handle(pixels)
+    g("DrawDialog", w.addr)
+    with w.backing.lock:
+        img = w.backing.image
+        assert img.pixel(11, 11) & 0xFFFFFF == 0xFF0000 and black(w, 11, 10)
+        assert img.pixel(13, 11) == img.pixel(13, 30)       # the mask's right column
+    g("DisposeCIcon", h)
+    assert not any(map(g.heap.is_handle, (h, ctab, pixels)))
+    g("SetDialogItem", w.addr, 1, iconItem, icon, g.rect_ptr((10, 10, 14, 14)))
+    # A record the program makes itself is drawn as a colour icon too.
+    own = g("GetCIcon", 128)
+    g("SetDialogItem", w.addr, 2, iconItem + itemDisable, own, g.rect_ptr((20, 30, 24, 34)))
+    g("DrawDialog", w.addr)
+    assert black(w, 11, 11)                             # the ICON, drawn as one
+    with w.backing.lock:
+        assert w.backing.image.pixel(31, 21) & 0xFFFFFF == 0xFF0000
+    # A record that isn't one GetCIcon made is disposed of, its handles
+    # left be where they're in no heap.
+    other = g.handle(BLACK_ICON)
+    g("DisposeCIcon", other)
+    assert not g.heap.is_handle(other)
+
+    plus = Guest(resources)
+    plus.tb._d = Host()
+    w = new_dialog(plus, (iconItem, (10, 10, 42, 42), rid))
+    assert item(plus, w, 1).handle == plus.process.resources.GetResource("ICON", 128)
+
+
 def test_the_default_buttons_outline(g):
     """SetDialogDefaultItem draws a bold outline round the button, grey
     if the button's dimmed; none for an item that isn't a button that can
@@ -600,6 +667,17 @@ def test_alert_stages(g):
     assert counts == [1, 2, 3, 0, 0, 0]
     assert g("Alert", 301, 0) == -1 and len(g.beeps) == 7      # its DITL isn't there
     assert g("Alert", 300, 0) == -1 and len(g.beeps) == 8      # from stage 1 again
+
+
+def test_an_alert_with_no_alrt_is_noted_once(g, caplog):
+    """An alert whose ALRT isn't there shows nothing; the log says so,
+    once for each ID, so a program that only shows one isn't a mystery."""
+    g("InitDialogs", 0)
+    assert g("StopAlert", 299, 0) == -1
+    assert g("Alert", 299, 0) == -1
+    assert g("Alert", 300, 0) == -1                             # there, not drawn
+    assert caplog.text.count("ALRT 299, which isn't in any open resource file") == 1
+    assert "ALRT 300" not in caplog.text
 
 
 def test_alerts_icons_and_default_button(g):

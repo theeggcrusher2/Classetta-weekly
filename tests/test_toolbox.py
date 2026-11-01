@@ -10,10 +10,10 @@ import pytest
 from guest import Guest, Processor
 
 from macrt.m68k import dispatch, runtime
-from macrt.m68k.glue_os import Gestalt
+from macrt.m68k.glue_os import Gestalt, SysEnvirons
 from macrt.memory import RAM, BusError
 from macrt.toolbox import constants as k
-from macrt.toolbox import lowmem, system
+from macrt.toolbox import events, lowmem, system
 from macrt.toolbox.events import EventQueue, EventRecord, ProcessKilled
 from macrt.toolbox.memmgr import noErr
 from macrt.toolbox.qdraw import Region
@@ -242,11 +242,62 @@ def test_a_mouse_region_the_mouse_is_out_of_gives_mouse_moved_events():
     q, next_update = _queue(["win-needing-update"])
     got, ev = q.get(k.everyEvent, 0, next_update, mouse_rgn=Region())
     assert got and ev.what == k.updateEvt
-    for rgn in (Region(), Region.rect(Rect(10, 10, 20, 20))):
-        got, ev = q.get(k.everyEvent, 0, next_update, mouse_rgn=rgn)
-        assert got and (ev.what, ev.message) == (k.osEvt, k.mouseMovedMessage << 24)
+    got, ev = q.get(k.everyEvent, 0, next_update, mouse_rgn=Region())
+    assert got and (ev.what, ev.message) == (k.osEvt, k.mouseMovedMessage << 24)
+    q, next_update = _queue()
+    got, ev = q.get(k.everyEvent, 0, next_update, mouse_rgn=Region.rect(Rect(10, 10, 20, 20)))
+    assert got and (ev.what, ev.message) == (k.osEvt, k.mouseMovedMessage << 24)
     got, ev = q.get(k.everyEvent, 3, next_update, mouse_rgn=Region.rect(Rect(-1, -1, 1, 1)))
     assert not got and ev.what == k.nullEvent
+
+
+def test_the_tick_clock_starts_a_minute_in():
+    """TickCount counts from startup, and a program launched as macrt starts
+    sees a minute gone by, not a clock that has only just begun: Castles
+    Demo, under 180, ran past the end of a list of its own."""
+    ticks = events.tick_count()
+    assert ticks - int((time.monotonic() - events._T0) * 60) in (3599, 3600)
+
+
+def test_a_mouse_that_stays_put_has_mouse_moved_and_null_events_by_turns(monkeypatch):
+    """Asked again after a mouse-moved event, WaitNextEvent gives a null
+    event once its sleep runs out, by the next tick at the latest, even
+    when that tick has come: Dr. Quandary starts only on one, and takes
+    more than a tick to ask again.  Asked again in the null event's tick,
+    it waits for the next tick first, so that SimpleText and Darkwood,
+    which pass an empty region and ask again at once, leave the host the
+    processor.  A mouse that has moved is given its event at once."""
+    # A clock whose tick ends only when the queue waits
+    ticks = [100]
+    monkeypatch.setattr(events, "tick_count", lambda: ticks[0])
+    monkeypatch.setattr(events, "to_next_tick", lambda: 0.5)
+    at = [Point(0, 0)]
+    q = EventQueue(lambda: (at[0], 0))
+
+    def wait(timeout):
+        time.sleep(timeout)
+        ticks[0] += 1
+
+    q._cond.wait = wait
+    whens = []
+    for i in range(6):
+        got, ev = q.get(k.everyEvent, 0, lambda: None, mouse_rgn=Region())
+        assert got and (ev.what, ev.where) == (k.osEvt, Point(0, 0))
+        whens.append(ev.when)
+        if i % 2:
+            ticks[0] += 2
+        got, ev = q.get(k.everyEvent, 0, lambda: None, mouse_rgn=Region())
+        assert not got and ev.what == k.nullEvent
+    assert len(set(whens)) == 6 and q.waited_at > float("-inf")
+    got, ev = q.get(k.everyEvent, 600, lambda: None, mouse_rgn=Region())
+    assert got and ev.what == k.osEvt
+    before = time.monotonic()
+    got, ev = q.get(k.everyEvent, 600, lambda: None, mouse_rgn=Region())
+    assert not got and ev.what == k.nullEvent and time.monotonic() - before < 5
+    at[0] = Point(5, 6)
+    waited = q.waited_at
+    got, ev = q.get(k.everyEvent, 0, lambda: None, mouse_rgn=Region())
+    assert got and ev.where == Point(5, 6) and q.waited_at == waited
 
 
 def test_the_queue_says_when_the_program_last_asked_and_waited():
@@ -528,7 +579,23 @@ def test_gestalt_says_its_own_version_and_the_sound_managers(qapp):
     err, snd = Gestalt(g, 0x736E6420)                           # 'snd '
     assert err == noErr and snd & 1 << 10                       # gestaltSndPlayDoubleBuffer
     assert snd & 1 << 11                                        # gestaltMultiChannels
-    assert not snd & 1 << 5                                     # no sound input
+    assert snd & 1 << 3                                         # gestaltSoundIOMgrPresent
+    assert not snd & 1 << 5                                     # no sound input device
+
+
+def test_each_model_says_which_processor_and_coprocessor_it_has(qapp):
+    """Fine Artist wants a colour Mac with a 68030: a Mac IIx says it has
+    one, and a 68882, to Gestalt, SysEnvirons and in CPUFlag."""
+    for model, proc, fpu, mach, env in (("plus", 1, 0, 4, 2), ("ii", 3, 1, 6, 4),
+                                        ("iix", 4, 2, 7, 5)):
+        g = Guest(model=model)
+        assert Gestalt(g, int.from_bytes(b"proc", "big")) == (noErr, proc)
+        assert Gestalt(g, int.from_bytes(b"fpu ", "big")) == (noErr, fpu)
+        assert Gestalt(g, int.from_bytes(b"mach", "big")) == (noErr, mach)
+        p = g.ptr(bytes(16))
+        assert SysEnvirons(g, 2, p) == noErr
+        machine, _, processor, has_fpu = struct.unpack_from(">hhhB", g.mem.read(p + 2, 7))
+        assert (machine, processor, has_fpu) == (env, proc, fpu > 0)
 
 
 def test_gestalt_says_there_are_system_7s_help_manager_ppc_and_launch(qapp):
@@ -540,6 +607,15 @@ def test_gestalt_says_there_are_system_7s_help_manager_ppc_and_launch(qapp):
     assert err == noErr and ppc & 0x1000 and not ppc & 3       # initialised; no network
     err, os = Gestalt(g, int.from_bytes(b"os  ", "big"))
     assert err == noErr and os & 0b1110 == 0b1110               # return, FSSpec, control
+
+
+def test_gestalt_says_there_is_one_script_and_the_pop_up_menu_control(qapp):
+    """Chess++, Mille Bornes and Tarantula ask how many scripts there are;
+    BrickBounce, Spoydworks Solitaire and NCSA Mosaic whether there's the
+    pop-up menu control."""
+    g = Guest()
+    assert Gestalt(g, int.from_bytes(b"scr#", "big")) == (noErr, 1)
+    assert Gestalt(g, int.from_bytes(b"pop!", "big")) == (noErr, 1)
 
 
 def test_there_is_no_default_user(qapp):
@@ -750,6 +826,85 @@ def test_the_menu_manager_keeps_a_system_menus_size(qapp):
     g.mem.w32(g.menu(h).ptr + 2, 0)                     # a program clears it
     g("CalcMenuSize", h)
     assert g.menu(h).size == (short[0], 2 * theme.MENU_ITEM_HEIGHT)
+
+
+def test_a_menu_item_call_that_changes_nothing_doesnt_wait_for_the_gui(qapp, monkeypatch):
+    """CheckItem of a checked item, SetMenuItemText with the item's text
+    and either of an item past the last leave the menu as it is, and don't
+    wait for the GUI thread: Dr. Quandary makes such calls on each pass of
+    its event loop.  The menu's size is still set again, as it was worked
+    out for the same items."""
+    from macrt.ui import menubar
+    sized, menu_size = [], menubar.menu_size
+    monkeypatch.setattr(menubar, "menu_size", lambda m, s=None: sized.append(1) or menu_size(m, s))
+    g = MenuGuest()
+    calls = []
+    bridge = SimpleNamespace(call=lambda fn, *a: calls.append(fn) or fn(*a))
+    g.tb._d = SimpleNamespace(bridge=bridge, refresh_bars=lambda: None)
+    h = g("NewMenu", 200, g.ptr(b"\x05Train"))
+    g("AppendMenu", h, g.ptr(b"\x05Short"))
+    calls.clear()
+    g("CheckItem", h, 1, 1)
+    assert len(calls) == 1 and g.menu(h).item(1).mark == k.checkMark
+    g("CheckItem", h, 1, 1)
+    g("SetMenuItemText", h, 1, g.ptr(b"\x05Short"))
+    g("CheckItem", h, 9, 0)
+    assert len(calls) == 1
+    g("SetMenuItemText", h, 1, g.ptr(b"\x04Long"))
+    g("CheckItem", h, 1, 0)
+    it = g.menu(h).item(1)
+    assert len(calls) == 3 and (it.text, it.mark) == ("Long", k.noMark)
+    size, worked_out = g.menu(h).size, len(sized)
+    g.mem.w32(g.menu(h).ptr + 2, 0)                     # a program clears it
+    g("CheckItem", h, 1, 0)
+    assert g.menu(h).size == size and len(calls) == 3 and len(sized) == worked_out
+    g("CheckItem", h, 1, 1)                             # back to items it was worked out for
+    assert len(calls) == 4 and len(sized) == worked_out
+
+
+def test_only_enabling_or_disabling_a_menu_has_the_bar_drawn_again(qapp):
+    """EnableItem and DisableItem post a refresh of the menu bar only for a
+    change to the menu's own bit, the one the bar shows: Dr. Quandary
+    disables and enables items on each pass of its event loop, and the bar
+    was drawn again fifty times a second."""
+    g = MenuGuest()
+    posted = []
+    bridge = SimpleNamespace(call=lambda fn, *a: fn(*a), post=posted.append)
+    g.tb._d = SimpleNamespace(bridge=bridge, refresh_bars=lambda: None)
+    h = g("NewMenu", 200, g.ptr(b"\x05Train"))
+    g("AppendMenu", h, g.ptr(b"\x05Short"))
+    g("DisableItem", h, 1)
+    g("EnableItem", h, 1)
+    g("DisableItem", h, 1)
+    assert posted == [] and not g.menu(h).enable_flags & 2
+    g("EnableItem", h, 0)
+    assert posted == []
+    g("DisableItem", h, 0)
+    g("DisableItem", h, 0)
+    assert len(posted) == 1 and not g.menu(h).enabled
+    posted[0]()                                         # the bar shows it
+    g("DisableItem", h, 0)
+    g("EnableItem", h, 0)
+    assert len(posted) == 2 and g.menu(h).enabled
+
+
+def test_a_menus_items_read_from_its_bytes_in_one_go(qapp, monkeypatch):
+    """menuData is read in chunks, more than one for a long menu, and its
+    items come out as reading it byte by byte gives them."""
+    from macrt.toolbox import menus
+    g = MenuGuest()
+    g.tb.menus_changed = lambda menu=None: None
+    h = g("NewMenu", 200, g.ptr(b"\x05Train"))
+    g.menu(h).append(parse_menu_items(";".join(f"Item number {i}/{chr(65 + i % 26)}"
+                                               for i in range(100))))
+    menu = g.menu(h)
+    title, items = menu._parse()
+    assert title == b"Train" and len(items) == 100 and items[99][0] == b"Item number 99"
+    assert sum(1 + len(text) + 4 for text, _ in items) > menus.PARSE_CHUNK
+    monkeypatch.setattr(menus, "PARSE_CHUNK", g.mem.size)      # more than RAM: byte by byte
+    assert menu._parse() == (title, items)
+    data = g.mem.read(menu.ptr + menus.MENU_DATA, 2000)
+    assert menus._parse_menu_data(data[:100]) is None
 
 
 def test_the_event_manager_calls_system_task_and_system_event_through_their_patches(qapp):

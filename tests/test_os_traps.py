@@ -15,7 +15,10 @@ from macrt.m68k import glue_os as os_
 from macrt.macfile import MacFile
 from macrt.resfork import Resource, build_fork
 from macrt.toolbox import lowmem
+from macrt.toolbox.constants import activateEvt, kHighLevelEvent, osEvt
+from macrt.toolbox.events import EventRecord
 from macrt.toolbox.memmgr import memFullErr, memWZErr, nilHandleErr, noErr
+from macrt.toolbox.types import Point
 
 NOWHERE = 0x10                  # low memory: in no zone
 
@@ -138,6 +141,10 @@ def test_the_trap_table(g):
     assert g("GetTrapAddress", 0x8F, True, True) == unimplemented    # _OSDispatch
     assert g("GetTrapAddress", 0x303, True, True) == unimplemented   # QD32Trap on a Plus
     assert g("GetTrapAddress", 0x6E, True, False) == unimplemented   # no slots
+    assert g("GetTrapAddress", 0x9F, True, True) == unimplemented    # _Unimplemented itself
+    # The survey hears what was asked for and isn't there, but not about
+    # _Unimplemented, which a program asks for to compare the others with.
+    assert g.missing_asked == ["OSDispatch", "$AB03", "SlotManager"]
     errors = []
     g.system_error = lambda error_id, detail="": errors.append(error_id)
     g.run(struct.pack(">H", os_.QD32TRAP))
@@ -147,27 +154,71 @@ def test_the_trap_table(g):
 
 def test_gestalt_selectors_of_a_programs_own(g):
     assert g("Gestalt", ostype("zzzz")) == (os_.gestaltUndefSelectorErr, 0)
+    assert g("Gestalt", 0x00000001) == (os_.gestaltUndefSelectorErr, 0)
+    assert g.missing_asked == ["Gestalt 'zzzz'", "Gestalt $00000001"]
     assert g("NewGestalt", ostype("vers"), 0x5000) == os_.gestaltDupSelectorErr
     assert g("ReplaceGestalt", ostype("zzzz"), 0x5000) == (os_.gestaltUndefSelectorErr, 0)
     assert g("ReplaceGestalt", ostype("vers"), 0x5000) == (noErr, 0)
     g.procs[0x5000] = lambda selector, response: g.mem.w32(response, 42)
     assert g("Gestalt", ostype("vers")) == (noErr, 42)
     assert g("ReplaceGestalt", ostype("vers"), 0x6000) == (noErr, 0x5000)
+    assert len(g.missing_asked) == 2
     p = g.ptr(bytes(os_.SYSENV_SIZE))
     assert g("SysEnvirons", 0, p) == os_.envBadVers
     assert g("SysEnvirons", 3, p) == os_.envVersTooBig and g.mem.r16(p) == 2
 
 
 def test_os_events(g):
-    assert g("PostEvent", 3, 0x61) == noErr                 # keyDown
+    assert g("PostEvent", 3, 0x61, False) == noErr          # keyDown
     p = g.ptr(bytes(16))
     assert g("OSEventAvail", 0xFFFF, p)
     assert (g.mem.r16(p), g.mem.r32(p + 2)) == (3, 0x61)
     assert g("GetOSEvent", 0xFFFF, p) and not g("OSEventAvail", 0xFFFF, p)
     g.process.events.enabled = lambda: 0                    # SysEvtMask leaves it out
-    assert g("PostEvent", 3, 0x62) == os_.evtNotEnb
+    assert g("PostEvent", 3, 0x62, False) == os_.evtNotEnb
     rec = g.ptr(bytes(36))
     assert g("NMRemove", rec) == os_.nmTypErr
+
+
+def test_os_events_are_the_low_level_ones(g):
+    """GetOSEvent "does not return activate, update, operating-system, or
+    high-level events" (IM: Macintosh Toolbox Essentials, Event Manager,
+    "Receiving Events"), and OSEventAvail reads the same queue.  G-Netix
+    calls GetOSEvent with every bit of its mask set before it takes its
+    Open Application event from WaitNextEvent."""
+    oapp = ostype("oapp")
+    where = Point(oapp >> 16, oapp & 0xFFFF)
+    g.process.events.post(EventRecord(kHighLevelEvent, ostype("aevt"), 0, where, 0))
+    g.process.events.post(EventRecord(osEvt, 0x01000001, 0, Point(0, 0), 0))    # resume
+    g.process.events.post_activate(0x5000, True)
+    assert g("PostEvent", 3, 0x61, False) == noErr          # keyDown
+    p = g.ptr(bytes(16))
+    assert g("GetOSEvent", 0xFFFF, p) and g.mem.r16(p) == 3
+    assert not g("OSEventAvail", 0xFFFF, p) and not g("GetOSEvent", 0xFFFF, p)
+    left = [g.process.events.get(0xFFFF, 0, lambda: None)[1].what for _ in range(3)]
+    assert sorted(left) == [activateEvt, osEvt, kHighLevelEvent]
+
+
+def test_ppostevent_gives_the_events_queue_entry(g):
+    """_PPostEvent, PostEvent with bit 8 set, leaves the event's queue
+    entry (an EvQEl) in A0: what the program puts there, it gets.  Troggle
+    Trouble Math passes a pointer in evtQWhen and a flag in evtQModifiers."""
+    assert regs(g, 0xA12F, d0=1000, a0=14) == noErr         # app3Evt
+    qel = g.cpu.a(0)
+    assert qel and g.mem.r16(qel + 4) == os_.evType
+    assert (g.mem.r16(qel + 6), g.mem.r32(qel + 8)) == (14, 1000)
+    g.mem.w32(qel + 12, 0x123456)
+    g.mem.w16(qel + 20, 0x0201)
+    p = g.ptr(bytes(16))
+    assert g("OSEventAvail", 0xFFFF, p)                     # as it's left, looked at
+    assert struct.unpack(">hLL", g.mem.read(p, 10)) == (14, 1000, 0x123456)
+    assert g("GetOSEvent", 0xFFFF, p)                       # and got
+    assert (g.mem.r32(p + 6), g.mem.r16(p + 14)) == (0x123456, 0x0201)
+    # Once it's been got, its entry is the next one's.
+    assert regs(g, 0xA12F, d0=1001, a0=14) == noErr and g.cpu.a(0) == qel
+    assert regs(g, 0xA12F, d0=1002, a0=14) == noErr and g.cpu.a(0) != qel
+    # Plain PostEvent leaves A0 as it was.
+    assert regs(g, 0xA02F, d0=1003, a0=14) == noErr and g.cpu.a(0) == 14
 
 
 def test_the_date_and_time(g):
@@ -214,6 +265,14 @@ def test_vbl_tasks_of_the_wrong_type(g):
     assert g.mem.r32(lowmem.VBLQueue + 2) == task
     assert g("SlotVRemove", task, 0) == noErr
     assert g.mem.r32(lowmem.VBLQueue + 2) == 0
+
+
+def test_attach_vbl_takes_the_screen_s_slot_only(g):
+    """Snd2SysBeep gives AttachVBL the slot GetVideoDefault names."""
+    from macrt.toolbox.gdevice import VIDEO_SLOT
+    assert g("AttachVBL", VIDEO_SLOT) == noErr
+    assert g("AttachVBL", VIDEO_SLOT + 1) == os_.slotNumErr
+    assert g("AttachVBL", 0) == os_.slotNumErr
 
 
 def test_parameter_ram(g):

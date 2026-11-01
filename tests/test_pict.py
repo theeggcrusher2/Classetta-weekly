@@ -277,6 +277,23 @@ def test_a_picture_scales_to_the_destination(g):
     assert rows[8][16] == rows[15][31] == "."           # not its corners
 
 
+def test_space_extra_scales_with_the_picture(g):
+    """SpExtra is pixels in the picture's coordinates: a picture drawn at
+    half its size adds half as many to each space, as its text positions
+    and size are halved (the MayaQuest ReadMe's 2304-dpi pages)."""
+    port, _ = g.port()
+    data = v1((0, 0, 64, 128), b"\x0D\x00\x18\x06" + struct.pack(">l", 16 << 16)
+              + b"\x28" + struct.pack(">hh", 40, 4) + b"\x03i i")
+    play(g, port, data, dst=FRAME)
+    other, _ = g.port()
+    g.set_port(other)
+    g("TextSize", 12)
+    g("SpaceExtra", 8 << 16)
+    g("MoveTo", 2, 20)
+    g("DrawString", g.ptr(b"\x03i i"))
+    assert ones(g.rows(port)) and g.rows(port) == g.rows(other)
+
+
 def test_a_picture_is_clipped_to_its_clip_and_the_ports(g):
     port, _ = g.port()
     g("ClipRect", g.rect_ptr((0, 0, 4, 64)))

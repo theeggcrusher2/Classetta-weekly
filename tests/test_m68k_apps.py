@@ -16,7 +16,7 @@ from PyQt6.QtGui import QFont, QFontMetrics
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
-from macrt.m68k import controlpanel, dispatch, runtime
+from macrt.m68k import controlpanel, dispatch, glue_threads, runtime
 from macrt.m68k.cpu import CPU, PAGE_SIZE
 from macrt.m68k.hardware import vBufA
 from macrt.m68k.runtime import LEVEL_1_ROUTINE, Runner, SystemError68k
@@ -28,7 +28,7 @@ from macrt.toolbox import lowmem
 from macrt.toolbox import qdraw
 from macrt.toolbox import textedit as te
 from macrt.toolbox.events import EventRecord, tick_count
-from macrt.toolbox.system import DEFAULT_PARTITION, DEFAULT_STACK
+from macrt.toolbox.system import DEFAULT_PARTITION, DEFAULT_STACK, SIZE_STACK
 from macrt.toolbox.templates import btnCtrl, chkCtrl, ctrlItem, editText
 from macrt.toolbox.types import Point, Rect
 from macrt.toolbox.windows import describe_proc
@@ -161,6 +161,19 @@ def test_the_random_seed_in_low_memory_is_not_zero(harness):
     h = harness()
     proc, _ = launch_hello(h)
     assert proc.system.mem.r32(lowmem.RndSeed) != 0
+
+
+@pytest.mark.parametrize("speed, dbra, chips", [(None, 0x7FFF, 0x7FFF), (2, 1200, 666)])
+def test_the_timing_globals_count_a_millisecond_of_the_core(harness, speed, dbra, chips):
+    """TimeDBRA, TimeSCCDB and TimeSCSIDB: as many times round a DBRA, and
+    a TST.B (A0) and a DBRA, as the cycle model lets --speed run them in a
+    millisecond; unpaced, the most a signed word holds.  Sesame Street
+    Letters draws every other row while TimeDBRA is 5004 or less."""
+    h = harness(speed=speed)
+    proc, _ = launch_hello(h)
+    mem = proc.system.mem
+    assert mem.r16(lowmem.TimeDBRA) == dbra
+    assert mem.r16(lowmem.TimeSCCDB) == mem.r16(lowmem.TimeSCSIDB) == chips
 
 
 def test_hello_counts_clicks_in_its_window(harness):
@@ -596,7 +609,7 @@ def test_a_trap_through_the_roms_dispatcher(harness):
     assert mem.r32(a5 - 16) == 0xF000
 
 
-@pytest.mark.parametrize("model", ["plus", "ii"])
+@pytest.mark.parametrize("model", ["plus", "ii", "iix"])
 def test_loadtrap_and_an_a_line_handler_of_the_programs_own(harness, model):
     """A program's own handler in vector $28 sees every A-line trap, and
     goes on to the ROM's dispatcher.  With LoadTrap set, _LoadSeg calls
@@ -973,6 +986,30 @@ def test_vbl_tasks_run_every_tick_until_removed(harness):
     assert proc.runner.unimplemented_calls == {}
 
 
+def test_deferred_tasks_run_once_after_the_interrupts_tasks(harness):
+    """A deferred task that a VBL task queues through jDTInstall runs
+    after it, with dtParm in A1, once; one the application queues with
+    DTInstall runs at a tick to come, with nothing else to run then; a
+    record that isn't a deferred task's qType gets vTypErr (Inside
+    Macintosh: Processes)."""
+    h = harness()
+    h.launch(Recorder("Other"))
+    f = open_application(APPS / "Deferred.bin")
+    proc = h.d.launch(f.name, None, app=f)
+    mem, a5 = proc.system.mem, proc.partition.a5
+    h.wait_until(lambda: proc not in h.d.processes, timeout=10, what="Deferred to finish")
+    assert not h.d.system_errors
+    assert mem.r16s(a5 - 64) == -2                  # vTypErr
+    assert mem.r16s(a5 - 66) == 0                   # jDTInstall: noErr
+    assert mem.r16s(a5 - 58) == 1                   # the VBL task's runs
+    assert mem.r16s(a5 - 56) == 1                   # the task's
+    assert mem.r16s(a5 - 60) == 1                   # after the VBL task
+    assert mem.r16s(a5 - 68) == 0                   # DTInstall: noErr
+    assert mem.r16s(a5 - 62) == 1                   # the second task's runs
+    assert mem.r32(a5 - 72) == 0                    # the queue is empty
+    assert proc.runner.unimplemented_calls == {}
+
+
 def test_a_late_retrace_makes_up_for_the_ticks_it_missed(monkeypatch):
     """The host late for the vertical retrace, a VBL task is counted down
     once for each tick it missed, up to MAX_LATE of them; after a break,
@@ -1027,7 +1064,11 @@ def test_get_next_event_with_nothing_to_give_returns_at_once(harness):
     """Poll waits for the Ticks to change and then calls GetNextEvent, 30
     times: as on a Mac, where it returns at once with nothing to give, that
     takes 30 ticks, not 60.  Its 30 calls one after another take about 30
-    ticks too: asked again in the same tick, it waits for the next."""
+    ticks too: asked again in the same tick, it waits for the next.
+    WaitNextEvent with no time to sleep does the same, in a loop that
+    posts itself an event and takes it between too, as Lemmings' title
+    does: 30 rounds of that take about 30 ticks, where they took none and
+    kept the host's processor."""
     h = harness()
     h.launch(Recorder("Other"))
     f = open_application(APPS / "Poll.bin")
@@ -1037,6 +1078,9 @@ def test_get_next_event_with_nothing_to_give_returns_at_once(harness):
     assert not h.d.system_errors
     assert mem.r32(a5 - 20) <= 45                   # a tick each, not two
     assert 25 <= mem.r32(a5 - 24) <= 45             # and no more than one a tick
+    assert mem.r32(a5 - 28) <= 45                   # WaitNextEvent's
+    assert 25 <= mem.r32(a5 - 32) <= 45
+    assert 25 <= mem.r32(a5 - 36) <= 45             # posting, taking and asking
     assert proc.runner.unimplemented_calls == {}
 
 
@@ -1078,19 +1122,24 @@ def test_asking_over_and_over_is_timed_by_the_programs_own_processor_time(monkey
     program's calls to TickCount, as it does under load: that isn't the
     program doing something else, so once it's had SPIN_BUDGET of its own
     time asking it still waits for the next tick.  Its own time between
-    them is something else, as is another trap."""
+    them is something else, as is another trap.  FlushEvents between them,
+    as Runaround and Run call it, isn't, but it doesn't wait itself; nor is
+    KeyTranslate, as Space Junkie calls it, or GetPort, SetPort and
+    PtInRect, as ArcMac and IAGO call them, or HLock, StripAddress, HUnlock
+    and PrimeTime, as Opening Night calls them."""
     clock = SimpleNamespace(own=0.0, wall=0.0)
-    naps = []
+    naps, calls = [], []
     monkeypatch.setattr(runtime, "time", SimpleNamespace(monotonic=lambda: clock.wall))
     monkeypatch.setattr(runtime, "dispatch", SimpleNamespace(
-        trap_key=dispatch.trap_key, dispatch=lambda runner, word, pc: None))
+        trap_key=dispatch.trap_key, dispatch=lambda runner, word, pc: calls.append(word)))
     r = SimpleNamespace(cpu_time=lambda: clock.own, polled=-runtime.SPIN_GAP, spun_from=0.0,
                         holding=True,
                         machine=SimpleNamespace(ticking=lambda: False),
                         cpu=SimpleNamespace(rate=0, sr=0x2000), yielding=nullcontext,
                         process=SimpleNamespace(events=SimpleNamespace(
-                            nap=lambda secs: naps.append(clock.own))))
+                            nap=lambda secs: naps.append((clock.own, len(calls))))))
     r._polling = lambda: Runner._polling(r)
+    r._wait_for_tick = lambda: Runner._wait_for_tick(r)
 
     def ask(times, own, away=0.0, between=None):
         for _ in range(times):
@@ -1100,11 +1149,23 @@ def test_asking_over_and_over_is_timed_by_the_programs_own_processor_time(monkey
             if between:
                 Runner._dispatch(r, between, 0)
     ask(30, 0.0001, away=0.001)
-    assert len(naps) == 1 and naps[0] - 0.0001 >= runtime.SPIN_BUDGET
+    assert len(naps) == 1 and naps[0][0] - 0.0001 >= runtime.SPIN_BUDGET
     naps.clear()
     ask(30, runtime.SPIN_GAP)
     ask(30, 0.0001, between=0xA122)                 # NewHandle
     assert naps == []
+    for between in (0xA032, 0xA9C3,                 # FlushEvents, KeyTranslate
+                    0xA874, 0xA873, 0xA8AD,         # GetPort, SetPort, PtInRect
+                    0xA029, 0xA055, 0xA02A,         # HLock, StripAddress, HUnlock
+                    0xA05A):                        # PrimeTime
+        Runner._dispatch(r, 0xA122, 0)              # after something else
+        ask(30, 0.0001, between=between)
+        assert len(naps) == 1 and calls[naps[0][1]] == 0xA975
+        naps.clear()
+        for _ in range(60):
+            clock.own += 0.0001
+            Runner._dispatch(r, between, 0)
+        assert naps == []
 
 
 def test_where_the_host_cant_tell_a_threads_own_time_spinning_is_timed_by_the_clock(
@@ -1182,6 +1243,45 @@ def test_time_manager_tasks_run_when_due(harness):
     assert not mem.r16(a5 - 54) & 0x8000            # and it's not waiting
     assert mem.r16s(a5 - 56) == 0                   # nor did it run
     assert proc.runner.unimplemented_calls == {}
+
+
+# -- Threads: the Thread Manager -----------------------------------------------------
+def test_threads_take_turns_as_they_yield(harness):
+    """Threads' main thread makes a thread and yields to it until it's
+    gone: the thread, given its parameter, yields back, once from inside
+    a grow-zone function its NewPtr has the Memory Manager call, and its
+    result lands where NewThread was told.  One made stopped can't be
+    yielded to; made ready, and disposed of while it waits, its
+    terminator runs and it gets the result given.  One disposes of
+    itself, and one left waiting as the application quits is ended."""
+    h = harness()
+    h.launch(Recorder("Other"))
+    f = open_application(APPS / "Threads.bin")
+    proc = h.d.launch(f.name, None, app=f)
+    mem, a5 = proc.system.mem, proc.partition.a5
+    h.wait_until(lambda: proc not in h.d.processes, timeout=10, what="Threads to finish")
+    assert not h.d.system_errors
+    assert proc.runner.unimplemented_calls == {}
+    log = mem.read(a5 - 32, mem.r16(a5 - 34))
+    assert log == b"MWMWGMWMwtMsMfM"
+    assert mem.r32(a5 - 38) & 1                     # Gestalt 'thds'
+    assert mem.r16s(a5 - 48) == 0                   # NewThread
+    assert mem.r32(a5 - 42) == 3                    # the first's id
+    assert mem.r32(a5 - 52) == 0x1234               # its parameter
+    assert mem.r32(a5 - 56) == 3                    # GetCurrentThread in it
+    assert mem.r32(a5 - 60) == 2                    # and back in the main thread
+    assert 0 < mem.r32(a5 - 64) <= glue_threads.DEFAULT_STACK   # StackSpace: its own
+    assert mem.r16(a5 - 66) == 1                    # the grow-zone function ran once
+    assert mem.r32(a5 - 70) == 0                    # and freed nothing
+    assert mem.r32(a5 - 46) == 0x5678               # the first's result
+    assert mem.r16(a5 - 80) == glue_threads.STOPPED     # the second, made stopped
+    assert mem.r16s(a5 - 82) == glue_threads.threadProtocolErr  # can't be yielded to
+    assert mem.r16s(a5 - 84) == 0                   # DisposeThread
+    assert mem.r32(a5 - 78) == 0x9ABC               # its result
+    assert (mem.r32(a5 - 88), mem.r32(a5 - 92)) == (mem.r32(a5 - 74), 0x77)  # its terminator's
+    assert mem.r32(a5 - 100) == 0xDEF0              # the third's, disposing of itself
+    assert mem.r8(a5 - 102) == 0                    # and that call didn't return
+    assert not [th for th in threading.enumerate() if th.name.startswith("Threads thread")]
 
 
 # -- Driver: an application's own driver ----------------------------------------------
@@ -1397,7 +1497,7 @@ def test_a_files_memory_size_is_for_its_later_launches(harness):
     first = h.d.launch(app.name, Recorder(app.name), app=app, memory=900 << 10)
     later = h.d.launch(app.name, Recorder(app.name), app=app)
     for proc in (first, later):
-        assert proc.partition.end - proc.partition.start == (900 << 10) + DEFAULT_STACK
+        assert proc.partition.end - proc.partition.start == (900 << 10) - SIZE_STACK + DEFAULT_STACK
 
 
 def test_a_control_panels_text_is_in_its_finf_s_font(harness, monkeypatch):
@@ -1691,6 +1791,55 @@ def test_the_sound_chip_written_between_traps_is_heard_as_the_program_runs_on(
     assert frames == [{0x40}]
 
 
+@OWN_TIME
+def test_waiting_for_a_synchronous_sound_leaves_the_host_the_processor(harness):
+    """A square wave written to the Sound Driver for 60 ticks and a half
+    second of samples played with SndPlay, each synchronously: each waits
+    its time in the ROM's loop, but the thread mostly waits for the host."""
+    h = harness()
+    h.launch(Recorder("Other"))
+    square = struct.pack(">7h", -1, 1958, 200, 60, 0, 0, 0)
+    head = bytes.fromhex(f"2B78 {lowmem.Ticks:04X} FFCA"   # MOVE.L Ticks,-54(A5)
+                         "41ED FFCE"                     # LEA -50(A5),A0: the parameter block
+                         "2248"                          # MOVEA.L A0,A1
+                         "7018"                          # MOVEQ #24,D0
+                         "4259"                          # 1: CLR.W (A1)+
+                         "51C8 FFFC"                     # DBRA D0,1b
+                         "317C FFFC 0018"                # MOVE.W #-4,ioRefNum(A0)
+                         "43FA")                         # LEA square(PC),A1
+    tail = bytes.fromhex("2149 0020"                     # MOVE.L A1,ioBuffer(A0)
+                         f"217C {len(square):08X} 0024"  # MOVE.L #20,ioReqCount(A0)
+                         "A003"                          # _Write
+                         f"2B78 {lowmem.Ticks:04X} FFC6"  # MOVE.L Ticks,-58(A5)
+                         "554F" "42A7"                   # SndPlay(NIL,
+                         "594F" "2F3C 736E 6420" "3F3C 0080" "A9A0"  # GetResource('snd ', 128),
+                         "4267" "A805"                   # FALSE)
+                         "3B5F FFC0"                     # MOVE.W (SP)+,-64(A5)
+                         f"2B78 {lowmem.Ticks:04X} FFC2"  # MOVE.L Ticks,-62(A5)
+                         "207C 0000 001E" "A03B"         # Delay(30)
+                         "A9F4")                         # _ExitToShell
+    code = head + struct.pack(">h", len(tail) + 2) + tail + square
+    samples = bytes(0x80 + (i & 0x1F) for i in range(11127))
+    snd = struct.pack(">hhhHhI", 2, 0, 1, 0x8051, 0, 14) + struct.pack(
+        ">5IBB", 0, len(samples), 0x56EE8BA3, 0, 0, 0, 60) + samples   # bufferCmd, 22 kHz
+    app = MacFile("Wait", rsrc=build_fork(code_resources(code, 64) + [Resource(b"snd ", 128, snd)]),
+                  type=b"APPL", creator=b"WAIT")
+    proc = h.d.launch(app.name, None, app=app)
+    mem, a5 = proc.system.mem, proc.partition.a5
+    h.wait_until(lambda: mem.r32(a5 - 54), timeout=5, what="Wait to write")
+    clock = time.pthread_getcpuclockid(proc.thread.ident)
+    used, began = time.clock_gettime(clock), time.monotonic()
+    h.wait_until(lambda: mem.r32(a5 - 62), timeout=5, what="Wait to play")
+    share = (time.clock_gettime(clock) - used) / (time.monotonic() - began)
+    h.wait_until(lambda: proc not in h.d.processes, timeout=5, what="Wait to finish")
+    assert not h.d.system_errors
+    assert proc.runner.unimplemented_calls == {}
+    assert 58 <= mem.r32(a5 - 58) - mem.r32(a5 - 54) <= 90      # the square wave's 60 ticks
+    assert mem.r16s(a5 - 64) == 0                               # SndPlay: noErr
+    assert 28 <= mem.r32(a5 - 62) - mem.r32(a5 - 58) <= 60      # and its half second
+    assert share < 0.5, share
+
+
 # -- ResStub: a patch on _ResourceStub ---------------------------------------------
 def test_a_patch_on_the_resource_stub_reads_resources_in(harness):
     """ResStub patches _ResourceStub and gets STR 128, which its patch
@@ -1872,6 +2021,7 @@ def test_an_applications_mbdf_hears_each_menu_pulled_down(harness, how):
 # -- Frames: an application's own WDEF -------------------------------------------
 WDEF_LOG = -700             # wdef.s's, below A5
 FRAMES_CLICKS = -236
+FRAMES_AT_NEW, FRAMES_AT_MOVE = -238, -240     # its WDEF's messages so far, then
 
 
 def wdef_log(proc):
@@ -1910,13 +2060,20 @@ def frames_geometry(rec):
 
 def test_an_applications_wdef_shapes_and_draws_its_window(harness):
     """Frames's WDEF is told its window is new, then asked for its regions
-    and to draw it; it leaves those to WDEF 0, as Excel's do.  The window
-    on the host takes the structure region's shape and shows what was
-    drawn, and a click in it is where the WDEF says it is."""
+    and to draw it, before GetNewWindow returns; it leaves those to WDEF 0,
+    as Excel's do.  A MovePortTo marks the frame to be done again, at the
+    end of the next call of the Window Manager's that macrt does it at, not
+    in the BlockMove after it: Excel 2.2a's WDEF, p-code, was run inside a
+    BlockMove its interpreter made, and left it returning to nowhere.  The
+    window on the host takes the structure region's shape and shows what
+    was drawn, and a click in it is where the WDEF says it is."""
     h = harness()
     proc, rec = launch_frames(h)
     mem = proc.system.mem
     assert wdef_log(proc)[:3] == [(k.wNew, 0), (k.wCalcRgns, 0), (k.wDraw, 0)]
+    a5 = proc.partition.a5
+    h.wait_until(lambda: mem.r16(a5 + FRAMES_AT_MOVE), what="the BlockMove")
+    assert (mem.r16(a5 + FRAMES_AT_NEW), mem.r16(a5 + FRAMES_AT_MOVE)) == (3, 3)
     assert rec.own_wdef and rec.wdef_shaped
     f, o, (w, ht) = frames_geometry(rec)
     s = chrome.shadow(f)

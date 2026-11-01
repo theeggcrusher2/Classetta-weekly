@@ -115,6 +115,28 @@ def test_a_moved_window_is_written_where_it_is_now(harness):
     assert black(system, c.left + 8, c.top + 2) and not black(system, c.left + 8, c.top + 5)
 
 
+def test_a_window_whose_port_rect_moves_without_set_origin_stays_where_it_is(harness):
+    """QuickDraw puts a window's pixels where portBits.bounds says,
+    wherever the program has set the portRect: Ricochet sets it to the half
+    of its window it copies to next, without SetOrigin.  The window stays
+    where the Window Manager put it, with both halves."""
+    h, g, system = launch(harness)
+    w = g.tb.FrontWindow()
+    g.tb.SetPort(w)
+    r, c = w.port_rect, w.content
+    mid = r.height // 2
+    w.port_rect = Rect(mid, 0, r.bottom, r.right)
+    g.tb.PaintRect(Rect(mid + 2, 8, mid + 6, 24))
+    system.screen.look()
+    w.port_rect = Rect(0, 0, mid, r.right)
+    g.tb.PaintRect(Rect(2, 40, 6, 56))
+    system.screen.look()
+    w.port_rect = r
+    for x, v in ((c.left + 10, c.top + mid + 3), (c.left + 42, c.top + 3)):
+        assert black(system, x, v) and shows(w, x, v)
+    assert not shows(w, c.left + 10, c.top + 3)
+
+
 def test_the_desk_a_window_leaves_is_gray_again_at_once(harness):
     """As the Window Manager paints it: before the program goes on, so
     what it draws there next is kept."""

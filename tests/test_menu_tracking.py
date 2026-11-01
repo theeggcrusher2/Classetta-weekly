@@ -399,6 +399,36 @@ def test_a_quick_click_on_a_title_leaves_its_menu_down(harness, monkeypatch):
     assert results(app)[3] == Recorder.FILE << 16 | 2
 
 
+def test_menu_choice_gives_the_disabled_item_released_over(harness, qapp):
+    h = harness()
+    app = Recorder("App")
+    proc = h.launch(app)
+    bar = bar_for(h, proc)
+    h.choose(bar, "Edit", 1)                            # Undo, disabled
+    h.wait_until(lambda: results(app) == [0], what="MenuSelect")
+    assert proc.menu_choice == Recorder.EDIT << 16 | 1
+    app.tb.MenuKey("x")                                 # Cut: MenuKey leaves none
+    assert proc.menu_choice == 0
+    h.choose(bar, "File", 3)                            # the dividing line
+    h.wait_until(lambda: len(results(app)) == 2, what="MenuSelect")
+    assert results(app)[1] == 0 and proc.menu_choice == Recorder.FILE << 16 | 3
+    h.press(*h.menu_title_point(bar, "Edit"))
+    pulled_down(h)
+    h.move(600, 400)
+    h.release(600, 400)                                 # off the menu: none
+    h.wait_until(lambda: len(results(app)) == 3, what="MenuSelect")
+    assert results(app)[2] == 0 and proc.menu_choice == 0
+    h.choose(bar, "Edit", 1)
+    h.wait_until(lambda: len(results(app)) == 4, what="MenuSelect")
+    h.choose(bar, "Edit", 3)                            # Copy, chosen: none
+    h.wait_until(lambda: len(results(app)) == 5, what="MenuSelect")
+    assert results(app)[4] == Recorder.EDIT << 16 | 3 and proc.menu_choice == 0
+
+    g = guest()                                         # and as the trap gives it
+    g.process.menu_choice = Recorder.EDIT << 16 | 1
+    assert g("MenuChoice") == Recorder.EDIT << 16 | 1
+
+
 def test_a_submenu_without_room_on_its_right_opens_on_its_left(harness):
     h = harness(screen_size=(512, 342))
     app = Recorder("App")

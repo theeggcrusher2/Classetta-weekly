@@ -6,6 +6,7 @@ import struct
 
 import pytest
 from guest import Processor
+from test_cdrom import image
 
 from macrt.m68k import glue_files as gf
 from macrt.toolbox import files as fm
@@ -238,6 +239,9 @@ def test_volume_parameters_and_information(g):
 
     count = len(g.system.files.volumes)
     assert g.call(GetVInfo, g.pb("", ioVolIndex=count + 1)) == fm.nsvErr
+    # The boot volume was made on the same date each time macrt starts.
+    p = g.pb("", ioVolIndex=1)
+    assert g.call(GetVInfo, p) == 0 and g.long(p, "ioVCrDate") == fm.BOOT_CREATED
     assert g.call(Eject, g.pb(None, ioVRefNum=-99)) == fm.nsvErr
 
     assert g.call(Create, g.pb("Doc")) == 0
@@ -248,6 +252,31 @@ def test_volume_parameters_and_information(g):
     # A locked volume's files keep their information.
     assert g.call(SetFInfo, g.pb("Doc")) == fm.vLckdErr
     assert g.call(HFSDispatch, g.pb("Doc"), SetCatInfo) == fm.vLckdErr
+
+
+def test_a_cd_takes_no_changes(g, tmp_path):
+    # Locked by hardware, as a CD-ROM is: what would change it says wPrErr,
+    # and its files open to be read (Treasure Galaxy tells a hard disk from
+    # its CD by whether it can make a file on it).
+    vref = g.system.files.mount("Disc", fm.ImageStore(image(tmp_path, "Disc.iso"))).vref
+    p = g.pb("", ioVRefNum=vref)
+    assert g.call(GetVInfo, p) == 0 and g.w(p, "ioVAtrb") == 0x0080
+    assert g.call(Create, g.pb("Test", ioVRefNum=vref)) == fm.wPrErr
+    assert g.call(HFSDispatch, g.pb("Folder", ioVRefNum=vref), DirCreate) == fm.wPrErr
+    assert g.call(Delete, g.pb("Program", ioVRefNum=vref)) == fm.wPrErr
+    assert g.call(Rename, g.pb("Program", ioVRefNum=vref, ioMisc=g.name("B"))) == fm.wPrErr
+    assert g.call(SetFInfo, g.pb("Program", ioVRefNum=vref)) == fm.wPrErr
+    assert g.call(HFSDispatch, g.pb("Program", ioVRefNum=vref), SetCatInfo) == fm.wPrErr
+    assert g("FSpSetFInfo", spec(g, "Program", vref=vref), g.ptr(bytes(16))) == fm.wPrErr
+    for perm in (fm.fsWrPerm, fm.fsRdWrPerm, fm.fsRdWrShPerm):
+        p = g.pb("Program", ioVRefNum=vref)
+        g.mem.w8(p + gf.ioPermssn, perm)
+        assert g.call(Open, p) == fm.wPrErr
+    p = g.pb("Program", ioVRefNum=vref)
+    assert g.call(Open, p) == 0                         # fsCurPerm: to be read
+    w = g.pb(None, ioRefNum=g.w(p, "ioRefNum"), ioBuffer=g.ptr(b"x"), ioReqCount=1)
+    assert g.call(Write, w) == fm.wrPermErr
+    assert g.system.files.volume(vref).root.child("Program").fork(False) == b""
 
 
 def spec(g, name, parid=fm.ROOT, vref=None):

@@ -59,6 +59,10 @@ def test_a_list_fills_in_each_runs_fields(tmp_path):
     assert argv == [str(tmp_path / "Some App.bin"), "--out", str(tmp_path / "out"),
                     "--model", "ii", "--depth", "8", "--wait", "2", "--steps", "s a"]
     assert survey.one_argv({**runs[2], "settle": True}, tmp_path / "out") == [*argv, "--settle"]
+    assert survey.one_argv({**runs[2], "outside_port_rect": True}, tmp_path / "out") \
+        == [*argv, "--outside-port-rect"]
+    assert survey.one_argv({**runs[2], "row_bytes": 1024}, tmp_path / "out") \
+        == [*argv[:7], "--row-bytes", "1024", *argv[7:]]
     # A plain list of runs will do too.
     assert survey.check_runs([{"file": "x.bin"}], tmp_path)[0]["model"] == "plus"
 
@@ -81,8 +85,12 @@ def test_a_list_fills_in_each_runs_fields(tmp_path):
     ([{"file": "a", "depth": 3, "model": "ii"}], "depth is 1, 2, 4"),
     ([{"file": "a", "depth": 8}], "depth needs model"),
     ([{"file": "a", "size": "big"}], "isn't a screen size"),
+    ([{"file": "a", "row_bytes": "1024"}], "row_bytes is a number"),
+    ([{"file": "a", "row_bytes": 641}], "row-bytes is an even number"),
+    ([{"file": "a", "row_bytes": 0x4000}], "less than 16384"),
     ([{"file": "a", "trace": "yes"}], "trace is true or false"),
     ([{"file": "a", "settle": 1}], "settle is true or false"),
+    ([{"file": "a", "outside_port_rect": "yes"}], "outside_port_rect is true or false"),
     ([{"file": "a", "steps": "c 1"}], "isn't a point"),
 ])
 def test_a_list_with_a_mistake_says_what_it_is(tmp_path, data, says):
@@ -185,6 +193,29 @@ def test_a_settled_wait_ends_when_every_process_is_waiting_and_the_screen_still(
         screen.close()
 
 
+def test_a_wait_ends_when_the_last_process_quits(qapp, tmp_path, monkeypatch):
+    from PyQt6.QtCore import QTimer
+    from PyQt6.QtWidgets import QWidget
+
+    monkeypatch.setattr(survey, "SETTLE_LOOK", 0)    # it looks at the screen each time round
+    screen = QWidget()
+    screen.resize(64, 48)
+    screen.show()
+    run = survey.Run(SimpleNamespace(out=str(tmp_path), steps="", file=None, app=None,
+                                     model=None))
+    run.d = SimpleNamespace(screen_widget=screen,
+                            processes=[SimpleNamespace(events=queue(waiting=True), windows=[])])
+    run.launched = time.monotonic()
+
+    def quit():                 # as the display does when its last process quits
+        run.d.processes.clear()
+        screen.deleteLater()
+    QTimer.singleShot(100, quit)
+    began = time.monotonic()
+    assert not run.wait(10, settle=True)
+    assert time.monotonic() - began < 2
+
+
 # -- reports -----------------------------------------------------------------
 def result(name, outcome, unimplemented=(), system_errors=()):
     return {"name": name, "outcome": outcome,
@@ -212,6 +243,22 @@ def test_a_report_ranks_unimplemented_calls_by_how_many_runs_make_them():
     text = survey.format_report(report, top=1)
     assert text.splitlines()[0] == "5 runs: 1 running, 1 quit, 2 system error, 1 timeout"
     assert "SetDepth" in text and "SCSIDispatch" not in text
+
+
+def test_a_report_ranks_what_runs_asked_for_and_found_missing():
+    asked = [{"name": n, "missing_asked": m} for n, m in (
+        ("a", {"Gestalt 'qtim'": 2, "SlotManager": 1}),
+        ("b", {"Gestalt 'qtim'": 1}),
+        ("c", {}))]
+    report = survey.summarize([{"name": a["name"], "outcome": "running",
+                                "processes": [a]} for a in asked])
+    assert report["missing_asked"] == [
+        {"name": "Gestalt 'qtim'", "runs": 2, "calls": 3, "examples": ["a", "b"]},
+        {"name": "SlotManager", "runs": 1, "calls": 1, "examples": ["a"]},
+    ]
+    text = survey.format_report(report)
+    assert "asked for but missing, by how many runs ask:" in text
+    assert "Gestalt 'qtim'  (a, b)" in text
 
 
 def running(name, *windows):
@@ -250,6 +297,30 @@ def test_a_report_names_the_runs_slowest_to_a_first_window(monkeypatch):
     report = survey.summarize(runs)
     assert report["slowest_to_a_window"] == [["c", 4.0], ["e", 4.0]]
     assert "slowest to show a window: c (4.0 s), e (4.0 s)" in survey.format_report(report)
+
+
+def test_a_report_names_the_runs_that_kept_the_host_busy_as_they_waited():
+    runs = [dict(result(name, outcome), busy=share)
+            for name, outcome, share in (("a", "running", 0.05), ("b", "running", None),
+                                         ("c", "running", 0.5), ("d", "quit", 1.0),
+                                         ("e", "running", 1.02), ("f", "running", 0.5))]
+    report = survey.summarize(runs)
+    assert report["busy"] == [["e", 1.02], ["c", 0.5], ["f", 0.5]]
+    text = survey.format_report(report, top=2)
+    assert "busy at the end of their wait (3): e (102%), c (50%)" in text.splitlines()
+    assert "busy" not in survey.format_report(survey.summarize(runs[:2]))
+
+
+def test_a_report_names_the_runs_that_drew_outside_a_port_rect():
+    note = {"port": "$012340", "port_rect": [0, 0, 20, 0], "bounds": [0, 0, 24, 44],
+            "via": "fill", "box": [0, 0, 24, 44], "times": 3}
+    runs = [dict(result("a", "running"), outside_port_rect=[]),
+            dict(result("b", "running"), outside_port_rect=[note, dict(note, via="line")]),
+            result("c", "quit")]
+    report = survey.summarize(runs)
+    assert report["outside_port_rect"] == [["b", 2]]
+    assert "drew outside a portRect (1): b (2)" in survey.format_report(report).splitlines()
+    assert "portRect" not in survey.format_report(survey.summarize([runs[0], runs[2]]))
 
 
 def image(w, h, dots=()):
@@ -333,7 +404,7 @@ def test_a_survey_that_resumes_runs_only_what_hadnt_finished(tmp_path, monkeypat
 def test_a_survey_runs_each_title_and_reports_what_it_did(tmp_path):
     (tmp_path / "list.json").write_text(json.dumps({"defaults": {"wait": 1}, "runs": [
         {"name": "quits", "file": HELLO, "steps": "s a;C q;w 2"},
-        {"name": "stays", "file": HELLO, "steps": "c 100,100;s b"},
+        {"name": "stays", "file": HELLO, "steps": "c 100,100;s b", "outside_port_rect": True},
         {"name": "missing", "file": "no such file.bin"},
         {"name": "slow", "file": HELLO, "wait": 60, "timeout": 2},
         {"name": "asks", "file": DIALOGS, "wait": 2},
@@ -359,12 +430,15 @@ def test_a_survey_runs_each_title_and_reports_what_it_did(tmp_path):
     assert stays["processes"][0]["windows"] == [{"title": "Hello", "visible": True}]
     assert stays["host_dialogs"] == []
     assert stays["settled"] is None
+    assert stays["outside_port_rect"] == []             # watched, and its window keeps inside
+    assert "outside_port_rect" not in quits
     assert not QImage(str(out / "stays" / "end.png")).isNull()
 
     # Waiting for an event with its window drawn, it's settled soon after.
     settles = results["settles"]
     assert settles["outcome"] == "running", settles
     assert settles["first_window"] < settles["settled"] < 30 and settles["elapsed"] < 40
+    assert 0 <= settles["busy"] < survey.BUSY            # and leaves the host alone
 
     # A dialog left up gives its text, ParamText's string put in and the
     # hidden item left out.

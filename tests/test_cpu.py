@@ -43,7 +43,9 @@ def machine():
 def test_a_tick_stops_the_cpu_between_two_instructions():
     """While VBL tasks are queued, run() comes back for the runner to look
     at the clock, and the instruction it was in isn't run again after: the
-    count in memory keeps step with D0."""
+    count in memory keeps step with D0.  And it says where it stopped, after
+    running on an instruction at a time to see whether the loop waits for
+    a tick, which this one doesn't, as it stores."""
     mem, cpu = machine()
     mem.w32(lowmem.VBLQueue + 2, TASK)
     retraces, returns = 0, 0
@@ -52,6 +54,7 @@ def test_a_tick_stops_the_cpu_between_two_instructions():
         while time.monotonic() < deadline or retraces < 10:
             ev = cpu.run(NEVER)
             assert ev.kind == "interrupted", ev
+            assert ev.pc == cpu.pc, (returns, ev)
             returns += 1
             if cpu.retrace_pending:
                 retraces += 1
@@ -589,6 +592,42 @@ def test_code_written_from_python_after_a_store_to_its_page_runs_as_written():
         cpu.close()
 
 
+def test_a_jump_table_rewritten_after_the_mappings_are_forgotten_runs_as_written():
+    """The core forgets its mappings, as it does each time the Sound
+    Driver's buffer is watched, but not its blocks: so a page it may have
+    blocks of is mapped afresh as one run from, and each store to it from
+    code on another page drops them, though the page is read first.
+    Mapped to be written to, the core dropped the blocks of the first
+    entry only.  Excel 2.2a rewrites its jump table, among its globals, as
+    it moves its segments."""
+    mem, cpu = machine()
+    at, table = CODE + 0x1000, CODE + 0x2000
+    one, two = CODE + 0x3000, CODE + 0x3010
+    mem.write(one, bytes.fromhex("5286" "4e75"))           # addq.l #1,d6; rts
+    mem.write(two, bytes.fromhex("5287" "4e75"))           # addq.l #1,d7; rts
+    for entry in (table, table + 8):
+        mem.write(entry, bytes.fromhex("4ef9%08x" % one))   # jmp one
+    calls = "4eb9%08x" % table + "4eb9%08x" % (table + 8)   # jsr to each
+    mem.write(at, bytes.fromhex(calls
+                                + "a0ff"                        # a trap, after which...
+                                + "4ab9%08x" % (table + 0x800)  # tst.l: a global beside them
+                                + "23c2%08x" % (table + 2)      # move.l d2,table+2
+                                + "23c2%08x" % (table + 10)     # move.l d2,table+10
+                                + calls))
+    try:
+        for to in (two, one, two):
+            ev = cpu_at(cpu, at).run(at + 44)
+            assert (ev.kind, ev.pc) == ("trap", at + 12)
+            cpu.unwatch_stores(cpu.watch_stores(0, 2, lambda addr, size: None))     # ...it forgets
+            cpu.set_d(2, to)
+            cpu.set_d(6, 0)
+            cpu.set_d(7, 0)
+            run_through(cpu_at(cpu, at + 14), at + 44)
+            assert (cpu.d(6), cpu.d(7)) == ((0, 2) if to == two else (2, 0))
+    finally:
+        cpu.close()
+
+
 def test_a_stack_written_from_python_isnt_taken_for_code(monkeypatch):
     """A trap leaves its result on the stack, from Python; the stack has
     no code to drop, and dropping it would take the page for code, and
@@ -652,6 +691,35 @@ def test_stores_past_the_block_theyre_from_dont_stop_the_core(monkeypatch):
             cpu.pc = at
             run_through(cpu, at + 14)
             assert cpu.d(1) == 5 and mem.read(at + 0x100, 5) == bytes([i] * 5)
+        assert stops == [] and dropped == []
+    finally:
+        cpu.close()
+
+
+def test_changes_past_the_block_theyre_from_dont_stop_the_core(monkeypatch):
+    """Nor does an instruction that changes what's there, as Behind Dark
+    Castle ORs bits into a table beside its loop, where it can be told
+    where to: its page comes to be mapped for both, as for a MOVE."""
+    mem, cpu = machine()
+    at = CODE + 0x1000
+    mem.write(at, bytes.fromhex("41fa00fe"     # lea at+$100(pc),a0
+                                "7202"         # moveq #2,d1
+                                "85701000"     # or.w d2,0(a0,d1.w)
+                                "7205"         # moveq #5,d1
+                                "60fe"))       # bra.s *: where the block ends
+    stops, dropped = [], []
+    stop, drop = cpu.uc.emu_stop, cpu.uc.ctl_remove_cache
+    monkeypatch.setattr(cpu.uc, "emu_stop", lambda: (stops.append(cpu.pc), stop()))
+    monkeypatch.setattr(cpu.uc, "ctl_remove_cache",
+                        lambda start, end: (dropped.append(start), drop(start, end)))
+    try:
+        for i in range(3 * cpu_module.BOTH_AFTER):
+            if i == 2 * cpu_module.BOTH_AFTER:
+                dropped.clear()
+            cpu.set_d(2, 1 << i % 16)
+            cpu.pc = at
+            run_through(cpu, at + 12)
+            assert cpu.d(1) == 5 and mem.r16(at + 0x102) == (1 << min(i + 1, 16)) - 1
         assert stops == [] and dropped == []
     finally:
         cpu.close()
@@ -1275,7 +1343,8 @@ def test_a_page_mapped_for_both_is_looked_through_again_where_it_changed():
     again only around the bytes that changed, but every word to stop at
     it has now that it didn't have is in what's looked through."""
     rng = random.Random(1)
-    words = (b"\x4e\x97", b"\x00\x7c", b"\x46\xfc", b"\x5f\xfb", b"\xf2\x20\x7c")
+    words = (b"\x4e\x97", b"\x00\x7c", b"\x46\xfc", b"\x5f\xfb", b"\xf2\x20\x7c",
+             b"\xf2\x27\xe8\x30")
     size, chunk = cpu_module.PAGE_SIZE, cpu_module.CHUNK
 
     def found(page, start=0, end=size):
@@ -1328,6 +1397,70 @@ def test_flush_code_drops_what_the_core_has_translated():
     assert call() == 1          # as it was translated
     cpu.flush_code()
     assert call() == 2
+
+
+# -- PACK and UNPK, which the core runs as words that do nothing -------------
+@pytest.mark.parametrize("code, d0, d1", [
+    ("8340 cfd0", 0xFFFF3132, 0xAAAAAA12),      # pack d0,d1,#-$3030: "12" as BCD
+    ("8340 0000", 0x00000F0F, 0xAAAAAAFF),
+    ("8380 3030", 0xFFFFFF12, 0xAAAA3132),      # unpk d0,d1,#$3030: and back
+    ("8380 0000", 0x000000A5, 0xAAAA0A05),
+])
+def test_pack_and_unpk_between_data_registers(code, d0, d1):
+    """PACK takes the low digits of Dx's two bytes, its adjustment added, to
+    Dy's low byte; UNPK spreads Dx's low byte's digits over Dy's low word and
+    adds it.  The condition codes are as they were: here, Z and C set."""
+    mem, cpu = machine()
+    at = CODE + 0x1000
+    mem.write(at, bytes.fromhex(code + "55c4 57c5 4e71"))   # scs d4; seq d5; nop
+    try:
+        cpu.set_d(0, d0)
+        cpu.set_d(1, 0xAAAAAAAA)
+        cpu.sr = 0x2005
+        run_through(cpu_at(cpu, at), at + 10)
+        assert (cpu.d(0), cpu.d(1)) == (d0, d1)
+        assert (cpu.d(4) & 0xFF, cpu.d(5) & 0xFF) == (0xFF, 0xFF)
+    finally:
+        cpu.close()
+
+
+@pytest.mark.parametrize("code, before, after, down", [
+    ("8348 cfd0", "3132", "12", (2, 1)),        # pack -(a0),-(a1),#-$3030
+    ("8388 3030", "12", "3132", (1, 2)),        # unpk -(a0),-(a1),#$3030
+    ("8f48 0000", "0f0f", "ff", (2, 2)),        # pack -(a0),-(a7): a7 stays even
+])
+def test_pack_and_unpk_between_predecrements(code, before, after, down):
+    """From the bytes below Ax to those below Ay, the lower addressed of two
+    being the high one."""
+    mem, cpu = machine()
+    at, source, dest = CODE + 0x1000, 0x7000, 0x7100
+    mem.write(at, bytes.fromhex(code + "4e71"))
+    mem.write(source - len(before) // 2, bytes.fromhex(before))
+    ay = 7 if code[1] == "f" else 1
+    try:
+        cpu.set_a(0, source)
+        cpu.set_a(ay, dest)
+        run_through(cpu_at(cpu, at), at + 4)
+        assert (source - cpu.a(0), dest - cpu.a(ay)) == down
+        assert mem.read(cpu.a(ay), len(after) // 2) == bytes.fromhex(after)
+    finally:
+        cpu.close()
+
+
+def test_a_pack_is_found_where_a_bytes_before_it_look_like_one():
+    """SCSITools looks for a 68020 by running a PACK, so it mustn't run as
+    the core runs it, with its adjustment, 0, as an ORI.B of the next word.
+    And moveq #-127's $81 looks like a PACK's first byte, with the real
+    one's first byte for its second."""
+    mem, cpu = machine()
+    at = CODE + 0x1000
+    mem.write(at, bytes.fromhex("7081 8340 0000 7601 4e71"))   # moveq #-127,d0;
+    try:                                                        # pack d0,d1,#0; moveq #1,d3
+        cpu.set_d(3, 0)
+        run_through(cpu_at(cpu, at), at + 8)
+        assert (cpu.d(0), cpu.d(1) & 0xFF, cpu.d(3)) == (0xFFFFFF81, 0xF1, 1)
+    finally:
+        cpu.close()
 
 
 # -- CHK2, CMP2 and FMOVE.P, which the core doesn't know --------------------
@@ -1777,6 +1910,188 @@ def test_frestore_of_a_frame_of_another_format_raises_a_format_error():
         while (ev := cpu.run(at + 2)).kind == "interrupted":
             pass
         assert (ev.kind, ev.pc, ev.code) == ("exception", at, instructions.FORMAT_ERROR)
+    finally:
+        cpu.close()
+
+
+@pytest.mark.parametrize("insn, d1", [
+    ("f220 e000", 0),                   # fmovem.x <none>,-(a0)
+    ("f220 e810", 0),                   # fmovem.x d1,-(a0)
+    ("f220 e810", 0xFF00),              # only d1's low byte is the list
+])
+def test_an_fmovem_of_no_registers_to_a_predecrement_leaves_an_as_it_was(insn, d1):
+    """The core takes 12 bytes off An for one."""
+    mem, cpu = machine()
+    at, out = CODE + 0x1000, 0x6100
+    mem.write(out - 16, bytes(range(16)))
+    mem.write(at, bytes.fromhex(insn))
+    try:
+        cpu.set_a(0, out)
+        cpu.set_d(1, d1)
+        run_through(cpu_at(cpu, at), at + 4)
+        assert cpu.a(0) == out
+        assert mem.read(out - 16, 16) == bytes(range(16))
+    finally:
+        cpu.close()
+
+
+def test_an_fmovem_with_its_list_in_dn_puts_fp7_first_highest():
+    """Bit n of Dn's low byte for FPn, each 12 bytes below the last."""
+    mem, cpu = machine()
+    at, x, y, out = CODE + 0x1000, 0x6000, 0x6010, 0x6100
+    mem.write(x, extended(-0.25))
+    mem.write(y, extended(1.0))
+    mem.write(at, bytes.fromhex("f210 4800"           # fmove.x (a0),fp0
+                                "f211 4b80"           # fmove.x (a1),fp7
+                                "f222 e810"))         # fmovem.x d1,-(a2)
+    try:
+        cpu.set_a(0, x)
+        cpu.set_a(1, y)
+        cpu.set_a(2, out)
+        cpu.set_d(1, 0x81)
+        run_through(cpu_at(cpu, at), at + 12)
+        assert cpu.a(2) == out - 24
+        assert mem.read(out - 12, 12) == extended(1.0)
+        assert mem.read(out - 24, 12) == extended(-0.25)
+    finally:
+        cpu.close()
+
+
+def test_the_fpu_saved_with_an_fmovem_of_no_registers_leaves_the_stack_as_it_was():
+    """FSAVE, FMOVEM of FP0-FP7 and of none to -(A7), and back from
+    (A7)+: A7 is where it was, and FP0 and FP7 are as they were."""
+    mem, cpu = machine()
+    at, x, y, out = CODE + 0x1000, 0x6000, 0x6010, 0x6100
+    mem.write(x, extended(-0.25))
+    mem.write(y, extended(1.0))
+    mem.write(at, bytes.fromhex("f210 4800"           # fmove.x (a0),fp0
+                                "f211 4b80"           # fmove.x (a1),fp7
+                                "f327"                # fsave -(a7)
+                                "f227 e0ff"           # fmovem.x fp0-fp7,-(a7)
+                                "f227 e000"           # fmovem.x <none>,-(a7)
+                                "f21f d000"           # fmovem.x (a7)+,<none>
+                                "f21f d0ff"           # fmovem.x (a7)+,fp0-fp7
+                                "f35f"                # frestore (a7)+
+                                "f212 6800"           # fmove.x fp0,(a2)
+                                "f213 6b80"))         # fmove.x fp7,(a3)
+    try:
+        cpu.set_a(0, x)
+        cpu.set_a(1, y)
+        cpu.set_a(2, out)
+        cpu.set_a(3, out + 16)
+        cpu.sp = sp = 0x8000
+        run_through(cpu_at(cpu, at), at + 36)
+        assert cpu.sp == sp
+        assert mem.read(sp - 28 - 96, 12) == extended(-0.25)
+        assert mem.read(sp - 28 - 12, 12) == extended(1.0)
+        assert mem.read(out, 12) == extended(-0.25)
+        assert mem.read(out + 16, 12) == extended(1.0)
+    finally:
+        cpu.close()
+
+
+# -- a loop that waits for a tick -------------------------------------------
+WAIT_FOR_FIVE = bytes.fromhex("3039 0000 8000"     # 1: move.w COUNTER,d0
+                              "0c40 0005"          # cmpi.w #5,d0
+                              "65f4")              # bcs.s 1b
+DONE = CODE + len(WAIT_FOR_FIVE)
+
+
+def counting_waits(cpu, monkeypatch):
+    waits, wait = [], cpu._wait_for_tick
+    monkeypatch.setattr(cpu, "_wait_for_tick", lambda: (waits.append(cpu.pc), wait()))
+    return waits
+
+
+def test_a_loop_that_waits_for_a_tick_has_the_run_wait_for_it(monkeypatch):
+    """As Putt-Putt's does, for a count its own task keeps: once a slice
+    ends near where the one before it did, in instructions that store
+    nothing and read only RAM and come back to where they began with every
+    register as it was, run() waits for the tick, and each run after."""
+    mem, cpu = machine()
+    mem.write(CODE, WAIT_FOR_FIVE)
+    mem.w32(lowmem.VBLQueue + 2, TASK)
+    waits = counting_waits(cpu, monkeypatch)
+    try:
+        for _ in range(20):
+            cpu.retrace_pending = False
+            assert cpu.run(DONE).kind == "interrupted"
+        assert len(waits) >= 10 and all(CODE <= pc < DONE for pc in waits)
+        mem.w16(COUNTER, 5)                 # as the task would at a tick
+        cpu.retrace_pending = False
+        assert cpu.run(DONE).kind == "until"
+    finally:
+        cpu.close()
+
+
+@pytest.mark.parametrize("loop", ["stores", "counts", "may be interrupted"])
+def test_a_loop_that_changes_something_or_may_be_interrupted_isnt_waited_in(loop, monkeypatch):
+    """A loop that stores, or counts in a register, may be waiting for
+    nothing, and the program's own handler for the VIA may run at the end
+    of any slice."""
+    mem, cpu = machine()
+    mem.w32(lowmem.VBLQueue + 2, TASK)
+    if loop == "counts":
+        mem.write(CODE, bytes.fromhex("5280 60fc"))     # 1: addq.l #1,d0; bra.s 1b
+    elif loop == "may be interrupted":
+        mem.write(CODE, WAIT_FOR_FIVE)
+        cpu.rom_interrupts = 0x7000
+        mem.w32(4 * cpu_module.LEVEL_1, 0x7100)
+    waits = counting_waits(cpu, monkeypatch)
+    try:
+        for _ in range(20):
+            cpu.retrace_pending = False
+            assert cpu.run(NEVER).kind == "interrupted"
+        assert not waits
+    finally:
+        cpu.close()
+
+
+@pytest.mark.parametrize("code, a0, only", [
+    ("3039 0000 8000", COUNTER, True),          # move.w $8000.l,d0
+    ("3010", COUNTER, True),                    # move.w (a0),d0
+    ("3010", 0x30000, False),                   # past RAM
+    ("3018", COUNTER, True),                    # move.w (a0)+,d0
+    ("3030 0000", COUNTER, True),               # move.w (a0,d0.w),d0
+    ("3030 0130 0000 0000", COUNTER, False),    # the 68020's full format
+    ("303a 0004", COUNTER, True),               # move.w 4(pc),d0
+    ("33c0 0000 8000", COUNTER, False),         # move.w d0,$8000.l
+    ("4a50", COUNTER, True),                    # tst.w (a0)
+    ("b068 0002", COUNTER, True),               # cmp.w 2(a0),d0
+    ("0c79 0005 0000 8000", COUNTER, True),     # cmpi.w #5,$8000.l
+    ("0839 0000 0000 8000", COUNTER, True),     # btst #0,$8000.l
+    ("08f9 0000 0000 8000", COUNTER, False),    # bset #0,$8000.l
+    ("5240", COUNTER, True),                    # addq.w #1,d0
+    ("5250", COUNTER, False),                   # addq.w #1,(a0)
+    ("51c8 fffe", COUNTER, True),               # dbra d0
+    ("60fe", COUNTER, True),                    # bra.s *
+    ("6100 0010", COUNTER, False),              # bsr
+    ("4ed0", COUNTER, True),                    # jmp (a0)
+    ("4e90", COUNTER, False),                   # jsr (a0)
+    ("4e75", COUNTER, False),                   # rts
+    ("7005", COUNTER, True),                    # moveq #5,d0
+    ("c0c0", COUNTER, True),                    # mulu.w d0,d0
+    ("80c0", COUNTER, False),                   # divu.w d0,d0
+    ("8141 0000", COUNTER, False),              # pack d1,d0,#0
+    ("b140", COUNTER, True),                    # eor.w d0,d0
+    ("b150", COUNTER, False),                   # eor.w d0,(a0)
+    ("e248", COUNTER, True),                    # lsr.w #1,d0
+    ("e2d0", COUNTER, False),                   # lsr.w (a0)
+    ("4280", COUNTER, True),                    # clr.l d0
+    ("4290", COUNTER, False),                   # clr.l (a0)
+    ("4840", COUNTER, True),                    # swap d0
+    ("4e71", COUNTER, True),                    # nop
+    ("41f9 0000 8000", COUNTER, True),          # lea $8000.l,a0
+    ("4850", COUNTER, False),                   # pea (a0)
+    ("4e40", COUNTER, False),                   # trap #0
+    ("a9f4", COUNTER, False),                   # a trap
+])
+def test_what_a_loop_that_waits_for_a_tick_may_be_made_of(code, a0, only):
+    mem, cpu = machine()
+    try:
+        mem.write(CODE, bytes.fromhex(code) + bytes(8))
+        cpu.set_a(0, a0)
+        assert cpu_module._waits_only(mem._b, CODE, cpu) is only
     finally:
         cpu.close()
 

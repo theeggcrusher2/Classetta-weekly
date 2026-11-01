@@ -136,6 +136,33 @@ def test_a_palette_s_entries(g):
     assert read_rgb(g, out) == RED
 
 
+def test_resize_palette_adds_black_courteous_entries_and_lets_go_of_those_it_cuts(g):
+    w = window(g)
+    h = palette(g, [RED, ODD, ODDER], pmAnimated, 5)
+    g("NSetPalette", w.addr, h, pmAllUpdates)
+    devices = g.system.devices
+    assert sorted(e for _, e in devices.reserved.values()) == [0, 1, 2]
+    out, usage, tolerance = g.ptr(bytes(6)), g.ptr(bytes(2)), g.ptr(bytes(2))
+    g("ResizePalette", h, 5)
+    assert g.mem.r16s(deref(g.mem, h)) == 5
+    g("GetEntryColor", h, 1, out)
+    g("GetEntryUsage", h, 1, usage, tolerance)
+    assert (read_rgb(g, out), g.mem.r16(usage), g.mem.r16(tolerance)) == (ODD, pmAnimated, 5)
+    g("GetEntryColor", h, 4, out)
+    g("GetEntryUsage", h, 4, usage, tolerance)
+    assert (read_rgb(g, out), g.mem.r16(usage), g.mem.r16(tolerance)) == (BLACK, pmCourteous, 0)
+    g("ResizePalette", h, 1)
+    assert g.mem.r16s(deref(g.mem, h)) == 1
+    g("GetEntryColor", h, 0, out)
+    assert read_rgb(g, out) == RED
+    assert [e for _, e in devices.reserved.values()] == [0]
+    assert sum(1 for c in clut(g) if c[0] & 0x4000) == 1
+    before = g.contents(h)
+    g("ResizePalette", h, -1)
+    g("ResizePalette", 0, 3)
+    assert g.contents(h) == before
+
+
 def test_get_new_palette_reads_a_pltt_and_clears_what_s_private(qapp):
     entry = struct.pack(">HHHHH", *ODD, pmTolerant, 0x0100) + b"\xAB" * 6
     pltt = struct.pack(">h", 1) + b"\xCD" * 14 + entry
@@ -458,6 +485,27 @@ def test_palettes_of_windows_not_in_front_and_the_application_s(g):
     plain = window(g, color=False)
     g("NSetPalette", plain.addr, mine, pmAllUpdates)
     assert g("GetPalette", plain.addr) == 0             # not a colour window's
+
+
+def test_the_application_has_a_default_palette_it_hasn_t_set(qapp):
+    # No 'pltt' 0: one of two entries, white and black, the same each time.
+    g = guest()
+    h = g("GetPalette", -1)
+    assert h and g("GetPalette", -1) == h
+    assert g.contents(h)[:2] == struct.pack(">h", 2)
+    assert [g.contents(h)[16 + 16 * i:22 + 16 * i] for i in range(2)] == \
+        [struct.pack(">HHH", *c) for c in (WHITE, BLACK)]
+    g("DisposePalette", h)                              # made again
+    h = g("GetPalette", -1)
+    assert h and g.contents(h)[:2] == struct.pack(">h", 2)
+    # 'pltt' 0: that, until the application sets its own.
+    entry = struct.pack(">HHHHH6x", *ODD, pmCourteous, 0)
+    g = guest([Resource(b"pltt", 0, struct.pack(">h", 1) + bytes(14) + entry)])
+    h = g("GetPalette", -1)
+    assert h and g.contents(h)[16:22] == struct.pack(">HHH", *ODD)
+    mine = palette(g, [ODDER], pmCourteous)
+    g("NSetPalette", -1, mine, pmNoUpdates)
+    assert g("GetPalette", -1) == mine
 
 
 def test_a_colour_window_from_its_resources_gets_the_pltt_of_its_id(qapp):
