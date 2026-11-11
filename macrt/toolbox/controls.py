@@ -23,17 +23,7 @@ from typing import TYPE_CHECKING
 from PyQt6.QtCore import QRectF
 from PyQt6.QtGui import QPainterPath
 
-from ..memory import (
-    ADDRESS_MASK,
-    BYTE,
-    INTEGER,
-    LONG,
-    LONGINT,
-    RAM,
-    RECT,
-    Codec,
-    from_mac,
-)
+from ..memory import BYTE, INTEGER, LONG, LONGINT, RAM, RECT, Codec, from_mac
 from . import constants as k
 from .qdraw import (
     CHICAGO_SYMBOLS,
@@ -104,7 +94,7 @@ class Control:
 
     @property
     def addr(self) -> int:
-        return self.mem.r32(self.handle) & ADDRESS_MASK
+        return self.mem.r32(self.handle) & self.mem.system.addr_mask
 
     @property
     def title(self) -> str:

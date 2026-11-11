@@ -9,7 +9,6 @@ import pytest
 from guest import Guest
 
 from macrt.m68k import glue_quickdraw as qd
-from macrt.memory import ADDRESS_MASK
 from macrt.toolbox import lowmem, qdraw
 from macrt.toolbox.qdraw import Region, read_poly, read_rgn
 from macrt.toolbox.quickdraw import QD_RAND_SEED
@@ -82,7 +81,7 @@ def test_point_arithmetic(g):
 
 
 def test_random_and_stuff_hex(g):
-    seed = (qd._the_port_var(g) + QD_RAND_SEED) & ADDRESS_MASK
+    seed = (qd._the_port_var(g) + QD_RAND_SEED) & g.mem.system.addr_mask
     g.mem.w32(seed, 1)
     assert g("Random") == 16807
     assert g.mem.r32(seed) == 16807

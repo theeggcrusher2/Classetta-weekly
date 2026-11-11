@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Iterator
 
-from ..memory import ADDRESS_MASK, BOOLEAN, INTEGER, LONG, LONGINT, Field, from_mac, to_mac
+from ..memory import BOOLEAN, INTEGER, LONG, LONGINT, Field, from_mac, to_mac
 from .constants import userKind
 from .lowmem import AuxWinHead, World, WindowList as WINDOW_LIST
 from .memmgr import Heap
@@ -83,21 +83,21 @@ def aux_wins(mem: RAM, head: int = AuxWinHead) -> Iterator[int]:
 
 
 def _aux_list(mem: RAM, h: int) -> Iterator[int]:
-    h, seen = h & ADDRESS_MASK, set()
+    h, seen = h & mem.system.addr_mask, set()
     while h and h not in seen:
         seen.add(h)
-        p = mem.r32(h) & ADDRESS_MASK
+        p = mem.r32(h) & mem.system.addr_mask
         if not p:
             return
         yield h
-        h = mem.r32(p) & ADDRESS_MASK
+        h = mem.r32(p) & mem.system.addr_mask
 
 
 def find_aux_win(mem: RAM, window: int, head: int = AuxWinHead) -> int:
     """A window's auxiliary record (with window 0, the default's); 0 if
     there's none."""
     for h in aux_wins(mem, head):
-        if (mem.r32((mem.r32(h) & ADDRESS_MASK) + 4) ^ window) & ADDRESS_MASK == 0:
+        if (mem.r32((mem.r32(h) & mem.system.addr_mask) + 4) ^ window) & mem.system.addr_mask == 0:
             return h
     return 0
 
@@ -107,8 +107,8 @@ def table_colors(mem: RAM, ct: int) -> dict[int, tuple[int, int, int]]:
     entry of each part's.  In order, so the first is the table's first
     colour, the one a part the table hasn't is drawn in (Inside
     Macintosh V, the Window Manager)."""
-    ct &= ADDRESS_MASK
-    p = mem.r32(ct) & ADDRESS_MASK if ct else 0
+    ct &= mem.system.addr_mask
+    p = mem.r32(ct) & mem.system.addr_mask if ct else 0
     if not p:
         return {}
     n = mem.r16(p + 6) + 1 & 0xFFFF
@@ -126,24 +126,24 @@ def window_colors(mem: RAM, world: World, window: int) -> dict[int, tuple[int, i
     another application runs).  Empty if the list has neither."""
     found = 0
     for h in _aux_list(mem, world.r32(AuxWinHead)):
-        owner = mem.r32((mem.r32(h) & ADDRESS_MASK) + 4) & ADDRESS_MASK
-        if owner == window & ADDRESS_MASK:
+        owner = mem.r32((mem.r32(h) & mem.system.addr_mask) + 4) & mem.system.addr_mask
+        if owner == window & mem.system.addr_mask:
             found = h
             break
         if not owner and not found:
             found = h                   # the default, at the end
     if not found:
         return {}
-    return table_colors(mem, mem.r32((mem.r32(found) & ADDRESS_MASK) + 8))
+    return table_colors(mem, mem.r32((mem.r32(found) & mem.system.addr_mask) + 8))
 
 
 def unlink_aux_win(mem: RAM, h: int, head: int = AuxWinHead) -> None:
     """Take a record out of the list."""
     prev = 0
     for x in aux_wins(mem, head):
-        if x == h & ADDRESS_MASK:
-            after = mem.r32(mem.r32(x) & ADDRESS_MASK)
-            mem.w32((mem.r32(prev) & ADDRESS_MASK) if prev else head, after)
+        if x == h & mem.system.addr_mask:
+            after = mem.r32(mem.r32(x) & mem.system.addr_mask)
+            mem.w32((mem.r32(prev) & mem.system.addr_mask) if prev else head, after)
             return
         prev = x
 
@@ -367,7 +367,7 @@ class WindowRecord(GrafPort):
     @property
     def title(self) -> str:
         h = self.title_handle
-        return from_mac(self.mem.r_pstr(self.mem.r32(h) & ADDRESS_MASK)) if h else ""
+        return from_mac(self.mem.r_pstr(self.mem.r32(h) & self.system.addr_mask)) if h else ""
 
     @title.setter
     def title(self, text: str) -> None:
@@ -391,8 +391,11 @@ class WindowRecord(GrafPort):
     def _defproc(self) -> tuple[int, int, bool]:
         wdp = self.window_def_proc
         if self._proc_id is None or self._proc_id[0] != wdp:
-            kind, wdef = self.process.resources.defproc_id(wdp & ADDRESS_MASK)
-            own = bool(wdp & ADDRESS_MASK) and not (kind == "WDEF" and wdef in (0, 1))
+            # The low 24 bits are the WDEF's handle; the top byte, which 24-bit
+            # machines pack the ID and variation in, is part of the handle on
+            # a 32-bit machine, so addr_mask, not a 24-bit mask.
+            kind, wdef = self.process.resources.defproc_id(wdp & self.system.addr_mask)
+            own = bool(wdp & self.system.addr_mask) and not (kind == "WDEF" and wdef in (0, 1))
             self._proc_id = (wdp, (wdef << 4) | ((wdp >> 24) & 0xF), own)
         return self._proc_id
 
@@ -403,12 +406,12 @@ class WindowRecord(GrafPort):
     # -- zooming -------------------------------------------------------------
     def _state(self, offset: int) -> Rect | None:
         h = self.data_handle
-        return self.mem.r_rect((self.mem.r32(h) & ADDRESS_MASK) + offset) if h else None
+        return self.mem.r_rect((self.mem.r32(h) & self.system.addr_mask) + offset) if h else None
 
     def _set_state(self, offset: int, r: Rect) -> None:
         h = self.data_handle
         if h:
-            self.mem.w_rect((self.mem.r32(h) & ADDRESS_MASK) + offset, r)
+            self.mem.w_rect((self.mem.r32(h) & self.system.addr_mask) + offset, r)
 
     @property
     def user_state(self) -> Rect | None:
@@ -484,14 +487,14 @@ class WindowList:
         self.world.w32(WINDOW_LIST, addr)
 
     def __iter__(self) -> Iterator[WindowRecord]:
-        addr, seen = self.head & ADDRESS_MASK, set()
+        addr, seen = self.head & self.system.addr_mask, set()
         while addr and addr not in seen:
             rec = self.system.port_at(addr)
             if not isinstance(rec, WindowRecord):
                 return
             seen.add(addr)
             yield rec
-            addr = rec.next_window & ADDRESS_MASK
+            addr = rec.next_window & self.system.addr_mask
 
     def __len__(self) -> int:
         return sum(1 for _ in self)
@@ -524,12 +527,12 @@ class WindowList:
         other.next_window = rec.addr
 
     def remove(self, rec: WindowRecord) -> None:
-        addr = rec.addr & ADDRESS_MASK
-        if self.head & ADDRESS_MASK == addr:
+        addr = rec.addr & self.system.addr_mask
+        if self.head & self.system.addr_mask == addr:
             self.head = rec.next_window
         else:
             for w in self:
-                if w.next_window & ADDRESS_MASK == addr:
+                if w.next_window & self.system.addr_mask == addr:
                     w.next_window = rec.next_window
                     break
         rec.next_window = 0

@@ -26,7 +26,6 @@ from typing import Callable
 
 from PyQt6.QtGui import QColor, QImage
 
-from ..memory import ADDRESS_MASK
 from ..toolbox import constants as k
 from ..toolbox import lowmem
 from ..toolbox.menus import MENU_HEIGHT, MENU_WIDTH, MenuInfo
@@ -44,21 +43,21 @@ def entry(t, menu: MenuInfo) -> int:
     """Where menu's own MDEF starts; 0 if it has none to run."""
     if not menu.own_mdef:
         return 0
-    h = menu.menu_proc & ADDRESS_MASK
-    p = t.mem.r32(h) & ADDRESS_MASK
+    h = menu.menu_proc & t.mem.system.addr_mask
+    p = t.mem.r32(h) & t.mem.system.addr_mask
     if not p:
         res = t.process.resources
         err = res.error
         res.LoadResource(h)             # purged, as a Mac's Menu Manager would find it
         res.error = err
-        p = t.mem.r32(h) & ADDRESS_MASK
+        p = t.mem.r32(h) & t.mem.system.addr_mask
     return p if p and t.mem.r16(p) != RTS else 0
 
 
 def wmgr_port(t) -> int:
     """The port menus are drawn in: the Window Manager's colour port with
     Color QuickDraw, its GrafPort without."""
-    return (t.mem.r32(lowmem.WMgrCPort) or t.mem.r32(lowmem.WMgrPort)) & ADDRESS_MASK
+    return (t.mem.r32(lowmem.WMgrCPort) or t.mem.r32(lowmem.WMgrPort)) & t.mem.system.addr_mask
 
 
 def message(t, menu: MenuInfo, msg: int, rect_p: int, hit: int = 0, item_p: int = 0) -> bool:
@@ -69,12 +68,12 @@ def message(t, menu: MenuInfo, msg: int, rect_p: int, hit: int = 0, item_p: int 
     if not at:
         return False
     mem = t.mem
-    h = menu.menu_proc & ADDRESS_MASK
+    h = menu.menu_proc & t.mem.system.addr_mask
     heap = t.system.find_heap(h)       # None if its master pointer is the application's own
     if heap is not None:
         state = heap.get_state(h)
         heap.lock(h)
-    var = mem.r32(t.process.partition.a5) & ADDRESS_MASK      # thePort
+    var = mem.r32(t.process.partition.a5) & mem.system.addr_mask      # thePort
     saved = mem.r32(var)
     mem.w32(var, wmgr_port(t))
     try:
@@ -254,8 +253,8 @@ ICON_GAP = 4
 
 
 def _current_port(t):
-    var = t.mem.r32(t.process.partition.a5) & ADDRESS_MASK
-    return t.system.port_at(t.mem.r32(var) & ADDRESS_MASK)
+    var = t.mem.r32(t.process.partition.a5) & t.mem.system.addr_mask
+    return t.system.port_at(t.mem.r32(var) & t.mem.system.addr_mask)
 
 
 class _Layout:
@@ -321,7 +320,7 @@ def system_mdef(t, msg: int, h: int, rect_p: int, hit: Point, item_p: int) -> No
     port = _current_port(t)
     if port is None or not h:
         return
-    menu = t.menu(h & ADDRESS_MASK)
+    menu = t.menu(h & t.mem.system.addr_mask)
     mem = t.mem
     layout = _Layout(t, menu, port)
     if msg == k.mSizeMsg:

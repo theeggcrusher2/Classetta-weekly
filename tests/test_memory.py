@@ -3,6 +3,7 @@
 import random
 import struct
 import threading
+from types import SimpleNamespace
 
 import pytest
 from guest import Guest, Processor
@@ -18,9 +19,12 @@ from macrt.toolbox.memmgr import (
 )
 from macrt.toolbox.types import Point, Rect
 
+SYSTEM_24 = SimpleNamespace(mmu_32_bit=False, addr_mask=0xFFFFFF)
+SYSTEM_32 = SimpleNamespace(mmu_32_bit=True, addr_mask=0xFFFFFFFF)
+
 
 def test_ram_is_big_endian_with_24_bit_addresses():
-    m = RAM(0x10000)
+    m = RAM(SYSTEM_24, 0x10000)
     m.w32(0x100, 0x12345678)
     assert m.read(0x100, 4) == b"\x12\x34\x56\x78"
     assert m.r16(0x102) == 0x5678
@@ -31,9 +35,21 @@ def test_ram_is_big_endian_with_24_bit_addresses():
         m.r32(0xFFFE)
 
 
+def test_a_32_bit_machine_uses_the_whole_address():
+    """In 32-bit mode, unlike the 24-bit one above, the top byte counts."""
+    m = RAM(SYSTEM_32, 0x02000000)
+    m.w32(0x00F01234, 0x12345678)
+    assert m.r32(0x00F01234) == 0x12345678
+    assert m.r32(0x01F01234) == 0          # the same low 24 bits, different memory
+    assert m.addr_str(0x00F01234) == "$00F01234"
+    assert m.addr_str(0x01F01234) == "$01F01234"
+    with pytest.raises(BusError):
+        m.r32(0x03000000)
+
+
 def test_a_mirrored_range_is_another_way_to_the_memory_it_mirrors():
     """As a Mac Plus's RAM repeats through its 4 MB of addresses."""
-    m = RAM(0x10000)
+    m = RAM(SYSTEM_24, 0x10000)
     m.mirror(0xE000, 0x10000, 0x2000)
     m.w32(0xF700, 0x12345678)
     assert m.r32(0x3700) == 0x12345678
@@ -44,7 +60,7 @@ def test_a_mirrored_range_is_another_way_to_the_memory_it_mirrors():
 
 
 def test_whats_written_is_noted_in_each_page_from_its_first_byte_to_its_last():
-    m = RAM(0x10000)
+    m = RAM(SYSTEM_24, 0x10000)
     rng = random.Random(7)
     for _ in range(300):
         seen: dict[int, list[int]] = {}         # page: [first, last + 1], byte by byte
@@ -69,7 +85,7 @@ def test_whats_written_is_noted_in_each_page_from_its_first_byte_to_its_last():
 
 
 def test_bytes_are_compared_where_they_are():
-    m = RAM(0x10000)
+    m = RAM(SYSTEM_24, 0x10000)
     m.mirror(0xE000, 0x10000, 0x2000)
     m.write(0x3000, b"abcdef")
     assert m.same(0x3000, b"abcdef") and m.same(0xF001, bytearray(b"bcd"))
@@ -80,7 +96,7 @@ def test_bytes_are_compared_where_they_are():
 
 
 def test_ram_toolbox_types():
-    m = RAM(0x1000)
+    m = RAM(SYSTEM_24, 0x1000)
     m.w_pstr(0x10, b"Hello")
     assert m.read(0x10, 6) == b"\x05Hello" and m.r_pstr(0x10) == b"Hello"
     m.w_rect(0x20, Rect(1, 2, 3, 4))
@@ -97,7 +113,7 @@ def test_ram_toolbox_types():
 
 
 def heap(size=0x4000):
-    m = RAM(0x10000)
+    m = RAM(SYSTEM_24, 0x10000)
     return m, Heap(m, 0x1000, 0x1000 + size)
 
 
@@ -247,7 +263,7 @@ def test_an_empty_handle_keeps_its_nil_master_pointer_and_says_so(qapp):
 def test_a_locked_handle_at_the_end_grows_the_zone_for_room():
     # A program that grows its locked first segment in place, as Pyramid of
     # Peril does, gets the room the application heap may still grow by.
-    m = RAM(0x10000)
+    m = RAM(SYSTEM_24, 0x10000)
     h = Heap(m, 0x1000, 0x2000, 0x8000)
     hd = h.new_handle(8)
     m.write(h.deref(hd), b"12345678")
@@ -265,7 +281,7 @@ def test_a_locked_handle_grows_the_zone_past_a_handle_it_moves():
     # its workspace with an unlocked handle after it: the zone grows for the
     # room and for the handle it moves (Inside Macintosh II-34: only a
     # nonrelocatable or locked block above makes a locked block's growth fail).
-    m = RAM(0x10000)
+    m = RAM(SYSTEM_24, 0x10000)
     h = Heap(m, 0x1000, 0x2000, 0x8000)
     hd = h.new_handle(8)
     h.lock(hd)
@@ -330,7 +346,7 @@ def contents(m, h, hs):
 def test_a_pointer_with_no_free_block_goes_low_and_the_handles_move_up():
     """And the zone grows for them, as a Mac's does to keep its
     nonrelocatable blocks together at the bottom (Inside Macintosh II-12)."""
-    m = RAM(0x10000)
+    m = RAM(SYSTEM_24, 0x10000)
     h = Heap(m, 0x1000, 0x2000, 0x8000)
     hs = filled(m, h, 0x100, 0x100)
     low, end, held = h.deref(hs[0]), h.end, contents(m, h, hs)
@@ -341,7 +357,7 @@ def test_a_pointer_with_no_free_block_goes_low_and_the_handles_move_up():
 
 
 def test_a_pointer_goes_low_into_free_blocks_the_handles_move_out_from_between():
-    m = RAM(0x10000)
+    m = RAM(SYSTEM_24, 0x10000)
     h = Heap(m, 0x1000, 0x2000)
     hs = filled(m, h, 0x100, 0x100, 0x100, 0x100, 0xF0)
     h.dispose_handle(hs.pop(1))
@@ -356,7 +372,7 @@ def test_a_pointer_goes_low_though_a_free_block_higher_up_would_hold_it():
     """The handles in the way move up into that free block, and the zone
     doesn't grow: Excel 1.5 jumps from the 128K block it asks for into its
     first segment with 16-bit offsets."""
-    m = RAM(0x10000)
+    m = RAM(SYSTEM_24, 0x10000)
     h = Heap(m, 0x1000, 0x3000, 0x8000)
     hs = filled(m, h, 0x100, 0x100, 0x800)
     h.dispose_handle(hs.pop(2))
@@ -368,7 +384,7 @@ def test_a_pointer_goes_low_though_a_free_block_higher_up_would_hold_it():
 
 
 def test_a_pointer_goes_low_taking_part_of_a_free_block_the_handles_moving_into_the_rest():
-    m = RAM(0x10000)
+    m = RAM(SYSTEM_24, 0x10000)
     h = Heap(m, 0x1000, 0x3000, 0x8000)
     hs = filled(m, h, 0x100, 0x100, 0x800)
     h.dispose_handle(hs.pop(2))
@@ -383,7 +399,7 @@ def test_reserve_makes_room_low_the_handles_moving_up():
     """ResrvMem, for a block a program will keep locked: room as low in the
     zone as can be had, though there's a free block higher up (Inside
     Macintosh II-39)."""
-    m = RAM(0x10000)
+    m = RAM(SYSTEM_24, 0x10000)
     h = Heap(m, 0x1000, 0x2000)
     hs = filled(m, h, 0x100, 0x100, 0x200)
     h.dispose_handle(hs.pop(2))
@@ -547,7 +563,7 @@ def test_a_zone_reads_its_headers_through_a_mirror_over_it(qapp):
     """Its checks read hundreds of headers at a time straight from RAM's
     bytes, but not where a mirror lies over the zone: there its addresses
     aren't where its bytes are."""
-    m = RAM(0x10000)
+    m = RAM(SYSTEM_24, 0x10000)
     m.mirror(0x8000, 0x10000, 0x0000)
     m._b[0x9000:0xD000] = b"\xff" * 0x4000          # what the mirror hides
     h = Heap(m, 0x9000, 0xD000)
@@ -572,7 +588,7 @@ def test_move_hhi_moves_a_block_whose_header_names_another_master_pointer(qapp):
 def test_move_hhi_goes_into_the_room_a_program_grew_the_zone_by(qapp):
     """PackIt III grows the zone itself, with a free block where it ended
     and bkLim past it."""
-    m = RAM(0x10000)
+    m = RAM(SYSTEM_24, 0x10000)
     h = Heap(m, 0x1000, 0x2000, 0x8000)
     a = h.new_handle(0x40)
     old, new = h.end, 0x6000
@@ -658,7 +674,7 @@ def test_purge_space_counts_what_a_purge_would_free_and_purges_nothing():
 
 
 def test_purge_space_counts_what_the_zone_could_grow_by():
-    m = RAM(0x10000)
+    m = RAM(SYSTEM_24, 0x10000)
     h = Heap(m, 0x1000, 0x2000, 0x8000)
     hd = h.new_handle(0x400)
     h.set_purgeable(hd)
@@ -826,7 +842,7 @@ def test_a_block_a_program_made_past_the_zone_and_moved_bklim_over_is_in_it():
     """The Angelsoft adventures' p-System carves a block of its own at the
     top of the room the zone can grow into, then moves bkLim past it and
     the free block at the zone's end up to it."""
-    m = RAM(0x10000)
+    m = RAM(SYSTEM_24, 0x10000)
     h = Heap(m, 0x1000, 0x2000, 0x8000)
     at = h.start + 0x34
     while at + (m.r32(at) & 0xFFFFFF) != h.end:         # the zone's last block, free
@@ -849,7 +865,7 @@ def test_a_zone_a_program_grew_itself_ends_where_it_grew_it():
     as programs for the 64K ROM did: a free block where the zone ended,
     then bkLim past it.  The next block that wants room has it there, the
     zone not growing back over it."""
-    m = RAM(0x20000)
+    m = RAM(SYSTEM_24, 0x20000)
     ends = []
     h = Heap(m, 0x1000, 0x2000, 0x8000, on_grow=ends.append)
     old, new = h.end, 0x9006                # past its limit, and 2 more than a multiple of 4
@@ -862,7 +878,7 @@ def test_a_zone_a_program_grew_itself_ends_where_it_grew_it():
 
 
 def test_a_bklim_that_says_nothing_of_the_zone_is_let_be():
-    m = RAM(0x10000)
+    m = RAM(SYSTEM_24, 0x10000)
     h = Heap(m, 0x1000, 0x2000)
     end = h.end
     m.w32(h.start, 0x7777)                  # past anything the zone's blocks reach
@@ -873,7 +889,7 @@ def test_a_bklim_that_says_nothing_of_the_zone_is_let_be():
 def test_a_68000s_blocks_are_a_multiple_of_two_bytes():
     """Macintosh Pascal checksums its code with a block's size from its
     header, which on a 68000 is its logical size and 8, made even."""
-    m = RAM(0x10000)
+    m = RAM(SYSTEM_24, 0x10000)
     h2, h4 = Heap(m, 0x1000, 0x3000, align=2), Heap(m, 0x4000, 0x6000)
     for zone, phys in ((h2, 0x175A), (h4, 0x175C)):
         data = zone.deref(zone.new_handle(0x1752))
@@ -885,7 +901,7 @@ def test_a_68000s_zone_grows_by_all_a_block_needs():
     """The zone grows by what the free block at its end lacks, made a
     multiple of 4, even when that's 2 more than one: Klondike's first
     segment was 2 bytes too big for the room the zone grew to."""
-    m = RAM(0x20000)
+    m = RAM(SYSTEM_24, 0x20000)
     h = Heap(m, 0x1000, 0x1800, limit=0x10000, align=2)
     h.new_ptr(6)                                    # 14 bytes
     last = h.max_block(grow=False) + HEADER
@@ -989,7 +1005,7 @@ def test_growing_a_block_reads_back_the_blocks_a_program_made_after_it():
 
 def test_the_zone_record_says_how_many_masters_a_block_holds():
     # Multiplan calls MoreMasters until it has what it wants, counting moreMast.
-    m = RAM(0x10000)
+    m = RAM(SYSTEM_24, 0x10000)
     h = Heap(m, 0x1000, 0x2000)
     assert m.r16(h.start + 20) == 32
 
@@ -1007,7 +1023,7 @@ def test_the_application_heap_has_masters_64_at_a_time(qapp):
 
 
 def test_a_zone_grows_toward_its_limit():
-    m = RAM(0x10000)
+    m = RAM(SYSTEM_24, 0x10000)
     ends = []
     h = Heap(m, 0x1000, 0x2000, 0x8000, on_grow=ends.append)
     free = h.free_bytes()
@@ -1026,7 +1042,7 @@ def test_a_zone_grows_toward_its_limit():
 
 def test_asking_for_more_than_there_is_grows_the_zone_all_the_way():
     # How programs written before MaxApplZone got the whole heap.
-    m = RAM(0x10000)
+    m = RAM(SYSTEM_24, 0x10000)
     h = Heap(m, 0x1000, 0x2000, 0x8000)
     assert h.new_handle(0x100000) == 0 and h.error == memFullErr
     assert h.end == 0x8000 and m.r32(h.start) == 0x8000
@@ -1117,7 +1133,7 @@ def test_reserve_mem_grows_the_application_zone(qapp):
 
 
 def test_world_holds_globals_until_switched_in():
-    m = RAM(0x4000)
+    m = RAM(SYSTEM_24, 0x4000)
     a, b = lowmem.World(m), lowmem.World(m)
     a.w32(lowmem.WindowList, 0x1234)
     b.w32(lowmem.WindowList, 0x5678)

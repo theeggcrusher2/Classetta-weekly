@@ -2,6 +2,7 @@
 memory, and its regions, checked against QuickDraw's own region format."""
 
 import random
+from types import SimpleNamespace
 
 import pytest
 from PyQt6.QtGui import QColor, QFont, QImage
@@ -12,6 +13,8 @@ from macrt.toolbox.qdraw import Region, oval_path, rect_path
 from macrt.toolbox.quickdraw import BLACK_PAT, GRAY_PAT, Backing, GrafPort
 from macrt.toolbox.system import System
 from macrt.toolbox.types import Point, Rect
+
+SYSTEM_24 = SimpleNamespace(mmu_32_bit=False, addr_mask=0xFFFFFF)
 
 W, H = 64, 32                   # the offscreen bitmap
 ROW_BYTES = W // 8
@@ -434,7 +437,7 @@ def test_put_writes_the_images_pixels_where_the_region_is(qapp, depth, bounds, r
     rowBytes, or in the rows above and below, is as it was."""
     rng = random.Random(depth * 100 + width)
     before = bytes(rng.randrange(256) for _ in range(0x200))
-    mem = RAM(0x200)
+    mem = RAM(SYSTEM_24, 0x200)
     mem.write(0, before)
     table = qdraw.VALUE_TABLES[depth]
     s = qdraw.MemorySurface(mem, 0x40, rb, bounds, depth, table)
@@ -459,7 +462,7 @@ def test_put_writes_the_images_pixels_where_the_region_is(qapp, depth, bounds, r
 def test_drawing_on_rows_longer_than_their_pixels_leaves_the_rest_of_each_row(qapp):
     """32 bits a pixel on rows of 10 bytes: two pixels a row, each where
     it is in its row, and the last two bytes of each as they were."""
-    mem = RAM(0x100)
+    mem = RAM(SYSTEM_24, 0x100)
     mem.write(0x10, bytes(range(1, 31)))
     s = qdraw.MemorySurface.make(mem, 0x10, 10, Rect(0, 0, 3, 4), 32)
     assert s.bounds == Rect(0, 0, 3, 2)

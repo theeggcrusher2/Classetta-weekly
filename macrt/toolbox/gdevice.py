@@ -37,7 +37,7 @@ from typing import Callable
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QImage
 
-from ..memory import ADDRESS_MASK, INTEGER, LONG, LONGINT, PATTERN, RAM, RECT, Field, Record
+from ..memory import INTEGER, LONG, LONGINT, PATTERN, RAM, RECT, Field, Record
 from . import lowmem
 from .color import CT_DEVICE, CT_PALETTE, color_table, standard_table
 from .memmgr import Heap
@@ -128,8 +128,8 @@ _PMAP, _PM_TABLE = GDevice.pmap.offset, PixMap.pm_table.offset
 
 def deref(mem: RAM, h: int) -> int:
     """Where a handle's block is (0 for no handle, or one purged)."""
-    h &= ADDRESS_MASK
-    return mem.r32(h) & ADDRESS_MASK if h else 0
+    h &= mem.system.addr_mask
+    return mem.r32(h) & mem.system.addr_mask if h else 0
 
 
 def read_table(mem: RAM, h: int,

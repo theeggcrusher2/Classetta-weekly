@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Iterator
 
 from ..macfile import Folder, MacFile
-from ..memory import ADDRESS_MASK, from_mac, to_mac
+from ..memory import from_mac, to_mac
 from ..resfork import (COMPRESSED_TAG, MAP_HEADER, NO_NAME, REF_ENTRY, TYPE_ENTRY,
                        DecompressError, InvalidForkError,
                        Resource, build_fork, decompress, mapChanged, mapReadOnly, open_fork,
@@ -190,7 +190,7 @@ class Entry:
 
     @property
     def handle(self) -> int:
-        return self.mem.r32(self.addr + 8) & ADDRESS_MASK
+        return self.mem.r32(self.addr + 8) & self.mem.system.addr_mask
 
     @handle.setter
     def handle(self, h: int) -> None:
@@ -215,15 +215,15 @@ class Item:
 class ResourceMap:
     def __init__(self, mem, handle: int):
         self.mem = mem
-        self.handle = handle & ADDRESS_MASK
+        self.handle = handle & mem.system.addr_mask
 
     @property
     def ptr(self) -> int:
-        return self.mem.r32(self.handle) & ADDRESS_MASK
+        return self.mem.r32(self.handle) & self.mem.system.addr_mask
 
     @property
     def next(self) -> int:
-        return self.mem.r32(self.ptr + M_NEXT) & ADDRESS_MASK
+        return self.mem.r32(self.ptr + M_NEXT) & self.mem.system.addr_mask
 
     @next.setter
     def next(self, h: int) -> None:
@@ -275,13 +275,13 @@ class ResourceMap:
                      if e.name is not None and _same_name(e.name, name)), None)
 
     def find_handle(self, h: int) -> Entry | None:
-        h &= ADDRESS_MASK
+        h &= self.mem.system.addr_mask
         if not h:
             return None
         for t, n, refs in self.types():
             handles = self.mem.read(refs, REF_ENTRY * n)
             for j, (each,) in enumerate(struct.iter_unpack(">8xL", handles)):
-                if each & ADDRESS_MASK == h:
+                if each & self.mem.system.addr_mask == h:
                     return Entry(self, refs + REF_ENTRY * j, t)
         return None
 
@@ -385,7 +385,7 @@ class ResourceManager:
 
     @property
     def top(self) -> int:
-        return self.world.r32(lowmem.TopMapHndl) & ADDRESS_MASK
+        return self.world.r32(lowmem.TopMapHndl) & self.mem.system.addr_mask
 
     @property
     def cur_map(self) -> int:
@@ -623,7 +623,7 @@ class ResourceManager:
         file's map in memory: 0 and resNotFound if h isn't a resource.
         Inside Macintosh gives nothing in particular for NIL, but noErr."""
         with self.system.lock:
-            if not h & ADDRESS_MASK:
+            if not h & self.mem.system.addr_mask:
                 self.error = noErr
                 return 0
             e = self._entry(h)
@@ -660,7 +660,7 @@ class ResourceManager:
     def read_in(self, m: ResourceMap, e: Entry, force: bool) -> int:
         """_ResourceStub's own way of doing it."""
         h = e.handle
-        if h and self.mem.r32(h) & ADDRESS_MASK:
+        if h and self.mem.r32(h) & self.mem.system.addr_mask:
             self.error = noErr
             return h
         attrs = e.attrs
@@ -694,7 +694,7 @@ class ResourceManager:
         if not ok:
             self.error = memFullErr
             return 0
-        self.mem.write(self.mem.r32(h) & ADDRESS_MASK, data)
+        self.mem.write(self.mem.r32(h) & self.mem.system.addr_mask, data)
         flags = RESOURCE | (LOCKED if attrs & resLocked else 0) | \
             (PURGEABLE if attrs & resPurgeable else 0)
         self.system.heap_of(h).set_state(h, flags)
@@ -755,7 +755,7 @@ class ResourceManager:
                 if e is None:
                     continue
                 h = e.handle
-                if h and self.mem.r32(h) & ADDRESS_MASK:
+                if h and self.mem.r32(h) & self.mem.system.addr_mask:
                     heap = self.system.heap_of(h)
                     return self.mem.read(heap.deref(h), heap.handle_size(h))
                 try:
@@ -878,8 +878,15 @@ class ResourceManager:
                 self.error = resAttrErr
                 return
             e.handle = 0
-            self.mem.w8(h, self.mem.r8(h) & ~RESOURCE)
+            self._resource_flag(h, False)
             self.error = noErr
+
+    def _resource_flag(self, h: int, on: bool) -> None:
+        """The handle's RESOURCE flag, on the heap that owns it."""
+        heap = self.system.find_heap(h & self.mem.system.addr_mask)
+        if heap is not None:
+            flags = heap._flags(h & self.mem.system.addr_mask)
+            heap._put_flags(h & self.mem.system.addr_mask, (flags | RESOURCE) if on else flags & ~RESOURCE)
 
     def UniqueID(self, rtype: ResType, one: bool = False) -> int:
         """An unused ID above the range reserved for the system."""
@@ -978,7 +985,7 @@ class ResourceManager:
                 self.error = resNotFound
                 return -1
             self.error = noErr
-            if e.attrs & resChanged and self.mem.r32(h) & ADDRESS_MASK:
+            if e.attrs & resChanged and self.mem.r32(h) & self.mem.system.addr_mask:
                 return self.system.heap_of(h).handle_size(h)
             size = self._file(e.map).size(e.offset, e.attrs, (e.type, e.id))
             return size if size is not None else 0
@@ -1059,7 +1066,7 @@ class ResourceManager:
             for it, off in zip(items, _data_offsets(fork)):
                 it.offset = off
             m.rewrite(self.system.heap_of(m.handle), items)
-            loaded = self.mem.r32(h) & ADDRESS_MASK
+            loaded = self.mem.r32(h) & self.mem.system.addr_mask
             self.error = err or (resourceInMemory if loaded else noErr)
 
     def _set_fork(self, f: ResFile, fork: bytes) -> int:
@@ -1104,12 +1111,12 @@ class ResourceManager:
                 self.error = addResFailed
                 return
             items = m.items() + [Item(rtype, rid, to_mac(name)[:255] if name else None,
-                                      resChanged, UNWRITTEN, h & ADDRESS_MASK)]
+                                      resChanged, UNWRITTEN, h & self.mem.system.addr_mask)]
             if not m.rewrite(self.system.heap_of(m.handle), items):
                 self.error = addResFailed
                 return
             m.attrs |= mapChanged
-            self.mem.w8(h, self.mem.r8(h) | RESOURCE)
+            self._resource_flag(h, True)
             self.error = noErr
 
     def RemoveResource(self, h: int) -> None:
@@ -1127,7 +1134,7 @@ class ResourceManager:
             items = [it for it in m.items() if it.handle != h]
             m.rewrite(self.system.heap_of(m.handle), items)
             m.attrs |= mapChanged
-            self.mem.w8(h, self.mem.r8(h) & ~RESOURCE)
+            self._resource_flag(h, False)
             self.error = noErr
 
     RmveResource = RemoveResource
@@ -1175,10 +1182,10 @@ class ResourceManager:
             return noErr
         out = []
         for it in items:
-            loaded = it.handle and self.mem.r32(it.handle) & ADDRESS_MASK
+            loaded = it.handle and self.mem.r32(it.handle) & self.mem.system.addr_mask
             if it.attrs & resChanged and loaded:
                 size = self.system.heap_of(it.handle).handle_size(it.handle)
-                data = self.mem.read(self.mem.r32(it.handle) & ADDRESS_MASK, size)
+                data = self.mem.read(self.mem.r32(it.handle) & self.mem.system.addr_mask, size)
                 attrs = it.attrs & ~(resChanged | resCompressed)
             else:
                 data, attrs = f.raw(it.offset, (it.type, it.id)) or b"", it.attrs & ~resChanged

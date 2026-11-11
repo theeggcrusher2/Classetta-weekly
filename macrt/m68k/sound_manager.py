@@ -80,7 +80,7 @@ import functools
 import math
 import struct
 
-from ..memory import ADDRESS_MASK, BusError
+from ..memory import BusError
 from ..toolbox import sane
 from ..toolbox.files import paramErr
 from ..toolbox.memmgr import memFullErr, noErr
@@ -282,8 +282,9 @@ class InData:
     """A resource's data, for read_header to read a sound header in it at
     an offset, as it reads one in memory: one past its end isn't there."""
 
-    def __init__(self, data: bytes):
+    def __init__(self, data: bytes, addr_mask: int):
         self.data = data
+        self.addr_mask = addr_mask   # its pointers are the guest's
 
     def read(self, at: int, n: int) -> bytes:
         if not 0 <= at < len(self.data):
@@ -304,20 +305,20 @@ def read_header(mem, at: int) -> tuple[bytes, int, tuple[int, int] | None, int] 
     """A sound header's samples (as offset binary bytes, one channel),
     rate, loop and base note; None for a compressed sound, or one that
     isn't in memory.  mem is guest memory, or an InData."""
-    at &= ADDRESS_MASK
+    at &= mem.addr_mask
     try:
         ptr, length, rate, loop_start, loop_end = struct.unpack(">5I", mem.read(at, 20))
         encode, base = mem.r8(at + 20), mem.r8(at + 21)
         if length > MAX_SAMPLES:
             return None
         if encode == 0:
-            data = mem.read(ptr & ADDRESS_MASK or at + STD_HEADER, length)
+            data = mem.read(ptr & mem.addr_mask or at + STD_HEADER, length)
         elif encode == extSH:
             channels, frames = max(length, 1), mem.r32(at + 22)
             width = 2 if mem.r16(at + 48) == 16 else 1
             if frames * channels * width > MAX_SAMPLES:
                 return None
-            data = mono(mem.read(ptr & ADDRESS_MASK or at + EXT_HEADER, frames * channels * width),
+            data = mono(mem.read(ptr & mem.addr_mask or at + EXT_HEADER, frames * channels * width),
                         channels, width)
         else:
             return None
@@ -450,7 +451,7 @@ class SoundManager:
 
     # -- what the traps do -----------------------------------------------------
     def channel(self, addr: int) -> Channel | None:
-        return self.channels.get(addr & ADDRESS_MASK)
+        return self.channels.get(addr & self.mem.system.addr_mask)
 
     def new_channel(self, t, addr: int, synth: int, owned: bool) -> Channel:
         m = self.mem
@@ -500,7 +501,7 @@ class SoundManager:
         m = self.mem
         try:
             heap = t.system.heap_of(snd)
-            data_at = heap.deref(snd) & ADDRESS_MASK
+            data_at = heap.deref(snd) & t.mem.system.addr_mask
             size = heap.handle_size(snd)
         except (ValueError, KeyError, BusError):
             return resProblem
@@ -540,13 +541,13 @@ class SoundManager:
         if channels not in (1, 2) or size not in (8, 16) or compression:
             return badFormat
         rate = m.r32(header + DBH_RATE)
-        buffers = (m.r32(header + DBH_BUFFERS) & ADDRESS_MASK,
-                   m.r32(header + DBH_BUFFERS + 4) & ADDRESS_MASK)
+        buffers = (m.r32(header + DBH_BUFFERS) & m.system.addr_mask,
+                   m.r32(header + DBH_BUFFERS + 4) & m.system.addr_mask)
         if not rate or not all(buffers):
             return paramErr
         ch.quiet()
         ch.held = 0
-        ch.voice = DoubleBuffer(buffers, m.r32(header + DBH_DOUBLE_BACK) & ADDRESS_MASK,
+        ch.voice = DoubleBuffer(buffers, m.r32(header + DBH_DOUBLE_BACK) & m.system.addr_mask,
                                 channels, size // 8, rate / rate22khz * ch.rate / 0x10000,
                                 ch.amplitude)
         ch.buffer = True
@@ -731,12 +732,12 @@ class SoundManager:
                 t.call(play.completion, (("p", ch.addr),))
                 if self.channels.get(ch.addr) is not ch:
                     return              # the completion routine freed it
-        stub = m.r32(ch.addr + FIRST_MOD) & ADDRESS_MASK
+        stub = m.r32(ch.addr + FIRST_MOD) & t.mem.system.addr_mask
         for _ in range(64):
             if not stub:
                 break
-            after = m.r32(stub + STUB_NEXT) & ADDRESS_MASK
-            code = m.r32(stub + STUB_CODE) & ADDRESS_MASK
+            after = m.r32(stub + STUB_NEXT) & t.mem.system.addr_mask
+            code = m.r32(stub + STUB_CODE) & t.mem.system.addr_mask
             if code and call and ch.process is t.process:
                 self._modify(t, ch, code, stub, (freeCmd, 0, 0))
             if t.system.sys_heap.contains(stub):
@@ -753,15 +754,15 @@ class SoundManager:
     # -- the synthesizers ------------------------------------------------------
     def send(self, t, ch: Channel, cmd: Command) -> None:
         """cmd through the channel's modifiers to its synthesizer."""
-        for c in self._through(t, ch, cmd, self.mem.r32(ch.addr + FIRST_MOD) & ADDRESS_MASK):
+        for c in self._through(t, ch, cmd, self.mem.r32(ch.addr + FIRST_MOD) & t.mem.system.addr_mask):
             self._synth(t, ch, c)
 
     def _through(self, t, ch: Channel, cmd: Command, stub: int, depth: int = 0) -> list[Command]:
         if not stub or depth > 16:
             return [cmd]
         m = self.mem
-        code = m.r32(stub + STUB_CODE) & ADDRESS_MASK
-        after = m.r32(stub + STUB_NEXT) & ADDRESS_MASK
+        code = m.r32(stub + STUB_CODE) & t.mem.system.addr_mask
+        after = m.r32(stub + STUB_NEXT) & t.mem.system.addr_mask
         out: list[Command] = []
         for count in range(1, MAX_REQUESTS + 1):
             more = False
@@ -798,7 +799,7 @@ class SoundManager:
         elif c == resumeCmd:
             ch.paused = False
         elif c == callBackCmd:
-            proc = m.r32(ch.addr + CALLBACK) & ADDRESS_MASK
+            proc = m.r32(ch.addr + CALLBACK) & t.mem.system.addr_mask
             if proc and self._in_callback < 4:
                 m.write(ch.addr + CMD_IN_PROG, struct.pack(">HHI", c, p1, p2))
                 self._in_callback += 1
@@ -830,9 +831,9 @@ class SoundManager:
             ch.timbre = p1 & 0xFF
         elif c == waveTableCmd:
             if 0 < p1 < 0x8000:
-                ch.wave = m.read(p2 & ADDRESS_MASK, p1)
+                ch.wave = m.read(p2 & t.mem.system.addr_mask, p1)
         elif c == soundCmd:
-            ch.instrument = p2 & ADDRESS_MASK
+            ch.instrument = p2 & t.mem.system.addr_mask
         elif c == bufferCmd:
             sound = read_header(m, p2)
             if sound is not None and sound[0]:

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import Callable
 
-from ..memory import ADDRESS_MASK
 from ..toolbox import constants as k
 from ..toolbox import lowmem
 from ..toolbox.api import IN_FRONT
@@ -336,7 +335,7 @@ def _desk_brush(t):
     binary DeskPattern."""
     mem = t.mem
     h = mem.r32(lowmem.DeskCPat) if mem.r8(lowmem.SPMisc2) & pCDeskPat else 0
-    return t.tb.qd.desk_brush(mem.read(lowmem.DeskPattern, 8), h & ADDRESS_MASK)
+    return t.tb.qd.desk_brush(mem.read(lowmem.DeskPattern, 8), h & mem.system.addr_mask)
 
 
 @trap
@@ -361,7 +360,7 @@ def PaintBehind(t, start, clobbered):
     Control Panel window drawn again so."""
     rgn, behind = _rgn(t, clobbered), False
     for rec in list(t.process.windows):
-        behind = behind or rec.addr == start & ADDRESS_MASK
+        behind = behind or rec.addr == start & t.mem.system.addr_mask
         if behind:
             _paint_one(t, rec, rgn)
 

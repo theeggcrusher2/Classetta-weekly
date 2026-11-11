@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import struct
 
-from ..memory import ADDRESS_MASK
 from ..toolbox.files import FileError, paramErr
 from ..toolbox.memmgr import memFullErr, nilHandleErr, noErr
 from ..toolbox.resources import resNotFound
@@ -36,7 +35,7 @@ SYSTEM_7_5 = 0x0750
 
 
 def _command(t, cmd: int) -> sm.Command:
-    return struct.unpack(">HHI", t.mem.read(cmd & ADDRESS_MASK, 8))
+    return struct.unpack(">HHI", t.mem.read(cmd & t.mem.system.addr_mask, 8))
 
 
 @trap
@@ -55,7 +54,7 @@ def SndNewChannel(t, chan_ptr, synth, init, user_routine):
     for one more each time until it's refused."""
     if len(t.machine.sound_manager.channels) >= sm.MAX_CHANNELS:
         return sm.notEnoughHardware
-    chan = t.mem.r32(chan_ptr) & ADDRESS_MASK
+    chan = t.mem.r32(chan_ptr) & t.mem.system.addr_mask
     owned = not chan
     if owned:
         chan = t.process.heap.new_ptr(sm.CHANNEL_SIZE, clear=True)
@@ -75,7 +74,7 @@ def SndAddModifier(t, chan, modifier, id, init):
     ch = t.machine.sound_manager.channel(chan)
     if ch is None:
         return badChannel
-    t.machine.sound_manager.add_modifier(t, ch, modifier & ADDRESS_MASK, init)
+    t.machine.sound_manager.add_modifier(t, ch, modifier & t.mem.system.addr_mask, init)
     return noErr
 
 
@@ -106,7 +105,7 @@ def SndPlay(t, chan, snd, asynch):
             return badChannel
     if not snd:
         return sm.resProblem
-    return manager.play(t, ch, snd & ADDRESS_MASK, bool(asynch))
+    return manager.play(t, ch, snd & t.mem.system.addr_mask, bool(asynch))
 
 
 @trap
@@ -126,7 +125,7 @@ def SndStartFilePlay(t, chan, f_ref_num, res_num, buffer_size, the_buffer, selec
         return badChannel
     seconds = None
     if selection:
-        unit, sel_start, sel_end = struct.unpack(">Iii", t.mem.read(selection & ADDRESS_MASK, 12))
+        unit, sel_start, sel_end = struct.unpack(">Iii", t.mem.read(selection & t.mem.system.addr_mask, 12))
         if unit == unitTypeSeconds:
             if sel_start > sel_end:
                 return paramErr
@@ -141,7 +140,7 @@ def SndStartFilePlay(t, chan, f_ref_num, res_num, buffer_size, the_buffer, selec
     if isinstance(sound, int):
         return sound
     data, rate = sound
-    return manager.play_file(t, ch, data, rate, seconds, completion & ADDRESS_MASK, bool(asynch))
+    return manager.play_file(t, ch, data, rate, seconds, completion & t.mem.system.addr_mask, bool(asynch))
 
 
 def _resource_sound(t, res_num: int) -> tuple[bytes, float] | int:
@@ -159,7 +158,8 @@ def _resource_sound(t, res_num: int) -> tuple[bytes, float] | int:
         return sm.badFormat
     for cmd, _, p2 in parsed[2]:
         if cmd & ~sm.dataPointerFlag in (sm.bufferCmd, sm.soundCmd):
-            sound = sm.read_header(sm.InData(data), p2) if cmd & sm.dataPointerFlag else \
+            sound = sm.read_header(sm.InData(data, t.mem.system.addr_mask), p2) if \
+                    cmd & sm.dataPointerFlag else \
                 sm.read_header(t.mem, p2)
             if sound is None:
                 return b"", sm.MAC_RATE
@@ -192,7 +192,7 @@ def SndPlayDoubleBuffer(t, chan, params):
     ch = t.machine.sound_manager.channel(chan)
     if ch is None:
         return badChannel
-    return t.machine.sound_manager.play_double(ch, params & ADDRESS_MASK)
+    return t.machine.sound_manager.play_double(ch, params & t.mem.system.addr_mask)
 
 
 @trap
@@ -204,7 +204,7 @@ def SndControl(t, synth, cmd):
         p1 = int(synth in sm.SYNTHS and p2 & sm.initStereo != sm.initStereo)
     elif c == sm.versionCmd:
         p2 = sm.SYNTH_VERSION
-    t.mem.write(cmd & ADDRESS_MASK, struct.pack(">HHI", c, p1, p2))
+    t.mem.write(cmd & t.mem.system.addr_mask, struct.pack(">HHI", c, p1, p2))
     return noErr
 
 
@@ -279,7 +279,7 @@ def SndDisposeChannel(t, chan, quiet_now):
 def _settings_heap(t, settings: int):
     """The heap of a handle a program passed, or None."""
     heap = t.system.find_heap(settings)
-    return heap if heap is not None and heap.is_handle(settings & ADDRESS_MASK) else None
+    return heap if heap is not None and heap.is_handle(settings & t.mem.system.addr_mask) else None
 
 
 @trap
@@ -322,7 +322,7 @@ def GetSoundHeaderOffset(t, snd, offset):
     parsed = sm.parse_snd(t.tb.contents(snd)) if heap is not None and heap.deref(snd) else None
     for cmd, _, p2 in parsed[2] if parsed is not None else ():
         if cmd in (sm.dataPointerFlag | sm.soundCmd, sm.dataPointerFlag | sm.bufferCmd):
-            t.mem.w32(offset & ADDRESS_MASK, p2)
+            t.mem.w32(offset & t.mem.system.addr_mask, p2)
             return noErr
     return sm.badFormat
 
@@ -346,8 +346,8 @@ def _expand(t, out: int, cnt: int) -> None:
     one channel asked for (Inside Macintosh: Sound, the Sound Manager).
     How MACE compresses sound isn't published, so macrt can't expand it."""
     cnt &= 0xFFFFFFFF
-    if 0 < cnt and cnt * 6 <= ADDRESS_MASK + 1:
-        t.mem.write(out & ADDRESS_MASK, bytes([SILENCE]) * (cnt * 6))
+    if 0 < cnt and cnt * 6 <= t.mem.system.addr_mask + 1:
+        t.mem.write(out & t.mem.system.addr_mask, bytes([SILENCE]) * (cnt * 6))
 
 
 @trap
@@ -469,7 +469,7 @@ def SetupSndHeader(t, snd, channels, rate, size, compression, base, length, head
     if heap is None or not heap.deref(snd) or heap.handle_size(snd) < len(data):
         return paramErr
     t.mem.write(heap.deref(snd), data)
-    t.mem.w16(header_len & ADDRESS_MASK, len(data))
+    t.mem.w16(header_len & t.mem.system.addr_mask, len(data))
     return noErr
 
 

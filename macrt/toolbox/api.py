@@ -29,7 +29,6 @@ from typing import TYPE_CHECKING, Callable
 
 from PyQt6.QtWidgets import QApplication
 
-from ..memory import ADDRESS_MASK
 from ..ui import theme
 from . import constants as k
 from . import lowmem, qdraw
@@ -100,7 +99,7 @@ class Toolbox:
     @property
     def _the_port(self) -> int:
         """Address of the QuickDraw global thePort; 0(A5) points at it."""
-        return self._mem.r32(self._p.partition.a5) & ADDRESS_MASK
+        return self._mem.r32(self._p.partition.a5) & self._mem.system.addr_mask
 
     @property
     def _port(self) -> GrafPort | None:
@@ -290,7 +289,7 @@ class Toolbox:
                 # in the card again only once that window is activated.
                 p.events.post_activate(cur, True)
             with self._sys.lock:
-                if (self._mem.r32(self._the_port) ^ w.addr) & ADDRESS_MASK == 0:
+                if (self._mem.r32(self._the_port) ^ w.addr) & self._mem.system.addr_mask == 0:
                     self._mem.w32(self._the_port, 0)
                 if dispose:
                     w.dispose()

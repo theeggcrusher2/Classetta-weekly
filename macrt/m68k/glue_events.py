@@ -6,7 +6,6 @@ let the other applications run while they wait.
 
 from __future__ import annotations
 
-from ..memory import ADDRESS_MASK
 from ..toolbox import constants as k
 from ..toolbox import lowmem
 from ..toolbox.events import MODIFIER_KEYS, tick_count, to_next_tick
@@ -117,7 +116,7 @@ def _stored_activates(t) -> None:
     windows that way, behind its palettes.  The deactivate comes first."""
     mem = t.mem
     for addr, active in ((lowmem.CurDeactive, False), (lowmem.CurActivate, True)):
-        p = mem.r32(addr) & ADDRESS_MASK
+        p = mem.r32(addr) & mem.system.addr_mask
         if p:
             mem.w32(addr, 0)
             t.process.events.post_activate(t.window(p) or p, active)

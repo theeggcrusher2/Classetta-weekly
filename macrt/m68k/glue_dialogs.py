@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
-from ..memory import ADDRESS_MASK
 from ..toolbox import constants as k
 from ..toolbox import lowmem
 from ..toolbox.api import IN_FRONT
@@ -118,8 +117,8 @@ def _edit_item(t, w) -> Item | None:
 
 
 def _text(t, h: int) -> bytes:
-    h &= ADDRESS_MASK
-    return t.tb.contents(h) if h and t.mem.r32(h) & ADDRESS_MASK else b""
+    h &= t.mem.system.addr_mask
+    return t.tb.contents(h) if h and t.mem.r32(h) & t.mem.system.addr_mask else b""
 
 
 def _set_handle(t, h: int, data: bytes) -> None:
@@ -129,7 +128,7 @@ def _set_handle(t, h: int, data: bytes) -> None:
 
 
 def _the_port_var(t) -> int:
-    return t.mem.r32(t.process.partition.a5) & ADDRESS_MASK
+    return t.mem.r32(t.process.partition.a5) & t.mem.system.addr_mask
 
 
 @contextmanager
@@ -181,8 +180,8 @@ def _inval(t, w, r: Rect) -> None:
 def _params(t) -> list[bytes]:
     out = []
     for i in range(4):
-        h = t.process.world.r32(lowmem.DAStrings + 4 * i) & ADDRESS_MASK
-        out.append(t.mem.r_pstr(t.mem.r32(h) & ADDRESS_MASK) if h and t.mem.r32(h) else b"")
+        h = t.process.world.r32(lowmem.DAStrings + 4 * i) & t.mem.system.addr_mask
+        out.append(t.mem.r_pstr(t.mem.r32(h) & t.mem.system.addr_mask) if h and t.mem.r32(h) else b"")
     return out
 
 
@@ -192,7 +191,7 @@ def _standard_beeper(t) -> int:
 
 def _sound(t, n: int) -> None:
     """An alert stage's sound: the standard one beeps n times."""
-    beeper = t.process.world.r32(lowmem.DABeeper) & ADDRESS_MASK
+    beeper = t.process.world.r32(lowmem.DABeeper) & t.mem.system.addr_mask
     if n <= 0 or not beeper:
         return
     if beeper == _standard_beeper(t):
@@ -217,15 +216,15 @@ def _new_record(t, w) -> None:
 
 
 def _item_texts(t, w) -> set[int]:
-    return {item.handle & ADDRESS_MASK for item in _items(t, w) if item.is_text}
+    return {item.handle & t.mem.system.addr_mask for item in _items(t, w) if item.is_text}
 
 
 def _own_text(t, w) -> None:
     """Give the record a text of its own, in place of the item's it was
     editing, before it's let go of or the item goes."""
     d = _rec(t, w)
-    p = t.mem.r32(d.text_h) & ADDRESS_MASK
-    if t.mem.r32(p + TE_HTEXT) & ADDRESS_MASK in _item_texts(t, w):
+    p = t.mem.r32(d.text_h) & t.mem.system.addr_mask
+    if t.mem.r32(p + TE_HTEXT) & t.mem.system.addr_mask in _item_texts(t, w):
         t.mem.w32(p + TE_HTEXT, t.process.heap.new_handle(0))
 
 
@@ -240,8 +239,8 @@ def _set_edit_field(t, w, item: Item) -> None:
     if not d.text_h:
         return
     te.deactivate(t, d.text_h)
-    p = t.mem.r32(d.text_h) & ADDRESS_MASK
-    own = t.mem.r32(p + TE_HTEXT) & ADDRESS_MASK
+    p = t.mem.r32(d.text_h) & t.mem.system.addr_mask
+    own = t.mem.r32(p + TE_HTEXT) & t.mem.system.addr_mask
     if own and own not in _item_texts(t, w):
         t.system.heap_of(own).dispose_handle(own)
     t.mem.w_rect(p + TE_DEST, item.rect)
@@ -308,7 +307,7 @@ def _style_record(t, w) -> None:
         return
     with _styled(t, w, item):
         ascent, descent, _, leading = t.tb.qd.font_info(w)
-        rec = TERec(t.mem, t.mem.r32(d.text_h) & ADDRESS_MASK)
+        rec = TERec(t.mem, t.mem.r32(d.text_h) & t.mem.system.addr_mask)
         if rec.tx_size == -1:           # a styled record has its own styles
             return
         rec.tx_font, rec.tx_face, rec.tx_mode, rec.tx_size = (w.tx_font, w.tx_face, w.tx_mode,
@@ -325,7 +324,7 @@ def _item_colors(t, w, items_id: int) -> None:
     are drawn in their styles, and its controls get their colour tables,
     as SetCtlColor gives them."""
     h = t.process.resources.GetResource("ictb", items_id) if w.is_color else 0
-    if not h or not t.mem.r32(h) & ADDRESS_MASK:
+    if not h or not t.mem.r32(h) & t.mem.system.addr_mask:
         return
     data = w.dialog.item_colors = t.tb.contents(h)
     for item in _items(t, w):
@@ -333,7 +332,7 @@ def _item_colors(t, w, items_id: int) -> None:
         if table and _ctl(t, item.handle) is not None:
             ct = t.process.heap.new_handle_with(table)
             if ct:
-                glue_cport._set_aux_color(t, item.handle & ADDRESS_MASK, ct, lowmem.AuxCtlHead)
+                glue_cport._set_aux_color(t, item.handle & t.mem.system.addr_mask, ct, lowmem.AuxCtlHead)
     _style_record(t, w)
 
 
@@ -407,13 +406,13 @@ def _draw_item(t, w, item: Item) -> None:
                 _text_box(t, w, _text(t, item.handle), r)
         _frame(t, w, r.inset(-3, -3))
     elif kind == iconItem:
-        h = item.handle & ADDRESS_MASK
+        h = item.handle & t.mem.system.addr_mask
         _plot_icon(t, w, r, h, is_cicon_record(t, h))
     elif kind == picItem:
         _draw_picture(t, w, r, item.handle)
-    elif kind == userItem and item.handle & ADDRESS_MASK:
+    elif kind == userItem and item.handle & t.mem.system.addr_mask:
         with _in_port(t, w):
-            t.call(item.handle & ADDRESS_MASK, (("p", w.addr), ("h", item.number)))
+            t.call(item.handle & t.mem.system.addr_mask, (("p", w.addr), ("h", item.number)))
 
 
 def _redraw_item(t, w, item: Item) -> None:
@@ -618,13 +617,13 @@ def close_dialog(t, w, dispose: bool) -> None:
         te.dispose(t, d.text_h)
     d.text_h = 0
     for item in _items(t, w):
-        h = item.handle & ADDRESS_MASK
+        h = item.handle & t.mem.system.addr_mask
         if item.is_text and h:
             t.system.heap_of(h).dispose_handle(h)
             item.handle = 0
     kill_controls(t, w, erase=False)
-    if dispose and d.items & ADDRESS_MASK:
-        t.system.heap_of(d.items & ADDRESS_MASK).dispose_handle(d.items & ADDRESS_MASK)
+    if dispose and d.items & t.mem.system.addr_mask:
+        t.system.heap_of(d.items & t.mem.system.addr_mask).dispose_handle(d.items & t.mem.system.addr_mask)
     w.dialog = None
     (t.tb.DisposeWindow if dispose else t.tb.CloseWindow)(w)
 
@@ -662,7 +661,7 @@ def ParamText(t, p0, p1, p2, p3):
         if not p:
             continue
         data = t.pstr(p)
-        h = world.r32(lowmem.DAStrings + 4 * i) & ADDRESS_MASK
+        h = world.r32(lowmem.DAStrings + 4 * i) & t.mem.system.addr_mask
         if not h:
             h = heap.new_handle(0)
             world.w32(lowmem.DAStrings + 4 * i, h)
@@ -930,14 +929,14 @@ def _owner(t, h: int):
     for w in t.process.windows:
         if w.dialog is not None:
             for item in _items(t, w):
-                if item.is_text and item.handle & ADDRESS_MASK == h:
+                if item.is_text and item.handle & t.mem.system.addr_mask == h:
                     return w, item
     return None, None
 
 
 @trap
 def SetDialogItemText(t, h, str_p):
-    h &= ADDRESS_MASK
+    h &= t.mem.system.addr_mask
     if not h:
         return
     data = t.pstr(str_p)
@@ -1030,7 +1029,7 @@ def append_ditl(t, w, ditl: bytes, method: int) -> None:
         length = ditl[at + 13]
         entries.append(bytes(4) + ditl[at + 4:at + 14 + length + (length & 1)])
         at += len(entries[-1])
-    h = _rec(t, w).items & ADDRESS_MASK
+    h = _rec(t, w).items & t.mem.system.addr_mask
     if not entries or not h:
         return
     port = w.port_rect
@@ -1074,7 +1073,7 @@ def shorten_ditl(t, w, n: int) -> None:
     d = _rec(t, w)
     gone = found[len(found) - n:]
     for item in reversed(gone):
-        h = item.handle & ADDRESS_MASK
+        h = item.handle & t.mem.system.addr_mask
         if d.text_h and d.edit_field == item.number - 1:
             te.deactivate(t, d.text_h)
             _own_text(t, w)
@@ -1090,14 +1089,14 @@ def shorten_ditl(t, w, n: int) -> None:
                 area = item.rect.inset(-4, -4)
                 t.tb.qd.fill(w, rect_path(area), w.bk_pat, k.patCopy)
                 _inval(t, w, area)
-    list_h = d.items & ADDRESS_MASK
-    t.mem.w16(t.mem.r32(list_h) & ADDRESS_MASK, len(found) - n - 1)
+    list_h = d.items & t.mem.system.addr_mask
+    t.mem.w16(t.mem.r32(list_h) & t.mem.system.addr_mask, len(found) - n - 1)
     t.system.heap_of(list_h).set_handle_size(list_h, gone[0].offset)
 
 
 def AppendDITL(t, p, ditl, method):
     w = _dialog(t, p)
-    if w is not None and ditl & ADDRESS_MASK:
+    if w is not None and ditl & t.mem.system.addr_mask:
         append_ditl(t, w, _text(t, ditl), method)
 
 
@@ -1126,7 +1125,7 @@ def CommToolboxDispatch(t, word):
     """The Communications Toolbox's routines, of which macrt has those
     that System 7 has too."""
     cpu = t.cpu
-    pb = cpu.a(0) & ADDRESS_MASK
+    pb = cpu.a(0) & cpu.mask
     selector = t.mem.r16(pb)
     routine = CTB_ROUTINES.get(selector)
     if routine is None:

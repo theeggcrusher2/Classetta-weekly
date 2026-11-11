@@ -17,7 +17,6 @@ from __future__ import annotations
 import struct
 from functools import partial
 
-from ..memory import ADDRESS_MASK
 from ..toolbox import lowmem
 from ..toolbox.color import color_rgb, highlight_table, standard_table
 from ..toolbox.constants import blackColor, whiteColor
@@ -136,10 +135,10 @@ def DeviceLoop(t, rgn, proc, user_data, flags):
     device (Imaging With QuickDraw, Graphics Devices).  There's one
     screen: proc is called once for it, unless the region is empty; on
     a black-and-white Mac with no device, for a 1-bit one, NIL."""
-    proc &= ADDRESS_MASK
+    proc &= t.mem.system.addr_mask
     if not proc:
         return
-    rgn &= ADDRESS_MASK
+    rgn &= t.mem.system.addr_mask
     if rgn and not flags & 4:                   # not allDevices
         p = deref(t.mem, rgn)
         if p and t.mem.r_rect(p + 2).empty:
@@ -185,13 +184,13 @@ def NewGDevice(t, ref_num, mode):
 def DisposeGDevice(t, gdh):
     gd = _gd(t, gdh)
     devices = t.system.devices
-    if gd is None or devices is None or gdh & ADDRESS_MASK == devices.main & ADDRESS_MASK:
+    if gd is None or devices is None or gdh & t.mem.system.addr_mask == devices.main & t.mem.system.addr_mask:
         return
     pm = _pixmap(t, gdh)
     heap = t.system.sys_heap
     for h in ((pm.pm_table if pm is not None else 0), gd.pmap, gd.i_table, gdh):
-        if h and heap.is_handle(h & ADDRESS_MASK):
-            heap.dispose_handle(h & ADDRESS_MASK)
+        if h and heap.is_handle(h & t.mem.system.addr_mask):
+            heap.dispose_handle(h & t.mem.system.addr_mask)
 
 
 # -- the colour table ---------------------------------------------------------
@@ -235,7 +234,7 @@ def _kept(t, ct: int, at: int) -> bool:
     if not value & RESERVED:
         return False
     gdh, devices = _device(t), t.system.devices
-    if gdh & ADDRESS_MASK == devices.main & ADDRESS_MASK and at in devices.reserved:
+    if gdh & t.mem.system.addr_mask == devices.main & t.mem.system.addr_mask and at in devices.reserved:
         return False
     return value & 0xFF != _gd(t, gdh).id & 0xFF
 
@@ -281,7 +280,7 @@ def ReserveEntry(t, index, reserve):
         t.mem.w16(p, value & 0xFF00 | RESERVED | _gd(t, gdh).id & 0xFF)
     else:
         t.mem.w16(p, value & ~RESERVED)
-    if gdh & ADDRESS_MASK == devices.main & ADDRESS_MASK:
+    if gdh & t.mem.system.addr_mask == devices.main & t.mem.system.addr_mask:
         devices.held = devices.held | {index} if reserve else devices.held - {index}
     if reserve or value & RESERVED:
         _new_colors(t, gdh, p - 8 - 8 * index)
@@ -298,7 +297,7 @@ def _new_colors(t, gdh: int, ct: int, seed: bool = True) -> None:
     pm = _pixmap(t, gdh)
     if gd is not None and pm is not None and gd.i_table:
         _make_itable(t, pm.pm_table, gd.i_table, gd.res_pref or ITAB_RES)
-    if gdh & ADDRESS_MASK == devices.main & ADDRESS_MASK:
+    if gdh & t.mem.system.addr_mask == devices.main & t.mem.system.addr_mask:
         devices.changed()
         # Shown in the new colours by the next tick: each trap and the
         # clock look then, and QuickDraw looks before it draws in a window,
@@ -392,7 +391,7 @@ def RestoreEntries(t, src, dst, sel):
             err = cRangeErr
             continue
         t.mem.write(dp + 8 + 8 * at + 2, t.mem.read(sp + 8 + 8 * i + 2, 6))
-    if dst & ADDRESS_MASK == device_table & ADDRESS_MASK and device_table:
+    if dst & t.mem.system.addr_mask == device_table & t.mem.system.addr_mask and device_table:
         _new_colors(t, gdh, dp, seed=False)
     _qd_error(t, err)
 
@@ -515,15 +514,15 @@ def Color2Index(t, p):
 @trap
 def AddSearch(t, proc):
     procs = _search_procs(t)
-    procs.insert(0, proc & ADDRESS_MASK)        # asked first
+    procs.insert(0, proc & t.mem.system.addr_mask)        # asked first
     t.tb.qd.search = partial(_searched, t)
 
 
 @trap
 def DelSearch(t, proc):
     procs = _search_procs(t)
-    if proc & ADDRESS_MASK in procs:
-        procs.remove(proc & ADDRESS_MASK)
+    if proc & t.mem.system.addr_mask in procs:
+        procs.remove(proc & t.mem.system.addr_mask)
     if not any(t.process.search_procs.values()):
         t.tb.qd.search = None
 
@@ -543,14 +542,14 @@ def _search_procs(t) -> list[int]:
     by_device = getattr(t.process, "search_procs", None)
     if by_device is None:
         by_device = t.process.search_procs = {}
-    return by_device.setdefault(_device(t) & ADDRESS_MASK, [])
+    return by_device.setdefault(_device(t) & t.mem.system.addr_mask, [])
 
 
 def _searched(t, rgb: tuple[int, int, int]) -> int | None:
     """The pixel value the current device's search procedures give a
     colour: FUNCTION (rgb: RGBColor; VAR position: LONGINT): BOOLEAN,
     the first that says it found one; else None."""
-    procs = getattr(t.process, "search_procs", {}).get(_device(t) & ADDRESS_MASK)
+    procs = getattr(t.process, "search_procs", {}).get(_device(t) & t.mem.system.addr_mask)
     if not procs:
         return None
     with scratch(t, 10) as rec:
@@ -591,7 +590,7 @@ def GetCTable(t, ct_id):
     data = standard_table(ct_id) or highlight_table(ct_id, _rgb(t, HiliteRGB))
     if data is None:
         res = t.process.resources.GetResource("clut", ct_id)
-        if not res or not t.mem.r32(res) & ADDRESS_MASK:
+        if not res or not t.mem.r32(res) & t.mem.system.addr_mask:
             return 0
         data = t.tb.contents(res)
     return t.process.heap.new_handle_with(data)

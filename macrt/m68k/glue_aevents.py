@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 from weakref import WeakKeyDictionary
 
-from ..memory import ADDRESS_MASK, to_mac
+from ..memory import to_mac
 from ..process import size_flags
 from ..toolbox.constants import kHighLevelEvent
 from ..toolbox.events import EventRecord
@@ -168,7 +168,7 @@ def state(t, process=None) -> AEState:
 # =========================================================================
 def read_desc(t, p: int) -> tuple[bytes, bytes] | None:
     """The type and data of the AEDesc at p; None if its handle isn't one."""
-    dtype, h = _code(t.mem.r32(p)), t.mem.r32(p + 4) & ADDRESS_MASK
+    dtype, h = _code(t.mem.r32(p)), t.mem.r32(p + 4) & t.mem.system.addr_mask
     if not h:
         return dtype, b""
     heap = t.system.find_heap(h)
@@ -192,7 +192,7 @@ def write_desc(t, p: int, dtype: bytes, data: bytes) -> int:
 
 
 def dispose_desc(t, p: int) -> None:
-    h = t.mem.r32(p + 4) & ADDRESS_MASK
+    h = t.mem.r32(p + 4) & t.mem.system.addr_mask
     heap = t.system.find_heap(h) if h else None
     if heap is not None:
         heap.dispose_handle(h)
@@ -213,7 +213,7 @@ def _composite(t, p: int, *kinds: bytes) -> Composite | int:
 
 def _store(t, p: int, c: Composite) -> int:
     """c back in the handle of the descriptor at p."""
-    h = t.mem.r32(p + 4) & ADDRESS_MASK
+    h = t.mem.r32(p + 4) & t.mem.system.addr_mask
     data = c.flatten()
     heap = t.system.heap_of(h)
     if not heap.set_handle_size(h, len(data)):
@@ -1044,7 +1044,7 @@ HANDLER_ENTRY = 16
 
 
 def _table_entries(t, table: int) -> list[bytes] | None:
-    h = table & ADDRESS_MASK
+    h = table & t.mem.system.addr_mask
     if not h:
         return None
     heap = t.system.find_heap(h)
@@ -1056,7 +1056,7 @@ def _table_entries(t, table: int) -> list[bytes] | None:
 
 
 def _write_table(t, table: int, entries: list[bytes]) -> int:
-    h = table & ADDRESS_MASK
+    h = table & t.mem.system.addr_mask
     heap = t.system.heap_of(h)
     if not heap.set_handle_size(h, len(entries) * HANDLER_ENTRY):
         return memFullErr

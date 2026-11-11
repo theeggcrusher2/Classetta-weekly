@@ -345,19 +345,20 @@ class VIA:
         return (count - gone) & 0xFFFF
 
     # -- on the bus ----------------------------------------------------------
-    def map(self, uc) -> None:
+    def map(self, uc, lo: int = MAP_START, hi: int = MAP_END) -> None:
         """Map the VIA's pages into the processor's address space."""
-        uc.mmio_map(MAP_START, MAP_END - MAP_START, self._bus_read, None, self._bus_write, None)
+        self.map_lo = lo
+        uc.mmio_map(lo, hi - lo, self._bus_read, None, self._bus_write, None)
 
     def _bus_read(self, uc, offset: int, size: int, _data) -> int:
         value = 0
         for n in range(size):
-            value = value << 8 | self._byte(MAP_START + offset + n)
+            value = value << 8 | self._byte(self.map_lo + offset + n)
         return value
 
     def _bus_write(self, uc, offset: int, size: int, value: int, _data) -> None:
         for n in range(size):
-            addr = MAP_START + offset + n
+            addr = self.map_lo + offset + n
             if not addr & 1:
                 self.write(addr >> 9 & 15, value >> 8 * (size - 1 - n))
 
@@ -734,19 +735,20 @@ class IWM:
         elif not on & 1 << CA2_ON:
             self.drive.step()
 
-    def map(self, uc) -> None:
-        uc.mmio_map(IWM_START, IWM_END - IWM_START, self._bus_read, None, self._bus_write, None)
+    def map(self, uc, lo: int = IWM_START, hi: int = IWM_END) -> None:
+        self.map_lo = lo
+        uc.mmio_map(lo, hi - lo, self._bus_read, None, self._bus_write, None)
 
     def _bus_read(self, uc, offset: int, size: int, _data) -> int:
         value = 0
         for n in range(size):
-            addr = IWM_START + offset + n
+            addr = self.map_lo + offset + n
             value = value << 8 | (self.read(addr >> 9 & 15) if addr & 1 else 0xFF)
         return value
 
     def _bus_write(self, uc, offset: int, size: int, value: int, _data) -> None:
         for n in range(size):
-            addr = IWM_START + offset + n
+            addr = self.map_lo + offset + n
             if addr & 1:
                 self.write(addr >> 9 & 15, value >> 8 * (size - 1 - n) & 0xFF)
 

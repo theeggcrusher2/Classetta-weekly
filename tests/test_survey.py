@@ -83,7 +83,7 @@ def test_a_list_fills_in_each_runs_fields(tmp_path):
     ([{"file": "a", "memory": 1.5}], "memory is a number"),
     ([{"file": "a", "speed": True}], "speed is a number"),
     ([{"file": "a", "depth": 3, "model": "ii"}], "depth is 1, 2, 4"),
-    ([{"file": "a", "depth": 8}], "depth needs model"),
+    ([{"file": "a", "depth": 8}], "depth needs a model with a colour screen"),
     ([{"file": "a", "size": "big"}], "isn't a screen size"),
     ([{"file": "a", "row_bytes": "1024"}], "row_bytes is a number"),
     ([{"file": "a", "row_bytes": 641}], "row-bytes is an even number"),

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import struct
 
-from ..memory import ADDRESS_MASK
 from ..toolbox.icons import (ICON_TYPES, LARGE, SELECTORS, SIZES, SMALL, SUITE_HEADER, CIcon,
                              Icon, atNone, best_size, bitmap_icon, place, suite_entries,
                              suite_icon, ttNone)
@@ -33,11 +32,11 @@ def _data(t, h: int) -> bytes | None:
     NIL or an empty handle."""
     if not h:
         return None
-    if not t.mem.r32(h) & ADDRESS_MASK:
+    if not t.mem.r32(h) & t.mem.system.addr_mask:
         if not t.process.resources.is_resource(h):
             return None
         t.process.resources.LoadResource(h)
-        if not t.mem.r32(h) & ADDRESS_MASK:
+        if not t.mem.r32(h) & t.mem.system.addr_mask:
             return None
     return t.tb.contents(h) or None
 
@@ -83,7 +82,7 @@ def PlotIcon(t, r, h):
         # The ROM only dereferences the handle: Leisure Suit Larry's is a
         # pointer to its bits on the stack, and Icon Exchanger points the
         # System's DSAT 2's master pointer at an icon inside it.
-        data = t.mem.read(t.mem.r32(h) & ADDRESS_MASK, 128) if t.mem.r32(h) else None
+        data = t.mem.read(t.mem.r32(h) & t.mem.system.addr_mask, 128) if t.mem.r32(h) else None
     icon = bitmap_icon(data, LARGE, masked=False) if data else None
     _plot(t, t.rect(r), atNone, ttNone, icon)
 
@@ -353,7 +352,7 @@ def is_cicon_record(t, h: int) -> bool:
     """Whether h is a CIcon record GetCIcon made that DisposeCIcon hasn't
     disposed of: still a handle, and of the size GetCIcon made it, so not
     a master pointer a later allocation has had since."""
-    h &= ADDRESS_MASK
+    h &= t.mem.system.addr_mask
     size = t.system.cicon_records.get(h)
     if size is None:
         return False
@@ -397,14 +396,14 @@ def PlotCIconHandle(t, r, align, transform, h):
 def DisposeCIcon(t, h):
     """The record and its two handles; as DisposeHandle does, a handle in
     no heap is let be."""
-    t.system.cicon_records.pop(h & ADDRESS_MASK, None)
+    t.system.cicon_records.pop(h & t.mem.system.addr_mask, None)
     heap = t.system.find_heap(h) if h else None
     if heap is None:
         return
     p = heap.deref(h)
     if p:
         for field in (ICON_PMAP_TABLE, ICON_DATA):
-            sub = t.mem.r32(p + field) & ADDRESS_MASK
+            sub = t.mem.r32(p + field) & t.mem.system.addr_mask
             sub_heap = t.system.find_heap(sub) if sub else None
             if sub_heap is not None:
                 sub_heap.dispose_handle(sub)

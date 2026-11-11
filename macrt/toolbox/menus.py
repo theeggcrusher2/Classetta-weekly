@@ -28,7 +28,7 @@ import struct
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Iterator
 
-from ..memory import ADDRESS_MASK, from_mac, to_mac
+from ..memory import from_mac, to_mac
 from .constants import APPLE_MENU_TITLE, hMenuCmd, hierMenu
 from .lowmem import MenuCInfo as MENU_C_INFO, MenuList as MENU_LIST, World
 from .memmgr import Heap
@@ -189,7 +189,7 @@ class MenuInfo(MenuBase):
     def __init__(self, system: System, handle: int):
         self.system = system
         self.mem = system.mem
-        self.handle = handle & ADDRESS_MASK
+        self.handle = handle & system.addr_mask
 
     @classmethod
     def new(cls, system: System, heap: Heap, menu_id: int, title: str,
@@ -213,7 +213,7 @@ class MenuInfo(MenuBase):
 
     @property
     def ptr(self) -> int:
-        return self.mem.r32(self.handle) & ADDRESS_MASK
+        return self.mem.r32(self.handle) & self.mem.system.addr_mask
 
     @property
     def id(self) -> int:
@@ -228,7 +228,7 @@ class MenuInfo(MenuBase):
         """True if menuProc is the application's own code, an MDEF of its
         own or code it put in a handle itself, rather than the System's
         MDEF 0, whose menus the host draws."""
-        h = self.menu_proc & ADDRESS_MASK
+        h = self.menu_proc & self.mem.system.addr_mask
         if not h or self.system.defproc_id(h)[0] == "MDEF":
             return False
         try:
@@ -236,7 +236,7 @@ class MenuInfo(MenuBase):
         except ValueError:
             # A handle of the application's own making, its master pointer
             # in its globals: the MacPaint demo's Tools and Patterns menus.
-            p = self.mem.r32(h) & ADDRESS_MASK
+            p = self.mem.r32(h) & self.mem.system.addr_mask
             return bool(p) and not p & 1 and p < self.mem.size
         return True
 
@@ -282,7 +282,7 @@ class MenuInfo(MenuBase):
     def contents(self, h: int) -> bytes | None:
         """What a handle holds, for the bar to find a title's icon in; None
         for one that's NIL, purged or not a handle."""
-        h &= ADDRESS_MASK
+        h &= self.mem.system.addr_mask
         heap = self.system.find_heap(h)
         if heap is None:
             return None
@@ -408,34 +408,34 @@ def _hier_section(mem, p: int) -> int:
 
 def read_menu_list(mem, h: int) -> list[int]:
     """The menu handles in a menu list, in order."""
-    h &= ADDRESS_MASK
+    h &= mem.system.addr_mask
     if not h:
         return []
-    p = mem.r32(h) & ADDRESS_MASK
+    p = mem.r32(h) & mem.system.addr_mask
     n = mem.r16(p) // LIST_ENTRY
-    return [mem.r32(p + LIST_HEADER + LIST_ENTRY * i) & ADDRESS_MASK for i in range(n)]
+    return [mem.r32(p + LIST_HEADER + LIST_ENTRY * i) & mem.system.addr_mask for i in range(n)]
 
 
 def read_hier_list(system: System, h: int) -> list[int]:
     """The submenus' handles in a menu list's hierarchical section, which
     a list a program made itself may not have."""
-    h &= ADDRESS_MASK
+    h &= system.addr_mask
     if not h:
         return []
     mem = system.mem
-    p = mem.r32(h) & ADDRESS_MASK
+    p = mem.r32(h) & mem.system.addr_mask
     sect = _hier_section(mem, p)
     end = p + system.heap_of(h).handle_size(h)
     if sect + HIER_HEADER > end:
         return []
     n = mem.r16(sect) // LIST_ENTRY
     n = min(n, (end - sect - HIER_HEADER) // LIST_ENTRY)
-    return [mem.r32(sect + HIER_HEADER + LIST_ENTRY * i) & ADDRESS_MASK for i in range(n)]
+    return [mem.r32(sect + HIER_HEADER + LIST_ENTRY * i) & mem.system.addr_mask for i in range(n)]
 
 
 def read_mbdf_id(mem, h: int) -> int:
-    h &= ADDRESS_MASK
-    return mem.r16s((mem.r32(h) & ADDRESS_MASK) + LIST_MBDF_ID) if h else 0
+    h &= mem.system.addr_mask
+    return mem.r16s((mem.r32(h) & mem.system.addr_mask) + LIST_MBDF_ID) if h else 0
 
 
 def write_menu_list(system: System, h: int, handles: list[int], mbdf_id: int = 0,
@@ -444,7 +444,7 @@ def write_menu_list(system: System, h: int, handles: list[int], mbdf_id: int = 0
     if not h or not system.heap_of(h).set_handle_size(h, size):
         return False
     mem = system.mem
-    p = mem.r32(h) & ADDRESS_MASK
+    p = mem.r32(h) & mem.system.addr_mask
     mem.fill(p, size)
     mem.w16(p, LIST_ENTRY * len(handles))
     mem.w16(p + LIST_MBDF_ID, mbdf_id)
@@ -486,7 +486,7 @@ class MenuList:
 
     @property
     def handle(self) -> int:
-        return self.world.r32(MENU_LIST) & ADDRESS_MASK
+        return self.world.r32(MENU_LIST) & self.mem.system.addr_mask
 
     def handles(self) -> list[int]:
         return read_menu_list(self.mem, self.handle)
@@ -498,7 +498,7 @@ class MenuList:
 
     @mbdf_id.setter
     def mbdf_id(self, mbdf_id: int) -> None:
-        self.mem.w16((self.mem.r32(self.handle) & ADDRESS_MASK) + LIST_MBDF_ID, mbdf_id)
+        self.mem.w16((self.mem.r32(self.handle) & self.mem.system.addr_mask) + LIST_MBDF_ID, mbdf_id)
 
     def hier_handles(self) -> list[int]:
         return read_hier_list(self.system, self.handle)
@@ -606,7 +606,7 @@ def mct_key(entry: bytes) -> tuple[int, int]:
 
 def mct_entries(system: System, h: int) -> list[bytes]:
     """The table's entries, but its last."""
-    h &= ADDRESS_MASK
+    h &= system.addr_mask
     heap = system.find_heap(h) if h else None
     p = heap.deref(h) if heap is not None else 0
     if not p:
@@ -632,7 +632,7 @@ def write_mct(system: System, h: int, entries: list[bytes]) -> bool:
 
 def menu_color_table(system: System, world: World, heap: Heap | None = None) -> int:
     """MenuCInfo's table; with a heap, made there, empty, if there's none."""
-    h = world.r32(MENU_C_INFO) & ADDRESS_MASK
+    h = world.r32(MENU_C_INFO) & system.addr_mask
     if h or heap is None:
         return h
     h = heap.new_handle(0)

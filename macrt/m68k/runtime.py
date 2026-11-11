@@ -39,7 +39,7 @@ from contextlib import contextmanager, nullcontext
 from typing import TYPE_CHECKING, Callable
 
 from .. import moof
-from ..memory import ADDRESS_MASK, BusError, from_mac, to_mac
+from ..memory import BusError, from_mac, to_mac
 from ..toolbox import lowmem
 from ..toolbox.files import ERIK, File
 from ..toolbox.events import ProcessKilled, tick_count, to_next_tick
@@ -55,8 +55,7 @@ from .sound import ASC, ASC_BASE, ASC_SIZE, SoundDriver, Speaker, gestaltHasASC,
 from .sound_manager import SoundManager
 from .cpu import CPU
 from .cycles import RATE, cycles
-from .hardware import (IWM, IWM_BASE, VIA, VIA_BASE, Clock, map_empty, map_test_rom, vBufA,
-                       vBufB, vHeadSel)
+from .hardware import IWM, VIA, Clock, map_empty, map_test_rom, vBufA, vBufB, vHeadSel
 from .segload import Layout, SegmentLoader, has_powerpc_code
 
 if TYPE_CHECKING:
@@ -352,17 +351,19 @@ class Machine:
     def __init__(self, system: System):
         self.system = system
         self.mem = system.mem
+        self.rom_base = system.rom_base     # the ROM page: over the top of its RAM
         self.owner: Runner | None = None    # before the CPU's clock asks after its timers
-        self.cpu = CPU(system.mem)
+        self.cpu = CPU(system.mem, system.model.cpu_core)
         self.clock = Clock()                # the VIA's and the drives', the same
+        self.chips = system.chips           # where the machine's chips answer
         self.via = VIA(button=lambda: not self.mem.r8(lowmem.MBState) & 0x80, clock=self.clock)
-        self.via.map(self.cpu.uc)
+        self.via.map(self.cpu.uc, *self.chips.via_window)
         self.via.on_page = system.screen.show_page
         self.iwm = IWM(head_select=lambda: bool(self.via.regs[vBufA] & vHeadSel),
                        clock=self.clock)
         self.iwm.surface = lambda drive, track, side: glue_sony.surface(self, drive, track, side)
         self.iwm.bits = lambda drive, track, side: glue_sony.bits(self, drive, track, side)
-        self.iwm.map(self.cpu.uc)
+        self.iwm.map(self.cpu.uc, *self.chips.iwm_window)
         self.tag_buffer = 0                 # where the disk driver puts the tags it reads too
         self.disk_position = 0              # and where on the disk it read or wrote up to
         self.sector_buffer = 0              # the File Manager's, for a sector it reads so
@@ -370,8 +371,7 @@ class Machine:
         self.ejected: dict[int, int] = {}   # drive: the tick its disk was ejected at
         self.put_back: set[int] = set()     # drives whose disk is back but not mounted
         self.choosing: dict[int, tuple[Future, list]] = {}  # drive: the disk the user chooses
-        map_test_rom(self.cpu.uc)
-        map_empty(self.cpu.uc, ROM_BASE + ROM_SIZE, EMPTY_END)
+        self._map_address_space()
         self.cpu.on_tick = self._tick
         self.cpu.timers_waiting = lambda: self.owner is not None and bool(self.owner.time_tasks.due)
         self.sound = SoundDriver(self)
@@ -379,7 +379,7 @@ class Machine:
         self.asc: ASC | None = None
         if system.model.hardware >> gestaltHasASC & 1:
             self.asc = ASC()
-            self.asc.map(self.cpu.uc)
+            self.asc.map(self.cpu.uc, self.chips.asc)
         else:
             # Where the chip is on a colour machine, reads 0 without one:
             # Excel 1.5, where the ROM's version is below $0100, reads two
@@ -398,6 +398,36 @@ class Machine:
         self._make_stubs()
         self._init_globals()
 
+    def _map_address_space(self) -> None:
+        """Map what answers to everything the address space holds beyond
+        RAM, so a stray read answers rather than faulting, as it does on
+        a Mac with nothing in a slot.
+
+        A 24-bit Mac's is macrt's own layout: the ROM's empty space under
+        the chips'.  A 32-bit machine's RAM reaches past both, and what
+        the core's static mapping doesn't cover is filled in around the
+        chips' windows: it all reads 0 and drops what's written, as the
+        Mac II's space above RAM does (see EMPTY_END)."""
+        uc = self.cpu.uc
+        if not self.system.mmu_32_bit:
+            map_test_rom(uc)
+            map_empty(uc, self.rom_base + ROM_SIZE, EMPTY_END)
+            return
+        chips = self.chips
+        # What answers for itself: RAM and the ROM page mirrored into its
+        # bytes, the chips, and the ASC if this model has one (mapped by
+        # its own map(), below; its room is kept out here).
+        taken = [(0, self.system.ram_size + ROM_SIZE), chips.via_window, chips.iwm_window]
+        if self.system.model.hardware >> gestaltHasASC & 1:
+            taken.append((chips.asc, chips.asc + 0x1000))
+        taken.append((self.rom_base, self.rom_base + ROM_SIZE))
+        taken.sort()
+        at = taken[0][1]
+        for lo, hi in taken[1:]:
+            map_empty(uc, at, lo)
+            at = hi
+        map_empty(uc, at, 1 << 32)         # past the ROM page, to the top
+
     def _quiet_pages(self) -> list[int]:
         """The pages a store to which may turn the sound on, for the CPU to
         hold in a run without slices: vBufB's while the speaker's off, the
@@ -406,9 +436,9 @@ class Machine:
             return []
         pages = []
         if self.via.regs[vBufB] & vSndEnb:
-            pages.append(VIA_BASE >> m68k.PAGE_BITS)
+            pages.append(self.chips.via >> m68k.PAGE_BITS)
         if self.asc is not None and not self.asc.waiting:
-            pages.append(ASC_BASE >> m68k.PAGE_BITS)
+            pages.append(self.chips.asc >> m68k.PAGE_BITS)
         return pages
 
     def _tick(self) -> None:
@@ -446,31 +476,32 @@ class Machine:
         # Where a program that looks past a trap's code for the ROM's next RTE,
         # to make an interrupt do nothing, finds one
         self.rte_stub = marks + 18
-        self.bomb_stub = ROM_BASE + 16      # every exception vector, until replaced
-        self.key_trans = ROM_BASE + 64      # Key2Trans, then Key1Trans 4 bytes on
-        self.io_done = ROM_BASE + 130       # JIODone's: glue_devices does it
-        self.cursor_vectors = ROM_BASE + 132
-        self.data_marks = ROM_BASE + 184    # what begins and ends a sector's data field
-        self.rd_data = ROM_BASE + 190       # the ROM's RdData: glue_sony does it
-        self.te_do_text = ROM_BASE + 192    # TextEdit's DoText: glue_textedit does it
-        self.a_line = ROM_BASE + 194        # the A-line trap dispatcher, for vector $28
-        self.init_dispatcher = ROM_BASE + 196
-        self.rd_addr = ROM_BASE + 210       # the ROM's RdAddr and AdrDisk: glue_sony does them
-        self.adr_disk = ROM_BASE + 212
-        self.mount_vol = ROM_BASE + 214     # _MountVol, as a program may have patched it
-        self.level_1_routines = ROM_BASE + 220      # Lvl1DT's, 8 of them
-        self.denibble = ROM_BASE + 316      # the six bits each byte on a disk stands for, from $96
-        self.sony_routines = ROM_BASE + 422     # the disk driver's other routines, 2 bytes each
-        self.level_1 = ROM_BASE + 434       # the VIA's interrupts' handler
-        self.sound_task = ROM_BASE + 478    # the Sound Driver's VBL task's: an RTS
-        self.address_marks = ROM_BASE + 486     # what begins and ends a sector's address field
-        self.swap_font = ROM_BASE + 492     # JSwapFont's
-        self.crsr_task = ROM_BASE + 512     # JCrsrTask's: the input globals do it
-        self.load_trap = ROM_BASE + 514     # _LoadSeg's _Debugger, with LoadTrap set
-        self.adb_service = ROM_BASE + 518   # the ADB devices' service routines: an RTS
-        self.sound_wait = ROM_BASE + 520    # where the Sound Manager's callers wait
-        self.wait_for_io = ROM_BASE + 530
-        self.thread_exit = ROM_BASE + 548   # where a Thread Manager thread's entry returns
+        self.bomb_stub = self.rom_base + 16      # every exception vector, until replaced
+        self.key_trans = self.rom_base + 64      # Key2Trans, then Key1Trans 4 bytes on
+        self.io_done = self.rom_base + 130       # JIODone's: glue_devices does it
+        self.cursor_vectors = self.rom_base + 132
+        self.cursor_task = self.rom_base + 502   # JCrsrTask's: an RTS, the cursor's the host's
+        self.data_marks = self.rom_base + 184    # what begins and ends a sector's data field
+        self.rd_data = self.rom_base + 190       # the ROM's RdData: glue_sony does it
+        self.te_do_text = self.rom_base + 192    # TextEdit's DoText: glue_textedit does it
+        self.a_line = self.rom_base + 194        # the A-line trap dispatcher, for vector $28
+        self.init_dispatcher = self.rom_base + 196
+        self.rd_addr = self.rom_base + 210       # the ROM's RdAddr and AdrDisk: glue_sony does them
+        self.adr_disk = self.rom_base + 212
+        self.mount_vol = self.rom_base + 214     # _MountVol, as a program may have patched it
+        self.level_1_routines = self.rom_base + 220      # Lvl1DT's, 8 of them
+        self.denibble = self.rom_base + 316      # the six bits each byte on a disk stands for, from $96
+        self.sony_routines = self.rom_base + 422     # the disk driver's other routines, 2 bytes each
+        self.level_1 = self.rom_base + 434       # the VIA's interrupts' handler
+        self.sound_task = self.rom_base + 478    # the Sound Driver's VBL task's: an RTS
+        self.address_marks = self.rom_base + 486     # what begins and ends a sector's address field
+        self.swap_font = self.rom_base + 492     # JSwapFont's
+        self.crsr_task = self.rom_base + 512     # JCrsrTask's: the input globals do it
+        self.load_trap = self.rom_base + 514     # _LoadSeg's _Debugger, with LoadTrap set
+        self.adb_service = self.rom_base + 518   # the ADB devices' service routines: an RTS
+        self.sound_wait = self.rom_base + 520    # where the Sound Manager's callers wait
+        self.wait_for_io = self.rom_base + 530
+        self.thread_exit = self.rom_base + 548   # where a Thread Manager thread's entry returns
         # Where those wait for a tick
         self.tick_waits = (self.sound_wait + SOUND_WAIT_TICK, self.wait_for_io + WAIT_FOR_IO_TICK)
         self.cpu.rom_interrupts = self.level_1
@@ -489,6 +520,8 @@ class Machine:
         mem.write(self.wait_for_io, WAIT_FOR_IO)
         mem.write(self.sound_wait, SOUND_WAIT)
         mem.w16(self.io_done, ILLEGAL_WORD)
+        mem.w16(self.cursor_task, RTS)
+        mem.w32(lowmem.JCrsrTask, self.cursor_task)
         mem.w16(self.rd_data, ILLEGAL_WORD)
         mem.w16(self.rd_addr, ILLEGAL_WORD)
         mem.w16(self.adr_disk, ILLEGAL_WORD)
@@ -517,13 +550,13 @@ class Machine:
         that an application leaving part pointed into it."""
         mem = self.mem
         for v in range(2, 64):
-            if part.start <= mem.r32(4 * v) & ADDRESS_MASK < part.end:
+            if part.start <= mem.r32(4 * v) & self.mem.system.addr_mask < part.end:
                 mem.w32(4 * v, self.vector(v))
         for vector, rom in ((lowmem.RdAddr, self.rd_addr), (lowmem.RdData, self.rd_data),
                             (lowmem.AdrDisk, self.adr_disk), (lowmem.TEDoText, self.te_do_text),
                             (lowmem.JSwapFont, self.swap_font), (lowmem.JCrsrTask, self.crsr_task),
                             *self._level_1_table(), *self._sony_table()):
-            if part.start <= mem.r32(vector) & ADDRESS_MASK < part.end:
+            if part.start <= mem.r32(vector) & self.mem.system.addr_mask < part.end:
                 mem.w32(vector, rom)
         if part.start <= self.tag_buffer < part.end:
             self.tag_buffer = 0
@@ -563,12 +596,14 @@ class Machine:
         # MacWrite won't print, quit or open a desk accessory while it's 0,
         # in case The Monkey would.
         mem.w16(lowmem.MonkeyLives, 0xFFFF)
-        mem.w32(lowmem.Lo3Bytes, 0x00FFFFFF)
+        # Lo3Bytes is how code is meant to learn the mask: $00FFFFFF
+        # in 24-bit mode, and all of it where addresses aren't stripped.
+        mem.w32(lowmem.Lo3Bytes, self.system.addr_mask)
         mem.w32(lowmem.MinusOne, 0xFFFFFFFF)
         mem.w32(lowmem.OneOne, 0x00010001)
         mem.w8(lowmem.CrsrCouple, 0xFF)
         mem.w16(lowmem.FSFCBLen, 94)                # HFS
-        mem.w8(lowmem.MMU32Bit, 0)
+        mem.w8(lowmem.MMU32Bit, 1 if model.mmu_32_bit else 0)
         mem.w16(lowmem.HWCfgFlags, 0x1000 if model.fpu else 0)
         mem.w16(lowmem.ScrVRes, 72)
         mem.w16(lowmem.ScrHRes, 72)
@@ -626,10 +661,10 @@ class Machine:
         mem.w8(lowmem.AlarmState, 0xFE)
         mem.write(lowmem.DeskPattern, DESK)
         mem.write(lowmem.DragPattern, GRAY_PAT)
-        mem.w32(lowmem.VIA, VIA_BASE)
-        mem.w32(lowmem.IWM, IWM_BASE)
+        mem.w32(lowmem.VIA, self.chips.via)
+        mem.w32(lowmem.IWM, self.chips.iwm)
         if self.asc is not None:
-            mem.w32(lowmem.ASCBase, ASC_BASE)
+            mem.w32(lowmem.ASCBase, self.chips.asc)
         mem.w32(lowmem.RdAddr, self.rd_addr)
         mem.w32(lowmem.RdData, self.rd_data)
         mem.w32(lowmem.AdrDisk, self.adr_disk)
@@ -892,7 +927,7 @@ class Runner:
         lines = [f"macrt: {self.process.name} stopped: {e}", "  " + self.cpu.registers()]
         if self.history:
             lines.append("  last traps: " + ", ".join(
-                f"{dispatch.trap_name(w)} at ${pc & ADDRESS_MASK:06X}" for w, pc in self.history))
+                f"{dispatch.trap_name(w)} at {self.mem.addr_str(pc)}" for w, pc in self.history))
         print("\n".join(lines), file=sys.stderr)
         report = getattr(self.tb._d, "report_system_error", None) if self.tb is not None else None
         if report is not None:
@@ -928,7 +963,7 @@ class Runner:
             elif kind == "exception":
                 self._exception(ev.code, ev.pc)
             else:
-                raise SystemError68k(1, f"unicorn error {ev.code} at ${ev.pc:06X} "
+                raise SystemError68k(1, f"unicorn error {ev.code} at {self.mem.addr_str(ev.pc)} "
                                         "(an access outside RAM?)", ev.pc)
 
     def _vertical_retrace(self) -> None:
@@ -1011,11 +1046,11 @@ class Runner:
             sound, speaker = self.machine.sound, self.machine.speaker
             manager = self.machine.sound_manager
             for _ in range(ticks):
-                task = mem.r32(lowmem.VBLQueue + 2) & ADDRESS_MASK
+                task = mem.r32(lowmem.VBLQueue + 2) & mem.system.addr_mask
                 for _ in range(m68k.MAX_VBL_TASKS):     # a queue that goes round, once
                     if not task:
                         break
-                    after = mem.r32(task) & ADDRESS_MASK    # before the task can remove itself
+                    after = mem.r32(task) & mem.system.addr_mask    # before the task can remove itself
                     count = mem.r16s(task + VBL_COUNT)
                     if count > 0:
                         mem.w16(task + VBL_COUNT, count - 1)
@@ -1092,17 +1127,17 @@ class Runner:
         queued by a task that ran this tick runs now, one queued by the
         application itself at the next tick."""
         mem = self.mem
-        if not mem.r32(lowmem.DTQueue + 2) & ADDRESS_MASK:
+        if not mem.r32(lowmem.DTQueue + 2) & mem.system.addr_mask:
             return
         cpu = self.cpu
         ctx = cpu.context()
         self._interrupt_frame()
         for _ in range(MAX_DEFERRED_TASKS):
-            task = mem.r32(lowmem.DTQueue + 2) & ADDRESS_MASK
+            task = mem.r32(lowmem.DTQueue + 2) & mem.system.addr_mask
             if not task:
                 break
             glue_os.Dequeue(self, task, lowmem.DTQueue)
-            routine = mem.r32(task + DT_ADDR) & ADDRESS_MASK
+            routine = mem.r32(task + DT_ADDR) & mem.system.addr_mask
             if routine:
                 cpu.set_a(1, mem.r32(task + DT_PARM))
                 self._jsr(routine)
@@ -1113,16 +1148,16 @@ class Runner:
         vector $28, as every A-line instruction goes to the vector's.  Not
         one in the stubs or the ROM's MountVol: called through its address,
         a trap's routine is the ROM's code itself."""
-        if self.mem.r32(4 * m68k.LINE_A) & ADDRESS_MASK == self.machine.a_line:
+        if self.mem.r32(4 * m68k.LINE_A) & self.mem.system.addr_mask == self.machine.a_line:
             return False
         start, end = self.machine.stubs
-        pc &= ADDRESS_MASK
+        pc &= self.mem.system.addr_mask
         return not start <= pc < end and pc != self.machine.mount_vol
 
     def _trap(self, word: int, pc: int) -> None:
         cpu = self.cpu
         part = self.process.partition
-        if part.left_a5 and cpu.a(5) & ADDRESS_MASK == part.left_a5:
+        if part.left_a5 and cpu.a(5) & self.mem.system.addr_mask == part.left_a5:
             # A5 is back where it was before an InitGraf at another A5, and
             # QuickDraw's globals with it: DD Expand finds the screen's
             # bounds through an InitGraf on a stack frame, then goes back.
@@ -1132,10 +1167,10 @@ class Runner:
         if self.trace:
             log.debug("%s: %s at $%06X", self.process.name, dispatch.describe(self, word), pc)
         start, end = self.machine.stubs
-        via_stub = start <= (pc & ADDRESS_MASK) < end
-        if pc & ADDRESS_MASK == self.machine.return_stub:
+        via_stub = start <= (pc & self.mem.system.addr_mask) < end
+        if pc & self.mem.system.addr_mask == self.machine.return_stub:
             raise SystemError68k(3, "returned through a callback that wasn't called")
-        if pc & ADDRESS_MASK == self.machine.load_trap:
+        if pc & self.mem.system.addr_mask == self.machine.load_trap:
             cpu.pc = pc + 2             # no debugger to stop in: on to the routine
             return
         key = dispatch.trap_key(word)
@@ -1176,7 +1211,7 @@ class Runner:
         cpu = self.cpu
         cpu.return_from_exception()
         pc = cpu.pc
-        self._trap(self.mem.r16(pc & ADDRESS_MASK), pc)
+        self._trap(self.mem.r16(pc & self.mem.system.addr_mask), pc)
 
     def _dispatch(self, word: int, pc: int) -> None:
         key = dispatch.trap_key(word)
@@ -1186,10 +1221,10 @@ class Runner:
         try:
             dispatch.dispatch(self, word, pc)
         except dispatch.UnknownTrap as e:
-            raise SystemError68k(12, str(e), pc & ADDRESS_MASK) from None
+            raise SystemError68k(12, str(e), pc & self.mem.system.addr_mask) from None
         except BusError as e:           # it passed the trap a bad pointer or handle
-            raise SystemError68k(1, f"in {dispatch.trap_name(word)} at ${pc & ADDRESS_MASK:06X}: "
-                                    f"{e}", pc & ADDRESS_MASK) from None
+            raise SystemError68k(1, f"in {dispatch.trap_name(word)} at {self.mem.addr_str(pc)}: "
+                                    f"{e}", pc & self.mem.system.addr_mask) from None
         if key in FRAMES_AT:
             wdefs.refresh(self)
         self.polled = self.cpu_time() if poll or key in KEEPS_POLLING else -SPIN_GAP
@@ -1329,46 +1364,46 @@ class Runner:
         if vector == m68k.HALT:             # STOP: nothing to do until an interrupt
             cpu.pc = pc + 4
             return
-        if pc & ADDRESS_MASK == self.machine.return_stub:
+        if pc & self.mem.system.addr_mask == self.machine.return_stub:
             raise SystemError68k(3, "returned through a callback that wasn't called")
         returns = self.machine.os_patch_returns
-        if pc & ADDRESS_MASK in returns:
-            self._os_patch_returned(pc & ADDRESS_MASK == returns[0])
+        if pc & self.mem.system.addr_mask in returns:
+            self._os_patch_returned(pc & self.mem.system.addr_mask == returns[0])
             return
-        if pc & ADDRESS_MASK == self.machine.io_done:
+        if pc & self.mem.system.addr_mask == self.machine.io_done:
             glue_devices.io_done(self)
             return
-        if pc & ADDRESS_MASK == self.machine.rd_data:
+        if pc & self.mem.system.addr_mask == self.machine.rd_data:
             glue_sony.rd_data(self)
             return
-        if pc & ADDRESS_MASK == self.machine.rd_addr:
+        if pc & self.mem.system.addr_mask == self.machine.rd_addr:
             glue_sony.rd_addr(self)
             return
-        if pc & ADDRESS_MASK == self.machine.adr_disk:
+        if pc & self.mem.system.addr_mask == self.machine.adr_disk:
             glue_sony.adr_disk(self)
             return
-        n, odd = divmod((pc & ADDRESS_MASK) - self.machine.sony_routines, 2)
+        n, odd = divmod((pc & self.mem.system.addr_mask) - self.machine.sony_routines, 2)
         if 0 <= n < len(glue_sony.ROUTINES) and not odd:
             glue_sony.ROUTINES[n][1](self)
             return
-        if pc & ADDRESS_MASK == self.machine.te_do_text:
+        if pc & self.mem.system.addr_mask == self.machine.te_do_text:
             glue_textedit.do_text(self)
             return
-        if pc & ADDRESS_MASK == self.machine.crsr_task:
+        if pc & self.mem.system.addr_mask == self.machine.crsr_task:
             # Called by a program that has moved the mouse by RawMouse
             # and set CrsrNew, as the clock calls it each tick.
             self.system.input.tick()
             cpu.pc = cpu.pop32()
             return
-        if pc & ADDRESS_MASK == self.machine.a_line:
+        if pc & self.mem.system.addr_mask == self.machine.a_line:
             self._vectored_trap()
             return
-        if pc & ADDRESS_MASK in self.machine.tick_waits:
+        if pc & self.mem.system.addr_mask in self.machine.tick_waits:
             self._wait_for_tick()
             cpu.pc = pc + 2
             return
         handler = self.mem.r32(4 * vector) if vector < 256 else 0
-        if handler & ADDRESS_MASK not in (0, self.machine.bomb_stub):
+        if handler & self.mem.system.addr_mask not in (0, self.machine.bomb_stub):
             if (m68k.TRAP_0 <= vector < m68k.TRAP_0 + 16
                     and self.mem.r16(pc) & 0xFFF0 == TRAP_WORD):
                 pc += 2                     # the core stops at a TRAP; it returns past it
@@ -1382,7 +1417,7 @@ class Runner:
                 cpu.take_exception(vector, pc, pc if vector in FORMAT_2 else None)
             return
         error_id = VECTOR_ERRORS.get(vector, 11)
-        raise SystemError68k(error_id, f"at ${pc & ADDRESS_MASK:06X}", pc & ADDRESS_MASK)
+        raise SystemError68k(error_id, f"at {self.mem.addr_str(pc)}", pc & self.mem.system.addr_mask)
 
     # =====================================================================
     # For the glue
@@ -1504,7 +1539,7 @@ class Runner:
         return port if isinstance(port, WindowRecord) else None
 
     def menu(self, h: int) -> MenuInfo | None:
-        return MenuInfo(self.system, h) if h and self.mem.r32(h) & ADDRESS_MASK else None
+        return MenuInfo(self.system, h) if h and self.mem.r32(h) & self.mem.system.addr_mask else None
 
     def take_mouse_up(self) -> None:
         """The mouse-up that ended a press the Toolbox tracked, out of the

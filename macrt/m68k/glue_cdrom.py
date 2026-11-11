@@ -22,7 +22,6 @@ macrt's controlErr still, as calls the driver doesn't have are.
 
 from __future__ import annotations
 
-from ..memory import ADDRESS_MASK
 from ..toolbox.files import FileError, paramErr
 
 controlErr = -17
@@ -83,7 +82,7 @@ def _read_toc(t, pb: int, vol) -> None:
     elif kind == 2:                         # where the Lead Out starts
         m.write(pb + csParam, lead_out + b"\0")
     elif kind == 3:                         # from a track on, as many as the buffer holds
-        buffer, size = m.r32(pb + csParam + 2) & ADDRESS_MASK, m.r16(pb + csParam + 6)
+        buffer, size = m.r32(pb + csParam + 2) & m.system.addr_mask, m.r16(pb + csParam + 6)
         if m.r8(pb + csParam + 8) <= 1 and size >= 4:
             m.write(buffer, bytes((DATA_TRACK,)) + start)
     elif kind == 4:                         # the whole table, points A0, A1 and A2 first
@@ -91,7 +90,7 @@ def _read_toc(t, pb: int, vol) -> None:
         toc[1:16] = (bytes((DATA_TRACK, 0xA0, 1, 0, 0)) + bytes((DATA_TRACK, 0xA1, 1, 0, 0))
                      + bytes((DATA_TRACK, 0xA2)) + lead_out)
         toc[16:21] = bytes((DATA_TRACK, 1)) + start
-        m.write(m.r32(pb + csParam + 2) & ADDRESS_MASK, bytes(toc))
+        m.write(m.r32(pb + csParam + 2) & m.system.addr_mask, bytes(toc))
     elif kind == 5:                         # one session, its first track 1
         m.write(pb + csParam, bytes((0, 1, 0, 1, 0, 1, DATA_TRACK)) + start)
     else:

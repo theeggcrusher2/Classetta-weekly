@@ -63,7 +63,7 @@ import struct
 import threading
 from typing import Callable
 
-from ..memory import ADDRESS_MASK, RAM
+from ..memory import RAM
 
 noErr = 0
 memFullErr = -108
@@ -87,7 +87,11 @@ GROW_ZONE_CALLS = 1024      # the most calls of a grow-zone function for one blo
 
 FREE, NONRELOCATABLE, RELOCATABLE = 0, 1, 2
 
-# Flags in a master pointer's high byte (24-bit mode)
+# A handle's flags.  In 24-bit mode they live in the master pointer's
+# high byte, and we do this to maintain compatibility with apps that
+# (inadvisably) look at them directly.
+# In 32-bit mode they can't be there as all bits are used for
+# the address, so we store them separately in _xflags.
 LOCKED = 0x80
 PURGEABLE = 0x40
 RESOURCE = 0x20
@@ -104,6 +108,8 @@ class Heap:
         Memory").  Macintosh Pascal checksums its own code segment to the
         end of its block as a Mac Plus has it."""
         self.mem = mem
+        self.mmu_32_bit = mem.system.mmu_32_bit
+        self._xflags: dict[int, int] = {}     # 32-bit mode: h -> its flags
         self.align = align
         self.start = start
         self.end = end & ~3
@@ -132,7 +138,7 @@ class Heap:
         self._add_free(first, self.end - first)
 
     def contains(self, addr: int) -> bool:
-        return self.start <= (addr & ADDRESS_MASK) < self.end
+        return self.start <= (addr & self.mem.system.addr_mask) < self.end
 
     def blocks(self) -> dict[int, int]:
         """Each block allocated, by its data's address: its logical size."""
@@ -206,7 +212,7 @@ class Heap:
             if self._kind(p) != NONRELOCATABLE:
                 self.error = memWZErr
                 return
-            self._release(p & ADDRESS_MASK)
+            self._release(p & self.mem.system.addr_mask)
             self.error = noErr
 
     def is_ptr(self, p: int) -> bool:
@@ -219,14 +225,14 @@ class Heap:
                 self.error = memWZErr
                 return 0
             self.error = noErr
-            return self._block(p & ADDRESS_MASK)[1]
+            return self._block(p & self.mem.system.addr_mask)[1]
 
     def set_ptr_size(self, p: int, size: int) -> bool:
         with self._lock:
             if self._kind(p) != NONRELOCATABLE:
                 self.error = memWZErr
                 return False
-            ok = self._resize_in_place(p & ADDRESS_MASK, size)
+            ok = self._resize_in_place(p & self.mem.system.addr_mask, size)
             self.error = noErr if ok else memFullErr
             return ok
 
@@ -267,20 +273,40 @@ class Heap:
             return mp
 
     def is_handle(self, h: int) -> bool:
-        return (h & ADDRESS_MASK) in self._handles
+        return (h & self.mem.system.addr_mask) in self._handles
 
     def deref(self, h: int) -> int:
-        return self.mem.r32(h) & ADDRESS_MASK
+        return self.mem.r32(h) & self.mem.system.addr_mask
+
+    # -- a master pointer's flags ------------------------------------------
+    def _flags(self, h: int) -> int:
+        if self.mmu_32_bit:
+            return self._xflags.get(h, 0)
+        else:
+            return self.mem.r8(h)
+
+    def _put_flags(self, h: int, flags: int) -> None:
+        if self.mmu_32_bit:
+            self._xflags[h] = flags & 0xE0
+        else:
+            self.mem.w8(h, flags & 0xE0)
+
+    def _put_master(self, h: int, flags: int, addr: int) -> None:
+        self.mem.w32(h, addr if self.mmu_32_bit else (flags << 24 | addr))
+
+    def _drop_flags(self, h: int) -> None:
+        self._xflags.pop(h, None)
 
     def dispose_handle(self, h: int) -> None:
         with self._lock:
-            h &= ADDRESS_MASK
+            h &= self.mem.system.addr_mask
             if h not in self._handles:
                 self.error = nilHandleErr if h == 0 else memWZErr
                 return
             data = self.deref(h)
             freed = not data or self._release_if_block(data)
             self._handles.remove(h)
+            self._drop_flags(h)
             self.mem.w32(h, 0)
             if h in self._borrowed:
                 self._borrowed.discard(h)       # the program's, not the zone's to hand out
@@ -292,17 +318,18 @@ class Heap:
         """EmptyHandle: free the block, keep the handle; its master pointer
         becomes NIL."""
         with self._lock:
-            h &= ADDRESS_MASK
+            h &= self.mem.system.addr_mask
             if h not in self._handles:
                 self.error = nilHandleErr if h == 0 else memWZErr
                 return
             data = self.deref(h)
             if data:
-                if self.mem.r8(h) & LOCKED:
+                if self._flags(h) & LOCKED:
                     self.error = memPurErr
                     return
                 self._release(data)
             self.mem.w32(h, 0)
+            self._drop_flags(h)
             self.error = noErr
 
     def realloc_handle(self, h: int, size: int) -> bool:
@@ -312,12 +339,12 @@ class Heap:
         takes any (Microsoft Word 1.0 makes one in its first segment for
         the block it loads the rest of itself into)."""
         with self._lock:
-            h &= ADDRESS_MASK
+            h &= self.mem.system.addr_mask
             borrowed = h not in self._handles
             if borrowed and (not h or h & 1 or not self.contains(h) or self.deref(h)):
                 self.error = nilHandleErr if h == 0 else memWZErr
                 return False
-            flags = self.mem.r8(h)
+            flags = self._flags(h)
             data = self.deref(h)
             if data:
                 if flags & LOCKED:
@@ -329,7 +356,7 @@ class Heap:
             if not new:
                 self.error = memFullErr
                 return False
-            self.mem.w32(h, (flags << 24) | new)
+            self._put_master(h, flags, new)
             if borrowed:
                 self._handles.add(h)
                 self._borrowed.add(h)
@@ -357,14 +384,14 @@ class Heap:
             data = self._handle_data(h)
             if not data:
                 return False
-            flags = self.mem.r8(h)
+            flags = self._flags(h)
             if self._resize_in_place(data, size, clear=bool(flags & LOCKED)):
                 self.error = noErr
                 return True
             if flags & LOCKED:
                 self.error = memFullErr
                 return False
-            link = (h & ADDRESS_MASK) - self.start
+            link = (h & self.mem.system.addr_mask) - self.start
             new = self._fit(size, RELOCATABLE, link)
             if not new and self.room_to_grow():
                 self.grow_for(size)
@@ -384,7 +411,7 @@ class Heap:
                 return False
             self.mem.move(data, new, min(self._block(data)[1], size))
             self._release(data)
-            self.mem.w32(h, (flags << 24) | new)
+            self._put_master(h, flags, new)
             self.error = noErr
             return True
 
@@ -395,15 +422,14 @@ class Heap:
                 self.error = memWZErr
                 return 0
             self.error = noErr
-            return self.start + self.mem.r32((p & ADDRESS_MASK) - 4)
+            return self.start + self.mem.r32((p & self.mem.system.addr_mask) - 4)
 
     def get_state(self, h: int) -> int:
-        """HGetState: the master pointer's flag byte."""
-        return self.mem.r8(h)
+        return self._flags(h)
 
     def set_state(self, h: int, flags: int) -> None:
         if not self._empty(h):
-            self.mem.w8(h, flags & 0xE0)
+            self._put_flags(h, flags)
 
     def lock(self, h: int) -> None:
         self._set_flag(h, LOCKED, True)
@@ -417,8 +443,8 @@ class Heap:
 
     def _set_flag(self, h: int, flag: int, on: bool) -> None:
         if not self._empty(h):
-            flags = self.mem.r8(h)
-            self.mem.w8(h, (flags | flag) if on else (flags & ~flag))
+            flags = self._flags(h)
+            self._put_flags(h, (flags | flag) if on else (flags & ~flag))
 
     def _empty(self, h: int) -> bool:
         """Whether h's master pointer is NIL, with nilHandleErr if it is:
@@ -438,13 +464,13 @@ class Heap:
         (Stratego moves its pictures up before it draws them into a
         300K pixel map)."""
         with self._lock:
-            h &= ADDRESS_MASK
+            h &= self.mem.system.addr_mask
             data = self.deref(h) if h in self._handles else 0
             if not data or data not in self._blocks:
                 self.error = nilHandleErr
                 return
             self.error = noErr
-            if self.mem.r8(h) & LOCKED:
+            if self._flags(h) & LOCKED:
                 self.error = memLockedErr
                 return
             spans = self._spans_up_from(data)
@@ -475,7 +501,7 @@ class Heap:
             at = addr + n - need
             self._write_header(at, RELOCATABLE, need, size, h - self.start)
             self.mem.move(data, at + HEADER, size)
-            self.mem.w32(h, self.mem.r8(h) << 24 | at + HEADER)
+            self._put_master(h, self._flags(h), at + HEADER)
             phys = self._blocks.pop(data)[0]
             self._blocks[at + HEADER] = [need, size, RELOCATABLE]
             self._add_free(data - HEADER, phys)
@@ -495,10 +521,10 @@ class Heap:
                 block, start = self._blocks[data], data - HEADER
                 h = self.start + mem.r32(data - 4)
                 if (block[2] == RELOCATABLE and h in self._handles and self.deref(h) == data
-                        and not mem.r8(h) & LOCKED):
+                        and not self._flags(h) & LOCKED):
                     if to < start:
                         mem.move(start, to, block[0])
-                        mem.w32(h, mem.r8(h) << 24 | to + HEADER)
+                        self._put_master(h, self._flags(h), to + HEADER)
                     start = to
                 elif to < start:
                     gaps.append([to, start - to])
@@ -514,7 +540,7 @@ class Heap:
     def purge(self, h: int) -> None:
         """Purge one handle now, if it may be purged."""
         with self._lock:
-            flags = self.mem.r8(h)
+            flags = self._flags(h)
             if self.is_handle(h) and flags & PURGEABLE and not flags & LOCKED:
                 self.empty_handle(h)
 
@@ -558,7 +584,7 @@ class Heap:
 
     def _kind(self, p: int) -> int | None:
         try:
-            return self._block(p & ADDRESS_MASK)[2]
+            return self._block(p & self.mem.system.addr_mask)[2]
         except KeyError:
             return None
 
@@ -592,7 +618,7 @@ class Heap:
             self._rescan()
 
     def _bk_lim(self) -> int:
-        return self.mem.r32(self.start) & ADDRESS_MASK
+        return self.mem.r32(self.start) & self.mem.system.addr_mask
 
     def _longs(self) -> Callable[[int], int]:
         """A reader of the zone's long words, for the checks that read
@@ -651,7 +677,7 @@ class Heap:
         return free, blocks
 
     def _handle_data(self, h: int) -> int:
-        h &= ADDRESS_MASK
+        h &= self.mem.system.addr_mask
         if h not in self._handles:
             self.error = nilHandleErr if h == 0 else memWZErr
             return 0
@@ -683,7 +709,7 @@ class Heap:
         another block when it's empty.  A list a program has written over
         (it stored through a handle it had disposed of) is let go."""
         head = self.start + H_FST_FREE
-        mp = self.mem.r32(head) & ADDRESS_MASK
+        mp = self.mem.r32(head) & self.mem.system.addr_mask
         if mp and not self._may_be_free(mp):
             mp = 0
         if not mp:
@@ -691,7 +717,7 @@ class Heap:
             if not self.more_masters():
                 return 0
             mp = self.mem.r32(head)
-        nxt = self.mem.r32(mp) & ADDRESS_MASK
+        nxt = self.mem.r32(mp) & self.mem.system.addr_mask
         self.mem.w32(head, nxt if self._may_be_free(nxt) else 0)
         return mp
 
@@ -782,7 +808,7 @@ class Heap:
         purged: whether it freed any.  Not while it's already running: it
         isn't to allocate memory itself (Inside Macintosh: Memory,
         "MyGrowZone"), and one that does gets no second call."""
-        proc = self.mem.r32(self.start + GZ_PROC) & ADDRESS_MASK
+        proc = self.mem.r32(self.start + GZ_PROC) & self.mem.system.addr_mask
         if not proc or self.grow_zone is None or self._in_grow_zone:
             return False
         self._in_grow_zone = True
@@ -809,8 +835,8 @@ class Heap:
     def _purgeable(self, owner: int) -> list[int]:
         found = []
         for h in self._handles:
-            word = self.mem.r32(h)
-            flags, data = word >> 24, word & ADDRESS_MASK
+            data = self.mem.r32(h) & self.mem.system.addr_mask
+            flags = self._flags(h)
             if data in self._blocks and h != owner and flags & PURGEABLE and not flags & LOCKED:
                 found.append((data, h))
         return [h for _, h in sorted(found)]
@@ -887,7 +913,7 @@ class Heap:
                 return None if rescanned or not self._rescan() else self._spans(rescanned=True)
             h = self.start + mem.r32(data - 4)
             movable = (kind == RELOCATABLE and h in self._handles and self.deref(h) == data
-                       and not mem.r8(h) & LOCKED)
+                       and not self._flags(h) & LOCKED)
             spans.append((data - HEADER, phys, data if movable else -1))
         spans.sort()
         at = (self.start + ZONE_HEADER + 3) & ~3
@@ -968,13 +994,13 @@ class Heap:
         for _, phys, data in movers:
             size = self._blocks[data][1]
             h = self.start + mem.r32(data - 4)
-            flags = mem.r8(h)
+            flags = self._flags(h)
             new = self._fit(size, RELOCATABLE, h - self.start, above=hi)
             if not new:
                 moved = False
                 break
             mem.move(data, new, size)
-            mem.w32(h, flags << 24 | new)
+            self._put_master(h, flags, new)
             del self._blocks[data]
             held.append([data - HEADER, phys])
         for at, n in held:
@@ -1060,7 +1086,7 @@ class Heap:
             if block is None or block[2] != RELOCATABLE:
                 return False
             h = self.start + mem.r32(end + 4)
-            if h not in self._handles or self.deref(h) != data or mem.r8(h) & LOCKED:
+            if h not in self._handles or self.deref(h) != data or self._flags(h) & LOCKED:
                 return False
             in_way.append((data, h))
             end += block[0]
@@ -1082,16 +1108,17 @@ class Heap:
         self._counted_free(-sum(n for _, n in held))
         for data, h in in_way:
             phys, size, _ = self._blocks[data]
-            flags = mem.r8(h)
+            flags = self._flags(h)
             new = self._fit(size, RELOCATABLE, h - self.start)
             if not new and self.room_to_grow():
                 self.grow_for(size)
                 new = self._fit(size, RELOCATABLE, h - self.start)
             if new:
                 mem.move(data, new, size)
-                mem.w32(h, flags << 24 | new)
+                self._put_master(h, flags, new)
             elif flags & PURGEABLE:
                 mem.w32(h, 0)
+                self._drop_flags(h)
             else:
                 break
             del self._blocks[data]

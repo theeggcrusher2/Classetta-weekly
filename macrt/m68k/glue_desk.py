@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import logging
 
-from ..memory import ADDRESS_MASK
 from ..toolbox import constants as k, lowmem
 from . import glue_devices as dev
 from .dispatch import trap
@@ -64,8 +63,8 @@ def _send(t, unit: int, code: int, param: int = 0) -> int:
     """A Control call to the desk accessory, the application's port as it
     was after, unless it was a window that's gone."""
     m = t.mem
-    var = m.r32(t.process.partition.a5) & ADDRESS_MASK      # thePort's address
-    port = m.r32(var) & ADDRESS_MASK if var else 0
+    var = m.r32(t.process.partition.a5) & t.mem.system.addr_mask      # thePort's address
+    port = m.r32(var) & t.mem.system.addr_mask if var else 0
     was_window = t.window(port) is not None
     try:
         return dev.control(t, unit, code, param)
@@ -126,7 +125,7 @@ def system_event(t, event_p: int) -> bool:
     if what in (k.mouseUp, k.keyDown, k.keyUp, k.autoKey):
         w = t.tb.FrontWindow()
     elif what in (k.updateEvt, k.activateEvt):
-        w = t.window(m.r32(event_p + 2) & ADDRESS_MASK)
+        w = t.window(m.r32(event_p + 2) & t.mem.system.addr_mask)
     unit = _accessory(t, w)
     if unit is None:
         return False
@@ -217,17 +216,17 @@ def OpenDeskAcc(t, name_p):
         return 0
     unit = dev._find(t, name, t.process)
     if unit is not None:
-        w = t.window(t.mem.r32(_dce(t, unit) + dev.dCtlWindow) & ADDRESS_MASK)
+        w = t.window(t.mem.r32(_dce(t, unit) + dev.dCtlWindow) & t.mem.system.addr_mask)
         if w is not None:
             t.tb.SelectWindow(w)
         return ~unit
     m = t.mem
-    var = m.r32(t.process.partition.a5) & ADDRESS_MASK
-    port = m.r32(var) & ADDRESS_MASK if var else 0
+    var = m.r32(t.process.partition.a5) & t.mem.system.addr_mask
+    port = m.r32(var) & t.mem.system.addr_mask if var else 0
     unit = dev.open_driver(t, name, {~r for r in DRIVERS.values()})
     if unit < 0:
         return 0
-    w = t.window(m.r32(_dce(t, unit) + dev.dCtlWindow) & ADDRESS_MASK)
+    w = t.window(m.r32(_dce(t, unit) + dev.dCtlWindow) & t.mem.system.addr_mask)
     if w is not None:                       # Calculator makes it hidden, for this to show
         t.tb.ShowWindow(w)
         t.tb.SelectWindow(w)

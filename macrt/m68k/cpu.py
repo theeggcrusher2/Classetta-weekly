@@ -138,10 +138,10 @@ from unicorn import (UC_ARCH_M68K, UC_HOOK_BLOCK, UC_HOOK_CODE, UC_HOOK_EDGE_GEN
                      UC_MEM_WRITE, UC_MODE_BIG_ENDIAN, UC_PROT_ALL, UC_PROT_EXEC, UC_PROT_READ,
                      UC_PROT_WRITE, UC_TLB_VIRTUAL, Uc, UcError)
 from unicorn.unicorn_const import UC_CTL_IO_WRITE, UC_CTL_TLB_FLUSH
-from unicorn.m68k_const import (UC_CPU_M68K_M68020, UC_M68K_REG_A0, UC_M68K_REG_A7,
-                                UC_M68K_REG_D0, UC_M68K_REG_PC, UC_M68K_REG_SR)
+from unicorn.m68k_const import (UC_CPU_M68K_M68020, UC_CPU_M68K_M68030, UC_M68K_REG_A0,
+                                UC_M68K_REG_A7, UC_M68K_REG_D0, UC_M68K_REG_PC, UC_M68K_REG_SR)
 
-from ..memory import ADDRESS_MASK, RAM, BusError
+from ..memory import RAM, BusError
 from ..toolbox import lowmem
 from ..toolbox.events import tick_count, to_next_tick
 from . import instructions
@@ -466,7 +466,7 @@ def _reads_ram(mem, mode: int, reg: int, size: int, at: int, cpu: CPU) -> bool:
         addr = _indexed(mem, cpu.a(reg), at, cpu)
     else:
         addr = cpu.a(reg) - (size if mode == 4 else 0) + (word if mode == 5 else 0)
-    return addr is not None and (addr & ADDRESS_MASK) + size <= len(mem)
+    return addr is not None and (addr & cpu.mask) + size <= len(mem)
 
 
 def _indexed(mem, base: int, at: int, cpu: CPU) -> int | None:
@@ -643,7 +643,7 @@ def _clock(cpu: weakref.ref[CPU], closed: threading.Event) -> None:
 
 
 class CPU:
-    def __init__(self, mem: RAM):
+    def __init__(self, mem: RAM, core: int = UC_CPU_M68K_M68020):
         self.mem = mem
         self.uc = uc = Uc(UC_ARCH_M68K, UC_MODE_BIG_ENDIAN)
         # Unicorn frees the core as the interpreter exits, and an
@@ -654,14 +654,26 @@ class CPU:
             finalizer.atexit = False
         (self._uch, self._reg_read, self._reg_write, self._emu_stop,
          self._save, self._put_back) = _core_calls(uc)
-        uc.ctl_set_cpu_model(UC_CPU_M68K_M68020)
+        # The 68030's PMMU is not there: the virtual TLB answers for every
+        # address, as it does for a 68020 without one.
+        uc.ctl_set_cpu_model(core)
         uc.ctl_set_tlb_mode(UC_TLB_VIRTUAL)
         self._backing = (ctypes.c_char * mem.size).from_buffer(mem._b)
         uc.mem_map_ptr(0, mem.size, UC_PROT_ALL, ctypes.addressof(self._backing))
-        self._pages = bytearray(1 << (24 - PAGE_BITS))          # CODE, WRITTEN, MIXED
-        self._tops = bytearray(1 << (24 - PAGE_BITS))           # the top byte it's mapped by
-        self._ran = bytearray(1 << (24 - PAGE_BITS))            # may have code translated from it
-        self._turns = bytearray(1 << (24 - PAGE_BITS))          # up to BOTH_AFTER, or NEAR
+        # What an address means here: 24-bit RAM ignores the top byte,
+        # and 32-bit RAM does not (see RAM).  The page tables cover the
+        # pages RAM's mapped to: _tlb_fill faults anything past them, so
+        # an address beyond the machine's RAM is an address error, as it
+        # is on a Mac with nothing in that slot.  (Devices sit above RAM
+        # in 32-bit mode; MMIO answers for them before the hook does.)
+        self.mask = mem.system.addr_mask
+        # The whole address space's pages, not just RAM's: a device's page
+        # past RAM is looked after here too, its state kept as RAM's is.
+        pages = (self.mask + 1) >> PAGE_BITS
+        self._pages = bytearray(pages)          # CODE, WRITTEN, MIXED
+        self._tops = bytearray(pages)           # the top byte it's mapped by
+        self._ran = bytearray(pages)            # may have code translated from it
+        self._turns = bytearray(pages)          # up to BOTH_AFTER, or NEAR
         self._both: dict[int, bytes] = {}   # the pages mapped for both, as last looked through
         self._rerun: int | None = None      # a store the core stopped at, to run again
         self._let_by: int | None = None     # the one it's running again
@@ -994,18 +1006,18 @@ class CPU:
             return self.mem.r8(addr)
         except BusError:
             try:
-                return self.uc.mem_read(addr & ADDRESS_MASK, 1)[0]
+                return self.uc.mem_read(addr & self.mask, 1)[0]
             except UcError:
-                raise BusError(f"access to ${addr & ADDRESS_MASK:06X} is outside RAM") from None
+                raise BusError(f"access to {self.mem.addr_str(addr)} is outside RAM") from None
 
     def bus_w8(self, addr: int, value: int) -> None:
         try:
             self.mem.w8(addr, value)
         except BusError:
             try:
-                self.uc.mem_write(addr & ADDRESS_MASK, bytes([value & 0xFF]))
+                self.uc.mem_write(addr & self.mask, bytes([value & 0xFF]))
             except UcError:
-                raise BusError(f"access to ${addr & ADDRESS_MASK:06X} is outside RAM") from None
+                raise BusError(f"access to {self.mem.addr_str(addr)} is outside RAM") from None
 
     # =====================================================================
     # Running
@@ -1074,7 +1086,7 @@ class CPU:
             if held:                    # a store held, its instruction not begun: run it alone
                 pc, alone = self.pc, True
                 self._rerun = self._let_by      # as it was, if it's one being run again
-                step = _step(self.mem._b, pc & ADDRESS_MASK)
+                step = _step(self.mem._b, pc & self.mask)
                 if step is None or step[1]:     # by the count, the blocks it's in dropped
                     self.uc.ctl_flush_tb()
                     stop, count = until, 1
@@ -1092,7 +1104,7 @@ class CPU:
                 return self._event
             if self._trapcc is not None:
                 at, self._trapcc = self._trapcc, None
-                op = struct.unpack_from(">H", self.mem._b, at & ADDRESS_MASK)[0]
+                op = struct.unpack_from(">H", self.mem._b, at & self.mask)[0]
                 if op in (JSR_SP, RTR):
                     sp = self.sp
                     try:
@@ -1100,8 +1112,8 @@ class CPU:
                             self.push32(at + 2)
                             pc = sp
                         else:
-                            ccr = self.mem.r16(sp & ADDRESS_MASK)
-                            pc = self.mem.r32((sp + 2) & ADDRESS_MASK)
+                            ccr = self.mem.r16(sp & self.mask)
+                            pc = self.mem.r32((sp + 2) & self.mask)
                             self.sr, self.sp = self.sr & 0xFF00 | ccr & 0x1F, sp + 6
                     except BusError:                    # a stack outside RAM
                         return Event("exception", at, BUS_ERROR)
@@ -1133,7 +1145,7 @@ class CPU:
                     break
                 pc, stop = stop, until      # the store's made: on, from what's there now
                 continue
-            at = self._rerun & ADDRESS_MASK     # as it was, if it stored to itself
+            at = self._rerun & self.mask     # as it was, if it stored to itself
             self.mem._b[at:at + len(self._fetched)] = self._fetched
             if self.interrupt_requested:
                 return Event("interrupted", self.pc)    # the store's run again next time
@@ -1158,7 +1170,7 @@ class CPU:
         """At the end of a slice: whether the core is in a loop that waits
         for a tick (see the module's docstring).  Its instructions are run
         one at a time to see, as far as they go."""
-        pc = self.pc & ADDRESS_MASK
+        pc = self.pc & self.mask
         last, self._slice_end = self._slice_end, pc
         if last is None or abs(pc - last) > SPIN_NEAR:
             return False
@@ -1180,7 +1192,7 @@ class CPU:
         b, began = self.mem._b, self._registers_now()
         for _ in range(SPIN_STEPS):
             pc = self.pc
-            if pc == until or not _waits_only(b, pc & ADDRESS_MASK, self):
+            if pc == until or not _waits_only(b, pc & self.mask, self):
                 return False
             self._sync()
             self._fresh, self._live = False, True
@@ -1220,7 +1232,7 @@ class CPU:
         key = addr << 16 | size
         took = self._blocks.get(key)
         if took is None:
-            took = self._blocks[key] = block_cycles(self.mem._b, addr & ADDRESS_MASK, size)
+            took = self._blocks[key] = block_cycles(self.mem._b, addr & self.mask, size)
         self._owed += took
         rate = self._rate
         if rate and self._owed * PACED >= rate:
@@ -1249,7 +1261,7 @@ class CPU:
         application's own: not the System's, nor the stub for an exception
         nobody handles, which SimCity 2000's demo moves there when it cycles
         its colours through two NIL handles, copying vectors over vectors."""
-        vector = _long(self.mem._b, 4 * LEVEL_1)[0] & ADDRESS_MASK
+        vector = _long(self.mem._b, 4 * LEVEL_1)[0] & self.mask
         return vector not in (0, self.rom_interrupts, self.no_handler)
 
     def own_level_1_routines(self) -> int:
@@ -1263,7 +1275,7 @@ class CPU:
         lo, hi = rom
         routines = struct.unpack(">8I", table)
         flags = sum(1 << n for n, at in enumerate(routines)
-                    if at & ADDRESS_MASK and not lo <= at & ADDRESS_MASK < hi)
+                    if at & self.mask and not lo <= at & self.mask < hi)
         self._level_1_seen = (table, rom, flags)
         return flags
 
@@ -1277,20 +1289,20 @@ class CPU:
 
     def deferred_waiting(self) -> bool:
         """Whether there's a task in the deferred task queue."""
-        return bool(_long(self.mem._b, lowmem.DTQueue + 2)[0] & ADDRESS_MASK)
+        return bool(_long(self.mem._b, lowmem.DTQueue + 2)[0] & self.mask)
 
     def vbl_counting(self) -> bool:
         """Whether a task in the VBL queue is counting down to run.  One
         that isn't, as the System's own never is, waits for nothing."""
         b = self.mem._b
-        task = _long(b, lowmem.VBLQueue + 2)[0] & ADDRESS_MASK
+        task = _long(b, lowmem.VBLQueue + 2)[0] & self.mask
         last = len(b) - VBL_TASK_END
         for _ in range(MAX_VBL_TASKS):
             if not task:
                 return False
             if task > last or _signed_word(b, task + VBL_COUNT)[0] > 0:
                 return True
-            task = _long(b, task)[0] & ADDRESS_MASK
+            task = _long(b, task)[0] & self.mask
         return True                     # a queue that goes round: look at each tick
 
     @contextmanager
@@ -1312,7 +1324,7 @@ class CPU:
                 clock.counted += more
             known = took.get(addr)
             if known is None:
-                at = addr & ADDRESS_MASK
+                at = addr & self.mask
                 extra, length = untaken(store, at)
                 known = took[addr] = (cycles(store, at) / RATE, extra / RATE,
                                       addr + length if length else -1)
@@ -1359,9 +1371,9 @@ class CPU:
     def _intr(self, uc, intno, _data) -> None:
         pc = self.pc
         if intno == LINE_A:
-            word = struct.unpack_from(">H", self.mem._b, pc & ADDRESS_MASK)[0]
+            word = struct.unpack_from(">H", self.mem._b, pc & self.mask)[0]
             self._event = Event("trap", pc, word)
-        elif intno == ILLEGAL and self.mem.r16(pc & ADDRESS_MASK) in (TRAPV_WORD, RTR):
+        elif intno == ILLEGAL and self.mem.r16(pc & self.mask) in (TRAPV_WORD, RTR):
             self._trapcc = pc               # for run() to do, as a TRAPcc
         elif intno in (ILLEGAL, ADDRESS_ERROR, FP_UNIMPLEMENTED) and self._done_here(pc):
             self._trapcc = pc               # and these
@@ -1421,10 +1433,18 @@ class CPU:
         instruction, for run() to run it alone.  One that isn't is let be,
         and the page is mapped to be written to, as any other, until the
         next run without slices."""
-        paddr = vaddr & ADDRESS_MASK
+        paddr = vaddr & self.mask
         mem = self.mem
         if mem.mirror_lo <= paddr < mem.mirror_hi:
             paddr -= mem.mirror_by
+        # A paddr past RAM's bytes is left as it is, and unmapped: what
+        # the core does next is what makes the devices work.  It looks the
+        # address up among the MMIO regions mapped over it (a device's, or
+        # the empty space's), and reads or writes through one; with none
+        # there, it faults the access, as a Mac does a read of a slot with
+        # no card in it.  It must not be mapped to a paddr that's backed:
+        # the bytes would answer instead, and hide the device.  (The hook
+        # is asked before the core looks at its regions.)
         entry.paddr = paddr
         page = paddr >> PAGE_BITS
         if self._unsliced and page in self._held and access != UC_MEM_FETCH and not self._alone:
@@ -1564,13 +1584,13 @@ class CPU:
         when the core stops, it has the condition codes as of the
         instruction, where now it may not.  Or before a write to SR that
         sets T1, for run() to run it alone, and trace from there."""
-        op = struct.unpack_from(">H", self.mem._b, addr & ADDRESS_MASK)[0]
+        op = struct.unpack_from(">H", self.mem._b, addr & self.mask)[0]
         if (is_trapcc(op) or op == JSR_SP or instructions.is_pack(op)
                 or op >> 8 == 0xF2 and self._done_here(addr)):
             self._trapcc = addr
             uc.emu_stop()
         elif (op in (ORI_SR, EORI_SR) or is_move_to_sr(op)) and not self._stepping \
-                and self._sets_trace(op, addr & ADDRESS_MASK):
+                and self._sets_trace(op, addr & self.mask):
             self._step = addr
             uc.emu_stop()
 
@@ -1637,7 +1657,7 @@ class CPU:
         the first store since the page was run from is looked at, as
         before: the block runs on through any after."""
         at = uc.reg_read(UC_M68K_REG_PC) & 0xFFFFFFFF
-        pc = at & ADDRESS_MASK
+        pc = at & self.mask
         if page - (pc >> PAGE_BITS) not in (0, 1):
             return False
         if at == self._let_by:
@@ -1677,7 +1697,7 @@ class CPU:
         always, words None."""
         if words is None:
             return True
-        pc = uc.reg_read(UC_M68K_REG_PC) & ADDRESS_MASK
+        pc = uc.reg_read(UC_M68K_REG_PC) & self.mask
         if pc + 2 > len(self.mem._b):
             return True
         to = self._stores_to(struct.unpack_from(">H", self.mem._b, pc)[0], pc)
@@ -1702,7 +1722,7 @@ class CPU:
             mask = struct.unpack_from(">H", self.mem._b, pc + 2)[0]
             size = bin(mask).count("1") * (2 << (op >> 6 & 1))
             if mode == 4:                           # down from An
-                to = (self.a(reg) - size) & ADDRESS_MASK
+                to = (self.a(reg) - size) & self.mask
         else:
             operand = _operand(op)
             if operand is None:
@@ -1741,7 +1761,7 @@ class CPU:
         ext = struct.unpack_from(">H", mem, at)[0]
         if mode == 7:
             return (_extend(ext, 1) if reg == 0 else struct.unpack_from(">L", mem, at)[0]) \
-                & ADDRESS_MASK
+                & self.mask
         addr = self.a(reg)
         if mode == 4:
             addr -= size
@@ -1754,7 +1774,7 @@ class CPU:
             if not ext & 0x800:
                 index = _extend(index, 1)
             addr += _extend(ext, 0) + (index << (ext >> 9 & 3))
-        return addr & ADDRESS_MASK
+        return addr & self.mask
 
     # =====================================================================
     # Exceptions the application handles itself

@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import struct
 
-from ..memory import ADDRESS_MASK, BusError
+from ..memory import BusError
 from ..toolbox import cursors, lowmem
 from ..toolbox.color import color_table, luminance
 from ..toolbox.gdevice import (PIXMAP_SIZE, PixMap, PixPat, RGBPat, deref, dispose_pix_pat,
@@ -163,7 +163,7 @@ def DisposePixPat(t, h):
     for port in ports:
         if port.is_color:
             for field in ("bk_pix_pat", "pn_pix_pat", "fill_pix_pat"):
-                if (getattr(port, field) ^ h) & ADDRESS_MASK == 0:
+                if (getattr(port, field) ^ h) & t.mem.system.addr_mask == 0:
                     setattr(port, field, 0)
     dispose_pix_pat(t.mem, _heap(t, h), h)
 
@@ -566,14 +566,14 @@ def _get_aux(t, owner: int, pp: int, head: int = lowmem.AuxWinHead) -> bool:
     """The record and True; the default and False for one without a
     record of its own, the default and True for none."""
     default = _default_aux(t, head)
-    aux = find_aux_win(t.mem, owner, head) if owner & ADDRESS_MASK else 0
+    aux = find_aux_win(t.mem, owner, head) if owner & t.mem.system.addr_mask else 0
     t.mem.w32(pp, aux or default)
-    return bool(aux) or not owner & ADDRESS_MASK
+    return bool(aux) or not owner & t.mem.system.addr_mask
 
 
 @trap
 def SetWinColor(t, window, ct):
-    _set_win_color(t, window & ADDRESS_MASK, ct)
+    _set_win_color(t, window & t.mem.system.addr_mask, ct)
 
 
 @trap
@@ -585,7 +585,7 @@ def GetAuxWin(t, window, pp):
 def SetControlColor(t, control, ct):
     """SetCtlColor.  macrt draws the standard controls in black and white
     whatever their table says, but an application's own CDEF can use it."""
-    _set_aux_color(t, control & ADDRESS_MASK, ct, lowmem.AuxCtlHead)
+    _set_aux_color(t, control & t.mem.system.addr_mask, ct, lowmem.AuxCtlHead)
 
 
 @trap

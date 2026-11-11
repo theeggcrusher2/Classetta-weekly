@@ -34,7 +34,7 @@ from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt
 from PyQt6.QtGui import (QBrush, QColor, QFont, QFontDatabase, QFontMetrics, QImage, QPainter,
                          QPainterPath, QPolygonF, QRegion)
 
-from ..memory import ADDRESS_MASK, RAM
+from ..memory import RAM
 from . import constants as k
 from . import lowmem
 from .bitfont import AppFonts, style_offsets
@@ -336,7 +336,7 @@ def read_rgn(mem: RAM, h: int) -> Region:
     """The region a RgnHandle holds; empty for NIL or a purged handle."""
     if not h:
         return Region()
-    p = mem.r32(h) & ADDRESS_MASK
+    p = mem.r32(h) & mem.system.addr_mask
     if not p:
         return Region()
     size = mem.r16(p)
@@ -1023,7 +1023,7 @@ class MemorySurface:
         flags, or that doesn't fit in memory.  Bounds wider than rowBytes
         hold are drawn in as far as a row goes (Tetris's tiles: 208
         pixels' bounds on rows of 170 bytes, drawn in the first 169)."""
-        base &= ADDRESS_MASK
+        base &= mem.system.addr_mask
         if row_bytes & 0x8000 or row_bytes <= 0 or depth not in pixels.DEPTHS:
             return None
         if bounds.width * depth > row_bytes * 8:
@@ -1051,7 +1051,7 @@ class MemorySurface:
         got = cls.make(mem, pm.base_addr, pm.row_bytes & ROW_BYTES_MASK, pm.bounds, depth,
                        table)
         if got is not None and table is not None:
-            got.ct = pm.pm_table & ADDRESS_MASK
+            got.ct = pm.pm_table & mem.system.addr_mask
         return got
 
     def same_values(self, other) -> bool:
@@ -1282,7 +1282,7 @@ class QuickDraw:
             return 1, [0xFFFFFFFF, 0xFF000000]
         gdh = self.mem.r32(lowmem.TheGDevice)
         main = devices.matching() if matching else devices.table()
-        if gdh & ADDRESS_MASK == devices.main & ADDRESS_MASK:
+        if gdh & self.mem.system.addr_mask == devices.main & self.mem.system.addr_mask:
             return devices.depth, main
         p = deref(self.mem, gdh)
         pm = deref(self.mem, GDevice(self.mem, p).pmap) if p else 0
@@ -1357,7 +1357,7 @@ class QuickDraw:
         own = self.surfaces.get(port.addr)
         if own is not None:
             return own
-        base = port.port_bits_base & ADDRESS_MASK
+        base = port.port_bits_base & self.mem.system.addr_mask
         if port.backing is not None and self.mem.physical(base) == self.sys.screen_bits.base:
             self.sys.screen.look()      # what the program wrote in the screen buffer first
             return WindowSurface(port)
@@ -1385,7 +1385,7 @@ class QuickDraw:
         got = MemorySurface.make(self.mem, base, pm.row_bytes & ROW_BYTES_MASK, bounds, depth,
                                  devices.table() if depth <= 8 else None)
         if got is not None and depth <= 8:
-            got.ct = pm.pm_table & ADDRESS_MASK
+            got.ct = pm.pm_table & self.mem.system.addr_mask
             got.match = devices.matching()
         return got
 
@@ -2009,7 +2009,7 @@ class QuickDraw:
         mem = self.mem
         row_bytes = mem.r16(bm + 4)
         if row_bytes & PIXMAP_FLAG:
-            pm = deref(mem, mem.r32(bm)) if row_bytes & 0x4000 else bm & ADDRESS_MASK
+            pm = deref(mem, mem.r32(bm)) if row_bytes & 0x4000 else bm & mem.system.addr_mask
             port = self.sys.port_with_pixmap(pm) if pm else None
             if port is not None:
                 return self.surface(port, current), port
@@ -2229,7 +2229,7 @@ class _NoPort:
 # Polygons: polySize, polyBBox, then the points
 # =========================================================================
 def read_poly(mem: RAM, h: int) -> list[Point]:
-    p = mem.r32(h) & ADDRESS_MASK if h else 0
+    p = mem.r32(h) & mem.system.addr_mask if h else 0
     if not p:
         return []
     size = mem.r16(p)

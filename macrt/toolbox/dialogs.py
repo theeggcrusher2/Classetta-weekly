@@ -44,7 +44,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
-from ..memory import ADDRESS_MASK, BYTE, INTEGER, LONG, RAM, RECT, Field, Record
+from ..memory import BYTE, INTEGER, LONG, RAM, RECT, Field, Record
 from .templates import ctrlItem, editText, itemDisable, statText
 from .types import Rect
 
@@ -163,7 +163,7 @@ class Item:
 
     @property
     def addr(self) -> int:
-        return (self.mem.r32(self.list_handle) & ADDRESS_MASK) + self.offset
+        return (self.mem.r32(self.list_handle) & self.mem.system.addr_mask) + self.offset
 
     @property
     def type(self) -> int:
@@ -195,8 +195,8 @@ class Item:
 
 def items(mem: RAM, list_handle: int) -> list[Item]:
     """The items in an item list, item 1 first."""
-    h = list_handle & ADDRESS_MASK
-    p = mem.r32(h) & ADDRESS_MASK if h else 0
+    h = list_handle & mem.system.addr_mask
+    p = mem.r32(h) & mem.system.addr_mask if h else 0
     if not p:
         return []
     n = (mem.r16(p) + 1) & 0xFFFF

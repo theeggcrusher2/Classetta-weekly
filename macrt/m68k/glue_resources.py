@@ -7,7 +7,6 @@ macrt.toolbox.resources.
 
 from __future__ import annotations
 
-from ..memory import ADDRESS_MASK
 from ..toolbox.memmgr import noErr
 from ..toolbox.resources import Entry, ResourceManager, ResourceMap
 from .dispatch import RESERR_FLAGS, SIGNATURES, raw, trap
@@ -231,7 +230,7 @@ def ResourceStub(t, word):
     """The original, which reads the resource in if ResLoad says to."""
     cpu, rm = t.cpu, _rm(t)
     m = ResourceMap(t.mem, cpu.a(4))
-    cpu.set_a(0, rm.read_in(m, Entry(m, cpu.a(2) & ADDRESS_MASK, b""), rm.res_load))
+    cpu.set_a(0, rm.read_in(m, Entry(m, cpu.a(2) & cpu.mask, b""), rm.res_load))
 
 
 GET_RESOURCE, GET1_RESOURCE = 0xA9A0, 0xA81F
@@ -246,7 +245,7 @@ def get_resource(t, rtype: bytes, rid: int, one: bool) -> int | None:
     patch = t.patches.get(GET1_RESOURCE if one else GET_RESOURCE)
     if patch is None or not t.on_own_thread():
         return None
-    return t.call(patch, (("l", int.from_bytes(rtype, "big")), ("h", rid)), "p") & ADDRESS_MASK
+    return t.call(patch, (("l", int.from_bytes(rtype, "big")), ("h", rid)), "p") & t.mem.system.addr_mask
 
 
 def load_resource(t, m: ResourceMap, e: Entry, force: bool) -> int | None:
@@ -267,7 +266,7 @@ def load_resource(t, m: ResourceMap, e: Entry, force: bool) -> int | None:
     cpu.set_a(2, e.addr)
     cpu.set_a(0, patch)
     t._jsr(patch)
-    h = cpu.a(0) & ADDRESS_MASK
+    h = cpu.a(0) & cpu.mask
     cpu.restore(ctx)
     rm.SetResLoad(res_load)
     return h

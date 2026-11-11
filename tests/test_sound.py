@@ -4,6 +4,7 @@ code, is test_m68k_apps' Sounds; its immediate writes are here."""
 
 import struct
 import wave
+from types import SimpleNamespace
 
 from PyQt6.QtMultimedia import QAudioFormat
 
@@ -17,6 +18,8 @@ from macrt.toolbox.system import System
 from macrt.ui.audio import Converter
 
 from guest import Processor
+
+SYSTEM_24 = SimpleNamespace(mmu_32_bit=False, addr_mask=0xFFFFFF)
 
 FRAME = sound.FRAME
 
@@ -82,7 +85,7 @@ class Frames:
 
 
 def test_the_speaker_plays_the_buffer_s_high_bytes_while_it_s_on_at_its_volume():
-    mem, via, out = RAM(0x10000), FakeVIA(), Frames()
+    mem, via, out = RAM(SYSTEM_24, 0x10000), FakeVIA(), Frames()
     mem.w32(lowmem.SoundBase, 0x1000)
     mem.write(0x1000, bytes([0xC0, 0x11]) * FRAME)
     speaker = sound.Speaker(mem, via, [out])
@@ -121,7 +124,7 @@ def test_a_frame_written_round_the_buffer_plays_from_where_it_starts():
     the 9th: the speaker watches a tick's stores and plays from there,
     and the Sound Driver's frames are put there too.  Silence written from
     the first sample doesn't say otherwise."""
-    mem, via, out = RAM(0x20000), FakeVIA(), Frames()
+    mem, via, out = RAM(SYSTEM_24, 0x20000), FakeVIA(), Frames()
     mem.w32(lowmem.SoundBase, 0x1000)
     mem.write(0x1000, bytes([0x80, 0]) * FRAME)
     mem.write(CODE, RING)
@@ -190,7 +193,7 @@ def test_the_sound_chip_plays_what_68k_code_writes_to_its_fifos():
     with MOVEM.L: the speaker plays it at the next tick, the two FIFOs'
     averaged, then silence, and nothing once they're empty.  What's written
     from $800 reads back; the FIFOs read 0."""
-    mem, out = RAM(0x20000), Frames()
+    mem, out = RAM(SYSTEM_24, 0x20000), Frames()
     chip = sound.ASC()
     cpu = CPU(mem)
     chip.map(cpu.uc)
@@ -222,7 +225,7 @@ def test_the_sound_chip_plays_what_68k_code_writes_to_its_fifos():
 
 
 def test_a_full_fifo_drops_what_s_written_and_the_speaker_s_own_sound_is_added():
-    mem, via, out = RAM(0x20000), FakeVIA(), Frames()
+    mem, via, out = RAM(SYSTEM_24, 0x20000), FakeVIA(), Frames()
     chip = sound.ASC()
     cpu = CPU(mem)
     chip.map(cpu.uc)
