@@ -65,7 +65,7 @@ from dataclasses import dataclass
 
 from PyQt6.QtGui import QColor, QImage
 
-from ..memory import ADDRESS_MASK, from_mac, to_mac
+from ..memory import from_mac, to_mac
 from ..toolbox import files as fm
 from ..toolbox import lowmem
 from ..toolbox.dialogs import substitute
@@ -157,7 +157,7 @@ class Custom:
         self.t = t
         self.w = w
         self.numbers = numbers
-        self.hook = hook & ADDRESS_MASK
+        self.hook = hook & t.mem.system.addr_mask
         self.new = new                      # System 7's: the hook gets yourDataPtr too
         self.data = data
         self.offset: int | None = None      # an expandable hook's itemOffset
@@ -169,7 +169,7 @@ class Custom:
         """The application's part, if it has one: a hook, or a dialog with
         items of its own."""
         numbers = (NEW if new else ORIGINAL)[put]
-        hook &= ADDRESS_MASK
+        hook &= t.mem.system.addr_mask
         h = t.process.resources.GetResource("DLOG", dlg_id) if dlg_id else 0
         if h:
             tmpl = parse_dlog(t.tb.contents(h))
@@ -207,7 +207,7 @@ class Custom:
         Manager's are: the standard items (Standard File's, or as numbers
         says), then the items of DITL ditl_id (none if there's no such DITL),
         kept where they are to each other, at the bottom."""
-        hook &= ADDRESS_MASK
+        hook &= t.mem.system.addr_mask
         h = t.process.resources.GetResource("DITL", ditl_id) if ditl_id else 0
         expansion = t.tb.contents(h) if h else b""
         data_ = _standard_items(numbers, ok)
@@ -245,12 +245,12 @@ class Custom:
 
     def set_name(self, name: str) -> None:
         item = self._name_item()
-        if item is not None and item.handle & ADDRESS_MASK:
-            dm._set_handle(self.t, item.handle & ADDRESS_MASK, to_mac(name)[:255])
+        if item is not None and item.handle & self.t.mem.system.addr_mask:
+            dm._set_handle(self.t, item.handle & self.t.mem.system.addr_mask, to_mac(name)[:255])
 
     def name(self) -> str | None:
         item = self._name_item()
-        if item is None or not item.handle & ADDRESS_MASK:
+        if item is None or not item.handle & self.t.mem.system.addr_mask:
             return None
         return from_mac(dm._text(self.t, item.handle))
 
@@ -259,8 +259,8 @@ class Custom:
         for its hook to read."""
         for n, text in edits.items():
             item = dm._item(self.t, self.w, n)
-            if item is not None and item.type == editText and item.handle & ADDRESS_MASK:
-                dm._set_handle(self.t, item.handle & ADDRESS_MASK, to_mac(text)[:255])
+            if item is not None and item.type == editText and item.handle & self.t.mem.system.addr_mask:
+                dm._set_handle(self.t, item.handle & self.t.mem.system.addr_mask, to_mac(text)[:255])
 
     def _theirs(self, item) -> bool:
         """Whether an item is the application's own: one after Standard
@@ -303,7 +303,7 @@ class Custom:
                 enabled = item.enabled and c.active
                 visible = c.visible and not item.hidden and not c.rect.sect(port).empty
             elif item.type in DRAWN:
-                if item.type != userItem or item.handle & ADDRESS_MASK:
+                if item.type != userItem or item.handle & t.mem.system.addr_mask:
                     drawn.append(item)
                 continue
             elif item.type == statText:
@@ -360,7 +360,7 @@ class Custom:
         all of it meanwhile."""
         t, w = self.t, self.w
         surfaces = t.tb.qd.surfaces
-        vis = w.vis_rgn & ADDRESS_MASK
+        vis = w.vis_rgn & t.mem.system.addr_mask
         kept = read_rgn(t.mem, vis) if vis else None
         if vis:
             write_rgn(t.system.heap_of(vis), vis, Region.rect(w.port_rect))
@@ -410,7 +410,7 @@ class Dialog:
         self.put = put
         self.prompt = prompt
         self.name = name
-        self.filter = file_filter & ADDRESS_MASK
+        self.filter = file_filter & t.mem.system.addr_mask
         self.type_list = type_list          # numTypes, and where the types are
         self.types = _types(t, *type_list)  # None: every type
         self.data = data                    # CustomGetFile's yourDataPtr, for its filter
@@ -423,7 +423,7 @@ class Dialog:
         self.new_name: str | None = None    # what a hook changed the name to save as to
         self.ok = ""                        # the default button's title, if not Open or Save
         self.preview: QImage | None = None  # shown beside the list
-        self.reply = reply & ADDRESS_MASK   # System 7's, to say what's selected
+        self.reply = reply & t.mem.system.addr_mask   # System 7's, to say what's selected
         self.described = False              # has it said so
         self.select: fm.Node | None = None  # what to select when the next place is shown
         self.saved: tuple[int, int] | None = None   # what SFSaveDisk and CurDirStore were set to
@@ -785,12 +785,12 @@ def _sf_reply(t, reply: int, result) -> None:
 def _sf_get(t, reply, file_filter, num_types, type_list, hook=0, dlg_id=DIALOG_IDS[False]):
     dialog = Dialog(t, False, file_filter=file_filter, type_list=(num_types, type_list),
                     hook=hook, dlg_id=dlg_id)
-    _sf_reply(t, reply & ADDRESS_MASK, dialog.run())
+    _sf_reply(t, reply & t.mem.system.addr_mask, dialog.run())
 
 
 def _sf_put(t, reply, prompt, orig_name, hook=0, dlg_id=DIALOG_IDS[True]):
     dialog = Dialog(t, True, _str(t, prompt), _str(t, orig_name), hook=hook, dlg_id=dlg_id)
-    _sf_reply(t, reply & ADDRESS_MASK, dialog.run())
+    _sf_reply(t, reply & t.mem.system.addr_mask, dialog.run())
 
 
 @trap
@@ -837,7 +837,7 @@ def _standard_reply(t, reply: int, result, described: bool = False) -> None:
     cancelled (result None), it's left saying what the dialog last had
     selected, if it said so."""
     m = t.mem
-    reply &= ADDRESS_MASK
+    reply &= t.mem.system.addr_mask
     if result is None and described:
         m.w8(reply + sfGood, 0)
         return

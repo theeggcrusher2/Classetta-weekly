@@ -45,7 +45,7 @@ from __future__ import annotations
 import struct
 from functools import partial
 
-from ..memory import ADDRESS_MASK, BusError
+from ..memory import BusError
 from ..toolbox.gdevice import GDevice, deref, gdDevType
 from ..toolbox.qdraw import rgb_argb
 from ..toolbox.windows import WindowRecord
@@ -152,15 +152,15 @@ def _get_new_palette(t, palette_id: int) -> int:
 
 
 # -- which palette is a window's ----------------------------------------------
-def _key(p: int) -> int:
-    return APP_PALETTE if p & 0xFFFFFFFF == 0xFFFFFFFF else p & ADDRESS_MASK
+def _key(p: int, mask: int) -> int:
+    return APP_PALETTE if p & 0xFFFFFFFF == 0xFFFFFFFF else p & mask
 
 
 def _palette_of(t, p: int) -> int:
     """The palette whose colours a window has: its own, else the
     application's default, else the System's, 'pltt' 0, if there is one."""
     palettes = t.process.palettes
-    for key in (_key(p), APP_PALETTE):
+    for key in (_key(p, t.mem.system.addr_mask), APP_PALETTE):
         got = palettes.get(key)
         if got is not None and got[0]:
             return got[0]
@@ -200,7 +200,7 @@ def _front(t) -> None:
     if qd.palette_colors is None:
         qd.palette_colors = partial(_port_colors, t)
     palettes = t.process.palettes
-    windows = {w.addr & ADDRESS_MASK for w in t.process.windows}
+    windows = {w.addr & t.mem.system.addr_mask for w in t.process.windows}
     for key in [k for k in palettes if k > 0 and k not in windows]:
         del palettes[key]
     w = t.process.front_window()
@@ -219,7 +219,7 @@ def new_window(t, w: WindowRecord | None, palette_id: int | None = None) -> None
     if palette_id is not None:
         h = _get_new_palette(t, palette_id)
         if h:
-            t.process.palettes[w.addr & ADDRESS_MASK] = (h, FG_UPDATES | BK_UPDATES)
+            t.process.palettes[w.addr & t.mem.system.addr_mask] = (h, FG_UPDATES | BK_UPDATES)
     _front(t)
 
 
@@ -347,7 +347,7 @@ def _color_updates(t) -> None:
     bounds = GDevice(t.mem, _record(t, devices.main)).rect
     front = t.process.front_window()
     for w in t.process.windows:
-        got = t.process.palettes.get(w.addr & ADDRESS_MASK)
+        got = t.process.palettes.get(w.addr & t.mem.system.addr_mask)
         if got is None or not w.visible:
             continue
         if got[1] & (FG_UPDATES if w is front else BK_UPDATES):
@@ -457,7 +457,7 @@ def _updates(n_c_updates: int) -> int:
 @trap
 def NSetPalette(t, p, h, n_c_updates):
     """SetPalette's too, the same trap."""
-    t.process.palettes[_key(p)] = (h & ADDRESS_MASK, _updates(n_c_updates))
+    t.process.palettes[_key(p, t.mem.system.addr_mask)] = (h & t.mem.system.addr_mask, _updates(n_c_updates))
     _front(t)
 
 
@@ -466,7 +466,7 @@ def GetPalette(t, p):
     """A colour window's palette, or the application's default, which
     there always is one of; NIL for a window that has none of its own, or
     isn't a colour window."""
-    key = _key(p)
+    key = _key(p, t.mem.system.addr_mask)
     if key == APP_PALETTE:
         return _default_palette(t)
     w = t.window(p)

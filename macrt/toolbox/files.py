@@ -60,7 +60,7 @@ import machfs
 from ..macfile import (APPLE_DOUBLE, APPLE_SINGLE, AS_DATA, AS_FINDER_INFO, AS_NAME, AS_RSRC,
                        BINHEX_BANNER, HostFolder, MacFile, MemoryFolder, OnDisk, VolumeFolder,
                        load_file)
-from ..memory import ADDRESS_MASK, from_mac, to_mac
+from ..memory import from_mac, to_mac
 from . import lowmem
 
 if TYPE_CHECKING:
@@ -1064,20 +1064,20 @@ class FileSystem:
     def _enqueue_vcb(self, vcb: int) -> None:
         m = self.mem
         m.w32(vcb, 0)
-        tail = m.r32(lowmem.VCBQHdr + 6) & ADDRESS_MASK
+        tail = m.r32(lowmem.VCBQHdr + 6) & m.system.addr_mask
         m.w32(tail if tail else lowmem.VCBQHdr + 2, vcb)
         m.w32(lowmem.VCBQHdr + 6, vcb)
 
     def _dequeue_vcb(self, vcb: int) -> None:
         m = self.mem
-        prev, at = 0, m.r32(lowmem.VCBQHdr + 2) & ADDRESS_MASK
+        prev, at = 0, m.r32(lowmem.VCBQHdr + 2) & m.system.addr_mask
         for _ in range(64):                 # as many as a queue gone round on itself has
             if not at:
                 return
-            after = m.r32(at) & ADDRESS_MASK
+            after = m.r32(at) & m.system.addr_mask
             if at == vcb:
                 m.w32(prev if prev else lowmem.VCBQHdr + 2, after)
-                if m.r32(lowmem.VCBQHdr + 6) & ADDRESS_MASK == vcb:
+                if m.r32(lowmem.VCBQHdr + 6) & m.system.addr_mask == vcb:
                     m.w32(lowmem.VCBQHdr + 6, prev)
                 m.w32(vcb, 0)
                 return

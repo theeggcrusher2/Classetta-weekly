@@ -16,10 +16,8 @@ from __future__ import annotations
 
 import struct
 
-from ..memory import ADDRESS_MASK
 from ..resfork import InvalidForkError, open_fork
 from ..toolbox.memmgr import memFullErr, memWZErr, noErr
-from ..toolbox.system import RAM_SIZE
 from .dispatch import trap
 
 paramErr = -50
@@ -42,7 +40,7 @@ def free_temp_memory(t) -> None:
 
 
 def _temp_op(t, h: int, err_p: int, op) -> None:
-    h &= ADDRESS_MASK
+    h &= t.mem.system.addr_mask
     heap = t.system.find_heap(h) if h in t.temp_handles else None
     if heap is None:
         t.w16(err_p, memWZErr)
@@ -69,7 +67,7 @@ def TempNewHandle(t, size, err_p):
 @trap
 def TempDisposeHandle(t, h, err_p):
     _temp_op(t, h, err_p, lambda heap, h: heap.dispose_handle(h))
-    t.temp_handles.discard(h & ADDRESS_MASK)
+    t.temp_handles.discard(h & t.mem.system.addr_mask)
 
 
 @trap
@@ -97,7 +95,7 @@ def TempFreeMem(t):
 
 @trap
 def TempTopMem(t):
-    return RAM_SIZE
+    return t.system.ram_size       # the top of temporary memory's room
 
 
 # =========================================================================
@@ -178,7 +176,7 @@ def GetProcessInformation(t, psn_p, info_p):
     if proc is None:
         return procNotFound
     mem, part = t.mem, proc.partition
-    name_p = mem.r32(info_p + 4) & ADDRESS_MASK
+    name_p = mem.r32(info_p + 4) & mem.system.addr_mask
     if name_p:
         t.set_str255(name_p, proc.name[:31])
     _set_psn(t, info_p + 8, proc)
@@ -190,7 +188,7 @@ def GetProcessInformation(t, psn_p, info_p):
                           (36, free), (40, 0), (44, kNoProcess), (48, proc.launch_ticks),
                           (52, 0)):
         mem.w32(info_p + offset, value)
-    spec = mem.r32(info_p + 56) & ADDRESS_MASK if mem.r32(info_p) >= INFO_LENGTH else 0
+    spec = mem.r32(info_p + 56) & mem.system.addr_mask if mem.r32(info_p) >= INFO_LENGTH else 0
     if spec and proc.app is not None:   # an FSSpec: the application's file, where it is
         node = t.system.files.node_for(proc.app)
         mem.w16(spec, node.volume.vref)

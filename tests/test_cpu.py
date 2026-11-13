@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,6 +22,8 @@ from macrt.memory import RAM
 from macrt.toolbox import lowmem
 from macrt.toolbox.events import tick_count, to_next_tick
 
+SYSTEM_24 = SimpleNamespace(mmu_32_bit=False, addr_mask=0xFFFFFF)
+
 CODE, COUNTER, TASK = 0x10000, 0x8000, 0x8100
 COUNT_TWICE = bytes.fromhex("5290"     # 1: addq.l #1,(a0)
                             "5280"     # addq.l #1,d0
@@ -29,7 +32,7 @@ NEVER = CODE + 0x100
 
 
 def machine():
-    mem = RAM(0x20000)
+    mem = RAM(SYSTEM_24, 0x20000)
     mem.write(CODE, COUNT_TWICE)
     mem.w16(TASK + 10, 1)               # its vblCount: it's counting down to run
     cpu = CPU(mem)
@@ -114,7 +117,7 @@ def test_a_cpu_dropped_unclosed_takes_its_clock_with_it():
     """As a test's often is: its clock's thread doesn't stay on, ticking
     for nothing and taking the interpreter from whatever runs after."""
     before = set(threading.enumerate())
-    cpu = CPU(RAM(0x1000))
+    cpu = CPU(RAM(SYSTEM_24, 0x1000))
     clock, = [t for t in threading.enumerate() if t not in before and t.name == "m68k clock"]
     del cpu
     gc.collect()
@@ -1023,7 +1026,7 @@ def cpu_at(cpu, pc):
 ])
 def test_the_exception_goes_back_past_the_instruction(code, length):
     from macrt.m68k.runtime import after_instruction
-    mem = RAM(0x2000)
+    mem = RAM(SYSTEM_24, 0x2000)
     mem.write(0x1000, bytes.fromhex(code))
     assert after_instruction(mem, 0x1000) == 0x1000 + length
 
@@ -1380,7 +1383,7 @@ def test_a_page_mapped_for_both_is_looked_through_again_where_it_changed():
 
 
 def test_flush_code_drops_what_the_core_has_translated():
-    mem = RAM(0x20000)
+    mem = RAM(SYSTEM_24, 0x20000)
     mem.write(CODE, bytes.fromhex("6100 00fe"))             # bsr SUB
     mem.write(CODE + 0x100, bytes.fromhex("7001 4e75"))     # SUB: moveq #1,d0; rts
     cpu = CPU(mem)
@@ -2101,9 +2104,11 @@ def test_what_a_loop_that_waits_for_a_tick_may_be_made_of(code, a0, only):
 STILL_RUNNING = """
 import sys, threading, time
 sys.path.insert(0, sys.argv[1])
+from types import SimpleNamespace
 from macrt.m68k.cpu import CPU
 from macrt.memory import RAM
-mem = RAM(0x20000)
+SYSTEM_24 = SimpleNamespace(mmu_32_bit=False, addr_mask=0xFFFFFF)
+mem = RAM(SYSTEM_24, 0x20000)
 mem.write(0x10000, bytes.fromhex("60fe"))       # bra.s *
 cpu = CPU(mem)
 cpu.pc, cpu.sp = 0x10000, 0x8000

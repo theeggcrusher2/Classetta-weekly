@@ -43,7 +43,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 from ..macfile import MacFile
-from ..memory import ADDRESS_MASK
 from ..resfork import (
     COMPRESSED_TAG, DecompressError, InvalidForkError, decompress, open_fork, resCompressed,
 )
@@ -189,7 +188,7 @@ class SegmentLoader:
         """LoadSeg: read the segment, lock it, and point its entries at it."""
         if seg in self.loaded:
             h, code, _ = self.loaded[seg]
-            if self.t.mem.r32(h) & 0xFFFFFF == code:
+            if self.t.mem.r32(h) & self.t.mem.system.addr_mask == code:
                 # still where it was, but perhaps unloaded since: locked
                 # again all the same, for a program can unload the very
                 # segment it's running in and load it again (Habadex)
@@ -230,17 +229,17 @@ class SegmentLoader:
         resources = t.process.resources
         patch = t.patches.get(GET_RESOURCE)
         if patch is not None:
-            h = t.call(patch, (("l", CODE), ("h", seg)), "p") & ADDRESS_MASK
+            h = t.call(patch, (("l", CODE), ("h", seg)), "p") & t.mem.system.addr_mask
         else:
             h = resources.GetResource("CODE", _code_id(seg))
-        if h and not t.mem.r32(h) & ADDRESS_MASK:
+        if h and not t.mem.r32(h) & t.mem.system.addr_mask:
             resources.LoadResource(h)
         return h
 
     def _load_elsewhere(self, seg: int, table: int) -> None:
         """LoadSeg into another A5 world's jump table."""
         held = self.elsewhere.get((table, seg))
-        if held is not None and self.t.mem.r32(held[0]) & 0xFFFFFF == held[1]:
+        if held is not None and self.t.mem.r32(held[0]) & self.t.mem.system.addr_mask == held[1]:
             h, _, size = held
             code = self._hold(h).deref(h)
             self.elsewhere[(table, seg)] = (h, code, size)
@@ -268,13 +267,13 @@ class SegmentLoader:
     def unload(self, routine: int) -> None:
         """UnloadSeg: the segment holding routine goes back to purgeable,
         its entries back to _LoadSeg."""
-        seg = self._segment_of(routine & 0xFFFFFF)
+        seg = self._segment_of(routine & self.t.mem.system.addr_mask)
         table = self.table
         if seg is not None:
             h, code, _ = self.loaded[seg]
         else:
             held = next(((key, v) for key, v in self.elsewhere.items()
-                         if v[1] <= routine & 0xFFFFFF < v[1] + v[2]), None)
+                         if v[1] <= routine & self.t.mem.system.addr_mask < v[1] + v[2]), None)
             if held is None:
                 return
             (table, seg), (h, code, _) = held
@@ -283,7 +282,7 @@ class SegmentLoader:
         for i in range(count):
             e = table + first + ENTRY * i
             if mem.r16(e + 2) == JMP_ABS_L and mem.r16(e) == seg:
-                offset = (mem.r32(e + 4) & 0xFFFFFF) - (code + 4)
+                offset = (mem.r32(e + 4) & mem.system.addr_mask) - (code + 4)
                 mem.w16(e, offset)
                 mem.w16(e + 2, MOVE_W_IMM_PUSH)
                 mem.w16(e + 4, seg)
@@ -315,9 +314,9 @@ class SegmentLoader:
         # the trap is the entry's last word; a program can call an entry
         # through an address with flags in its high byte, which a 68000
         # ignores (Macintosh Pascal does, from a master pointer)
-        e = (return_pc & ADDRESS_MASK) - 8
+        e = (return_pc & cpu.mask) - 8
         ours = self.table <= e < self.table + len(self.layout.jump_table)
-        a5 = cpu.a(5) & ADDRESS_MASK
+        a5 = cpu.a(5) & cpu.mask
         if not ours and a5 != self.a5 and self._entry_segment(e) == seg:
             self._load_elsewhere(seg, a5 + self.t.mem.r16(lowmem.CurJTOffset))
             if self.t.mem.r16(e + 2) == JMP_ABS_L:

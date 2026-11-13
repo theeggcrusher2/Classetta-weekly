@@ -7,7 +7,7 @@ other applications run.
 
 from __future__ import annotations
 
-from ..memory import ADDRESS_MASK, to_mac
+from ..memory import to_mac
 from ..toolbox import constants as k
 from ..toolbox import lowmem
 from ..toolbox.menus import MenuInfo, MenuItem, parse_menu_items
@@ -55,7 +55,7 @@ def InitProcMenu(t, mbar_id):
 
 def _app_mbdf(t) -> int:
     """The MBDF InitProcMenu named if it's the application's, else 0."""
-    h = t.process.world.r32(lowmem.MBDFHndl) & ADDRESS_MASK
+    h = t.process.world.r32(lowmem.MBDFHndl) & t.mem.system.addr_mask
     return h if h and t.system.defproc_id(h)[0] != "MBDF" else 0
 
 
@@ -348,7 +348,7 @@ def MenuSelect(t, pt):
             t.mem.w_rect(rp, where)
             t.menu_rect = rp
             try:
-                r = _call_mbdf(t, k.mbRect, 0, offset) & ADDRESS_MASK
+                r = _call_mbdf(t, k.mbRect, 0, offset) & t.mem.system.addr_mask
                 _call_mbdf(t, k.mbSave, offset, r or rp)
             finally:
                 t.menu_rect = 0
@@ -437,7 +437,7 @@ def SystemWDEF1(t, var, w, msg, param):
 def SystemMDEF0(t, msg, menu, rect_p, hit, item_p):
     """MDEF 0's code, for an application's own MDEF that calls it, as
     Theldrow's does once it has set the port's font."""
-    mdefs.system_mdef(t, msg, menu, rect_p & ADDRESS_MASK, hit, item_p & ADDRESS_MASK)
+    mdefs.system_mdef(t, msg, menu, rect_p & t.mem.system.addr_mask, hit, item_p & t.mem.system.addr_mask)
 
 
 @trap

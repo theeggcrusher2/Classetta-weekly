@@ -108,7 +108,6 @@ from PyQt6.QtWidgets import QApplication, QLabel
 
 from .demo import _screen_size, open_targets
 from .macfile import open_application
-from .memory import ADDRESS_MASK
 from .toolbox import dialogs, lowmem
 from .toolbox.constants import dialogKind
 from .toolbox.system import MODELS
@@ -335,7 +334,7 @@ def check_runs(data, base: Path) -> list[dict]:
         if entry.get("model") is None:
             entry["model"] = "plus"
         if entry["model"] not in MODELS:
-            raise ValueError(f"{where}: model is \"plus\", \"ii\" or \"iix\"")
+            raise ValueError(f"{where}: model is one of {', '.join(repr(m) for m in MODELS)}")
         for key, kind in (("wait", (int, float)), ("timeout", (int, float)),
                           ("memory", int), ("depth", int), ("row_bytes", int),
                           ("speed", (int, float))):
@@ -349,7 +348,7 @@ def check_runs(data, base: Path) -> list[dict]:
             raise ValueError(f"{where}: depth is 1, 2, 4, 8, 16 or 32")
         if entry.get("depth") not in (None, 1) and not MODELS[entry["model"]].color:
             raise ValueError(f"{where}: a Mac Plus's screen is black and white: "
-                             "depth needs model \"ii\" or \"iix\"")
+                             "depth needs a model with a colour screen")
         if entry.get("row_bytes") is not None and not row_bytes_ok(entry["row_bytes"]):
             raise ValueError(f"{where}: {ROW_BYTES}")
         try:
@@ -474,12 +473,12 @@ class Run:
         mem = proc.system.mem
         params = []
         for i in range(4):
-            h = proc.world.r32(lowmem.DAStrings + 4 * i) & ADDRESS_MASK
-            params.append(mem.r_pstr(mem.r32(h) & ADDRESS_MASK) if h and mem.r32(h) else b"")
+            h = proc.world.r32(lowmem.DAStrings + 4 * i) & mem.system.addr_mask
+            params.append(mem.r_pstr(mem.r32(h) & mem.system.addr_mask) if h and mem.r32(h) else b"")
         out = []
         for item in dialogs.items(mem, dialogs.Dialog(mem, rec.addr).items):
-            h = item.handle & ADDRESS_MASK
-            if item.type == statText and not item.hidden and h and mem.r32(h) & ADDRESS_MASK:
+            h = item.handle & mem.system.addr_mask
+            if item.type == statText and not item.hidden and h and mem.r32(h) & mem.system.addr_mask:
                 text = dialogs.substitute(proc.runner.tb.contents(h), params)
                 out.append(text.decode("mac_roman").replace("\r", "\n"))
         return out
@@ -1104,7 +1103,7 @@ def parse_args(argv=None):
         except ValueError as e:
             ap.error(str(e))
         if args.depth not in (None, 1) and not MODELS[args.model].color:
-            ap.error("a Mac Plus's screen is black and white: --depth needs --model ii or iix")
+            ap.error("a Mac Plus's screen is black and white: --depth needs a model with a colour screen")
         if args.row_bytes is not None and not row_bytes_ok(args.row_bytes):
             ap.error(f"--{ROW_BYTES}")
     if args.command == "run" and args.jobs < 1:

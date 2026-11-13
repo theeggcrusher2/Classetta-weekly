@@ -82,7 +82,6 @@ import wave
 from dataclasses import dataclass
 from operator import add
 
-from ..memory import ADDRESS_MASK
 from ..toolbox import lowmem
 from . import glue_devices
 from .hardware import HZ, vBufA, vBufB
@@ -212,7 +211,7 @@ class SoundDriver:
     def call(self, t, w: int) -> bool:
         """Do Device Manager call w, A0 its parameter block, if it's a
         Write, Control or KillIO for the Sound Driver."""
-        pb = t.cpu.a(0) & ADDRESS_MASK
+        pb = t.cpu.a(0) & t.mem.system.addr_mask
         if t.mem.r16s(pb + glue_devices.ioRefNum) != SOUND_DRIVER:
             return False
         n = w & 0xFF
@@ -230,7 +229,7 @@ class SoundDriver:
         m = t.mem
         m.w16(pb + glue_devices.ioTrap, w)
         m.w32(pb + ioActCount, 0)
-        buffer = m.r32(pb + ioBuffer) & ADDRESS_MASK
+        buffer = m.r32(pb + ioBuffer) & t.mem.system.addr_mask
         size = m.r32s(pb + ioReqCount)
         mode = m.r16s(buffer) if size >= 2 else None
         if mode not in (swMode, ffMode, ftMode) or mode != swMode and size < 6:
@@ -337,18 +336,18 @@ class SoundDriver:
     def _follow(self, m) -> None:
         """Take the sounds' parameter blocks from the DCE's queue, where a
         program may have put others."""
-        dce = m.r32(lowmem.SoundDCE) & ADDRESS_MASK
-        pb = m.r32(dce + glue_devices.dCtlQHead) & ADDRESS_MASK if dce else 0
+        dce = m.r32(lowmem.SoundDCE) & m.system.addr_mask
+        pb = m.r32(dce + glue_devices.dCtlQHead) & m.system.addr_mask if dce else 0
         for sound in self._sounds():
             if not pb:
                 break
             sound.pb = pb
-            pb = m.r32(pb + glue_devices.qLink) & ADDRESS_MASK
+            pb = m.r32(pb + glue_devices.qLink) & m.system.addr_mask
 
     def _link(self, m) -> None:
         """Put the sounds' parameter blocks in the DCE's queue, the one
         playing first."""
-        dce = m.r32(lowmem.SoundDCE) & ADDRESS_MASK
+        dce = m.r32(lowmem.SoundDCE) & m.system.addr_mask
         if not dce:
             return
         pbs = [s.pb for s in self._sounds()]
@@ -426,13 +425,13 @@ class SoundDriver:
                                                sound.position)[0] is None
 
     def _four_tone(self, m, sound: _Sound) -> tuple[bytes | None, bool]:
-        record = m.r32(lowmem.SoundPtr) & ADDRESS_MASK
+        record = m.r32(lowmem.SoundPtr) & m.system.addr_mask
         duration, *fields = struct.unpack(">h12I", m.read(record, FT_SIZE))
         if duration <= 0:
             return None, True
         tones = []
         for i in range(4):
-            at = fields[8 + i] & ADDRESS_MASK
+            at = fields[8 + i] & m.system.addr_mask
             tones.append((fields[2 * i], fields[2 * i + 1],
                           m.read(at, WAVE) if at else SILENT_WAVE))
         frame, phases = four_tone(tones)
@@ -555,7 +554,7 @@ class Speaker:
     def retrace(self) -> None:
         frames = []
         if self.on:
-            base = self.mem.r32(lowmem.SoundBase) & ADDRESS_MASK
+            base = self.mem.r32(lowmem.SoundBase) & self.mem.system.addr_mask
             samples = self.mem.read(base, 2 * FRAME)[0::2]
             if self._hook is not None:
                 self._watched(base, samples)
@@ -579,7 +578,7 @@ class Speaker:
     def fill(self, frame: bytes) -> None:
         """Put a frame in the sound buffer's high bytes, from where frames
         start."""
-        base = self.mem.r32(lowmem.SoundBase) & ADDRESS_MASK
+        base = self.mem.r32(lowmem.SoundBase) & self.mem.system.addr_mask
         words = bytearray(self.mem.read(base, 2 * FRAME))
         start = self.start
         words[2 * start::2] = frame[:FRAME - start]
@@ -695,8 +694,8 @@ class ASC:
             return taken[0]
         return bytes((a + b) >> 1 for a, b in zip(*taken))
 
-    def map(self, uc) -> None:
-        uc.mmio_map(ASC_BASE, ASC_SIZE, self._bus_read, None, self._bus_write, None)
+    def map(self, uc, base: int = ASC_BASE) -> None:
+        uc.mmio_map(base, ASC_SIZE, self._bus_read, None, self._bus_write, None)
 
     def _bus_read(self, uc, offset: int, size: int, _data) -> int:
         value = 0

@@ -20,7 +20,6 @@ from __future__ import annotations
 import logging
 import struct
 
-from ..memory import ADDRESS_MASK
 from ..toolbox import pict
 from ..toolbox.color import color_table
 from ..toolbox.gdevice import PIXMAP_FLAG, ROW_BYTES_MASK, PixMap, deref
@@ -208,7 +207,7 @@ def _add_pixmap(t, survey: Survey, h: int) -> int:
 
 def _add_rows(t, survey: Survey, base: int, row_bytes: int, bounds: Rect, depth: int,
               table, pixmap: bool, h_res: int = FIXED_72, v_res: int = FIXED_72) -> None:
-    base &= ADDRESS_MASK
+    base &= t.mem.system.addr_mask
     width, height = max(bounds.width, 0), max(bounds.height, 0)
     if (depth not in (1, 2, 4, 8, 16, 32) or not base or row_bytes * 8 < width * depth
             or base + row_bytes * height > t.mem.size):

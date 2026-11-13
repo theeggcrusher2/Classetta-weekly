@@ -8,7 +8,6 @@ import struct
 
 from macrt.m68k import glue_desk, glue_slots
 from macrt.m68k import glue_devices as dev
-from macrt.memory import ADDRESS_MASK
 from macrt.toolbox import lowmem
 from macrt.toolbox.gdevice import VIDEO_DRIVER, VIDEO_SLOT
 
@@ -90,7 +89,7 @@ def test_the_video_driver_has_a_slot_devices_entry(qapp):
     assert entry(processor(), VIDEO_DRIVER) == 0          # a Plus has none
     p = processor(model="ii")
     m = p.mem
-    dce = m.r32(entry(p, VIDEO_DRIVER)) & ADDRESS_MASK
+    dce = m.r32(entry(p, VIDEO_DRIVER)) & m.system.addr_mask
     assert m.r16s(dce + dev.dCtlRefNum) == VIDEO_DRIVER
     assert m.r16(dce + dev.dCtlFlags) & dev.dOpened
     assert m.r8(dce + dev.dCtlSlot) == VIDEO_SLOT

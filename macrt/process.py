@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Callable
 
 from .m68k import segload
 from .macfile import Folder, MacFile, is_control_panel
-from .memory import ADDRESS_MASK, BusError
+from .memory import BusError
 from .resfork import InvalidForkError, open_fork
 from .toolbox import lowmem
 from .toolbox.events import EventQueue, ProcessKilled, tick_count
@@ -256,9 +256,9 @@ class Process:
         """The first visible window but GhostWindow's, which Multiplan
         points at the window its formula bar is edited in: always in front
         of the sheet, never the active one."""
-        ghost = self.world.r32(lowmem.GhostWindow) & ADDRESS_MASK
+        ghost = self.world.r32(lowmem.GhostWindow) & self.system.addr_mask
         for w in self.windows:
-            if w.visible and w.addr & ADDRESS_MASK != ghost:
+            if w.visible and w.addr & self.system.addr_mask != ghost:
                 return w
         return None
 

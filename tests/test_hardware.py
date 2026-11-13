@@ -28,6 +28,8 @@ from macrt.toolbox.system import (CLASSIC_ALTERNATE, CLASSIC_SCREEN, PLUS_SCREEN
 from macrt.toolbox.types import Point, Rect
 from macrt.ui.keymap import key_message
 
+SYSTEM_24 = SimpleNamespace(mmu_32_bit=False, addr_mask=0xFFFFFF)
+
 CODE = 0x10000
 READ_VBUFB = bytes.fromhex("1039 00efe1fe"     # move.b $EFE1FE,d0
                            "4e71")             # nop
@@ -172,7 +174,7 @@ def test_vbufa_bit_7_is_high_as_no_serial_data_waits():
 
 
 def test_68k_code_reads_the_via_where_low_memory_says():
-    mem = RAM(0x20000)
+    mem = RAM(SYSTEM_24, 0x20000)
     mem.write(CODE, READ_VBUFB)
     cpu = CPU(mem)
     down = [True]
@@ -459,7 +461,7 @@ def test_while_the_clock_counts_the_iwm_shifts_the_disks_bits_in_from_where_its_
 
 
 def test_68k_code_reads_the_iwm_on_the_low_byte_of_the_bus():
-    mem = RAM(0x20000)
+    mem = RAM(SYSTEM_24, 0x20000)
     data = IWM_BASE + Q6_LOW * 512
     mem.write(CODE, bytes.fromhex(f"207c {data:08x}"             # movea.l #q6L,a0
                                   "1010"                        # move.b (a0),d0
@@ -483,7 +485,7 @@ def test_68k_code_sets_the_iwms_mode_and_reads_it_back_in_the_status():
     it writes the mode, the IWM's clock 7 MHz, at Q7 high, and reads it
     back in the status register.  With the motor on, what's written is
     for the disk."""
-    mem = RAM(0x20000)
+    mem = RAM(SYSTEM_24, 0x20000)
     mem.write(CODE, bytes.fromhex(f"207c {IWM_BASE:08x}"     # movea.l #iwm,a0
                                   "4a28 1000"               # tst.b $1000(a0): the motor off
                                   "4a28 1a00"               # tst.b $1a00(a0): Q6 high
@@ -507,7 +509,7 @@ def test_68k_code_sets_the_iwms_mode_and_reads_it_back_in_the_status():
 def test_there_is_no_test_rom_and_no_bus_error_looking_for_one():
     """Dark Castle looks for a test ROM at $F80030, as a Mac Plus's ROM
     does at $F80000."""
-    mem = RAM(0x20000)
+    mem = RAM(SYSTEM_24, 0x20000)
     mem.write(CODE, bytes.fromhex("207c 00f80030"     # movea.l #$F80030,a0
                                   "2010"              # move.l (a0),d0
                                   "2081"              # move.l d1,(a0)
@@ -734,7 +736,7 @@ def test_other_screens_are_at_the_top_of_ram(qapp):
 
 # -- the mouse and keyboard in low memory --------------------------------------
 def test_keylast_is_the_last_key_down_until_it_comes_up():
-    mem = RAM(0x2000)
+    mem = RAM(SYSTEM_24, 0x2000)
     keys = InputGlobals(mem)
     keys.key(0x2249, True)              # I
     assert mem.r16(lowmem.KeyLast) == 0x2249
@@ -771,7 +773,7 @@ def test_arrows_and_the_keypad_have_the_keyboards_own_codes(qapp):
 
 
 def test_the_mouse_and_its_button_are_in_low_memory():
-    mem = RAM(0x2000)
+    mem = RAM(SYSTEM_24, 0x2000)
     mouse = InputGlobals(mem)
     assert mem.r8(lowmem.MBState) == 0x80
     mouse.mouse(Point(100, 200), True)
@@ -783,7 +785,7 @@ def test_the_mouse_and_its_button_are_in_low_memory():
 def test_mtemp_counts_the_mouses_movement_up():
     """Flight Simulator clears MTemp and takes what it grows by for how far
     the mouse has moved."""
-    mem = RAM(0x2000)
+    mem = RAM(SYSTEM_24, 0x2000)
     mouse = InputGlobals(mem)
     mouse.mouse(Point(100, 200), False)
     mem.w32(lowmem.MTemp, 0)
@@ -796,7 +798,7 @@ def test_mtemp_counts_the_mouses_movement_up():
 def test_a_program_moves_the_mouse_by_rawmouse():
     """Crystal Quest hides the cursor, puts the mouse back in the middle of
     the screen each frame and steers by how far it's got from there."""
-    mem = RAM(0x2000)
+    mem = RAM(SYSTEM_24, 0x2000)
     mem.w8(lowmem.CrsrCouple, 0xFF)
     mouse = InputGlobals(mem)
     mouse.cursor(-1)                                        # HideCursor
@@ -822,7 +824,7 @@ def test_a_program_moves_the_mouse_by_rawmouse():
 def test_with_the_cursor_shown_the_mouse_is_back_under_the_pointer():
     """Pirates! moves the mouse with the cursor to be seen, and waits for
     the cursor's task to clear CrsrNew."""
-    mem = RAM(0x2000)
+    mem = RAM(SYSTEM_24, 0x2000)
     mem.w8(lowmem.CrsrCouple, 0xFF)
     mouse = InputGlobals(mem)
     mouse.mouse(Point(100, 200), False)
@@ -840,7 +842,7 @@ def test_the_mouse_a_program_has_moved_stays_on_the_screen():
     """Away from the pointer, the mouse stops at the screen's edge, and what
     the pointer moves past it is lost: the mouse comes back from the edge
     as soon as the pointer does, so the pointer can bring it anywhere."""
-    mem = RAM(0x2000)
+    mem = RAM(SYSTEM_24, 0x2000)
     mem.w8(lowmem.CrsrCouple, 0xFF)
     mouse = InputGlobals(mem, Rect(0, 0, 480, 640))
     mouse.cursor(-1)

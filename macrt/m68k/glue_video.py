@@ -36,7 +36,6 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
-from ..memory import ADDRESS_MASK
 from ..toolbox.color import luminance
 from ..toolbox.files import FileError
 from ..toolbox.gdevice import DEFAULT_MODE, DEPTH_MODES, GDevice, deref
@@ -97,7 +96,7 @@ def set_mode(t, mode: int, gray: bool | None = None) -> bool:
 # The driver's calls, from the File Manager's Control and Status
 # =========================================================================
 def _record(t, pb: int) -> int:
-    return t.mem.r32(pb + csParam) & ADDRESS_MASK
+    return t.mem.r32(pb + csParam) & t.mem.system.addr_mask
 
 
 def _page_info(t, p: int, mode: int | None = None) -> None:
@@ -137,7 +136,7 @@ def control(t, pb: int) -> None:
     elif code == 9:                                     # SetDefaultMode
         card.default_mode = m.r8(p)
     elif code == 4:                                     # SetGamma
-        _set_gamma(t, m.r32(p) & ADDRESS_MASK)
+        _set_gamma(t, m.r32(p) & m.system.addr_mask)
     elif code != 1:                                     # KillIO: nothing to do
         raise FileError(controlErr)                     # DirectSetEntries, on no direct mode
 
@@ -209,7 +208,7 @@ def _places(t, p: int) -> list[tuple[int, int]]:
     index it's for, csCount + 1 of them from csStart, or with csStart -1
     those their values name; ctSize + 1 the table's entries."""
     m = t.mem
-    specs, start, count = m.r32(p) & ADDRESS_MASK, m.r16s(p + 4), m.r16s(p + 6)
+    specs, start, count = m.r32(p) & t.mem.system.addr_mask, m.r16s(p + 4), m.r16s(p + 6)
     ct = _table(t)
     size = m.r16s(ct + 6) + 1 if ct else 0
     places = [(specs + 8 * i, m.r16s(specs + 8 * i) if start < 0 else start + i)
@@ -260,7 +259,7 @@ def _gray_page(t) -> None:
 # =========================================================================
 def _is_main(t, gdh: int) -> bool:
     devices = t.system.devices
-    return devices is not None and gdh & ADDRESS_MASK == devices.main & ADDRESS_MASK
+    return devices is not None and gdh & t.mem.system.addr_mask == devices.main & t.mem.system.addr_mask
 
 
 @trap

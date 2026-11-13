@@ -658,9 +658,9 @@ def test_quickdraw_draws_the_nearest_colour_in_the_screen_buffer(harness):
         assert w.backing.image.pixel(40, 30) | 0xFF000000 == 0xFF880088
 
 
-def test_depth_needs_a_mac_ii(capsys):
+def test_depth_needs_a_colour_model(capsys):
     assert parse_args(["--model", "ii", "--depth", "4", "x"]).depth == 4
     assert parse_args(["--depth", "1", "x"]).depth == 1
     with pytest.raises(SystemExit):
         parse_args(["--depth", "8", "x"])
-    assert "--depth needs --model ii" in capsys.readouterr().err
+    assert "depth needs a model with a colour screen" in capsys.readouterr().err

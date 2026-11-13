@@ -18,7 +18,6 @@ from __future__ import annotations
 import itertools
 from weakref import WeakKeyDictionary
 
-from ..memory import ADDRESS_MASK
 from ..toolbox.memmgr import noErr
 from .dispatch import raw, trap, unimpErr
 from .glue_process import _process, _processes, procNotFound
@@ -61,7 +60,7 @@ def port_key_of(rec: bytes) -> bytes:
 
 
 def _open(t, pb: int) -> int:
-    rec = t.mem.r32(pb + portName) & ADDRESS_MASK
+    rec = t.mem.r32(pb + portName) & t.mem.system.addr_mask
     if not rec or not t.mem.r8(rec + 2):
         return badPortNameErr
     key = port_key(t, rec)
@@ -86,7 +85,7 @@ def PPC(t, word):
     one is done by the time the trap returns, and then its completion
     routine is called."""
     cpu = t.cpu
-    pb, selector = cpu.a(0) & ADDRESS_MASK, cpu.d(0) & 0xFFFF
+    pb, selector = cpu.a(0) & cpu.mask, cpu.d(0) & 0xFFFF
     if selector == 0:                       # PPCInit, which takes no parameter block
         cpu.set_d(0, noErr)
         return
@@ -100,7 +99,7 @@ def PPC(t, word):
         t.unimplemented(NAMES.get(selector, f"PPC selector {selector}"), word)
         err = unimpErr
     t.mem.w16(pb + ioResult, err & 0xFFFF)
-    completion = t.mem.r32(pb + ioCompletion) & ADDRESS_MASK if word & 0x400 else 0
+    completion = t.mem.r32(pb + ioCompletion) & cpu.mask if word & 0x400 else 0
     if completion:
         cpu.set_a(0, pb)
         cpu.set_d(0, err & 0xFFFFFFFF)

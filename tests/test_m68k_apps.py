@@ -38,6 +38,8 @@ from apps.build import LOCKED_PRELOAD, code_resources
 from builders import ditl
 from conftest import Recorder
 
+SYSTEM_24 = SimpleNamespace(mmu_32_bit=False, addr_mask=0xFFFFFF)
+
 APPS = Path(__file__).parent / "apps"
 CLICKS = -236               # hello.s's click count, below A5
 # Tests that measure an application thread's own processor time, from this one.
@@ -1016,12 +1018,13 @@ def test_a_late_retrace_makes_up_for_the_ticks_it_missed(monkeypatch):
     interrupts masked or another application's turn, up to MAX_RETRACES;
     after a retrace that left nothing counting down, just once, so that a
     task installed since counts from then.  A longer gap counts once."""
-    mem, task = RAM(0x10000), 0x1000
+    mem, task = RAM(SYSTEM_24, 0x10000), 0x1000
     mem.w32(lowmem.VBLQueue + 2, task)
     mem.w16(task + runtime.VBL_COUNT, 1000)
     clock = SimpleNamespace(now=5000)
     monkeypatch.setattr(runtime, "tick_count", lambda: clock.now)
-    cpu = SimpleNamespace(mem=mem, sr=0x2000, context=lambda: None, restore=lambda ctx: None,
+    cpu = SimpleNamespace(mem=mem, mask=SYSTEM_24.addr_mask, sr=0x2000, context=lambda: None,
+                          restore=lambda ctx: None,
                           sound_waiting=lambda: False)
     cpu.vbl_counting = lambda: CPU.vbl_counting(cpu)
     quiet = SimpleNamespace(retrace=lambda *args: None)

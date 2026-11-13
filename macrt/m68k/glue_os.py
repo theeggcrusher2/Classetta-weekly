@@ -12,7 +12,7 @@ import sys
 import time
 
 from ..macfile import MacFile
-from ..memory import ADDRESS_MASK, from_mac
+from ..memory import from_mac
 from ..process import Process, size_resource
 from ..toolbox import lowmem, script
 from ..toolbox.constants import activateEvt, event_mask, kHighLevelEvent, osEvt, updateEvt
@@ -183,7 +183,7 @@ def HGetState(t, h):
     """nilHandleErr for an empty handle, as HLock gives: Museum Madness
     reads a picture in again when HGetState says that of its handle, and
     otherwise draws what the handle's block holds."""
-    if not h or not t.mem.r32(h) & ADDRESS_MASK:
+    if not h or not t.mem.r32(h) & t.mem.system.addr_mask:
         t.set_mem_err(nilHandleErr)
         return 0
     t.set_mem_err(noErr)
@@ -228,7 +228,7 @@ def InitZone(t, pb):
     """A zone from the parameter block's startPtr to its limitPtr, made
     the current zone."""
     start, limit, masters, grow_zone = struct.unpack(">IIHI", t.mem.read(pb, 14))
-    start, limit = start & ADDRESS_MASK, limit & ADDRESS_MASK
+    start, limit = start & t.mem.system.addr_mask, limit & t.mem.system.addr_mask
     if limit - start < ZONE_HEADER + MIN_BLOCK + 8 + 4 * masters:   # no room for anything
         t.set_mem_err(memFullErr)
         return
@@ -255,7 +255,7 @@ def SetApplLimit(t, p):
     pointer, before MaxApplZone).  Below where the heap already ends is
     too low (memFullErr), though ApplLimit still says what was asked for."""
     proc = t.process
-    p = min(p & ADDRESS_MASK, (proc.partition.stack_base - t.mem.r32(lowmem.DefltStack)) & ~3)
+    p = min(p & t.mem.system.addr_mask, (proc.partition.stack_base - t.mem.r32(lowmem.DefltStack)) & ~3)
     proc.world.w32(lowmem.ApplLimit, p)
     proc.heap.set_limit(p)
     t.set_mem_err(noErr if p >= proc.heap.end else memFullErr)
@@ -514,6 +514,16 @@ def trap_address(t, key: int) -> int:
 
 
 @trap
+def SwapMMUMode(t, mode):
+    """QuickDraw will call this before drawing, when in 24 bit mode in order
+    to have access to the full NuBus address space for graphics cards.
+    Classetta does not need this as it does not draw graphics this way
+    so the machine just returns the current value of MMU32Bit. That
+    seems to keep everything happy."""
+    return 0, t.mem.r8(lowmem.MMU32Bit)
+
+
+@trap
 def GetTrapAddress(t, num, new, toolbox):
     key = _trap_key(num, new, toolbox)
     addr = trap_address(t, key)
@@ -567,9 +577,9 @@ def gestalt_table(t) -> dict[int, int]:
         "qdrw": 7 if model.color else 0,
         "mach": model.gestalt,
         "romv": model.rom,
-        "ram ": RAM_SIZE,
-        "lram": RAM_SIZE,
-        "addr": 0,                  # 24-bit
+        "ram ": t.system.ram_size,
+        "lram": t.system.ram_size,
+        "addr": 0x80000001 if model.mmu_32_bit else 0,
         "vm  ": 0,
         # the Sound Manager's: SndPlayDoubleBuffer (bit 10), and channels
         # played together (gestaltMultiChannels, bit 11), as Lucy's colour
@@ -748,7 +758,7 @@ def NMInstall(t, rec):
         return nmTypErr
     proc = t.process
     proc.notifications.add(rec)
-    p = t.mem.r32(rec + NM_STR) & ADDRESS_MASK
+    p = t.mem.r32(rec + NM_STR) & t.mem.system.addr_mask
     notify = getattr(t.tb._d, "notify", None) if t.tb is not None else None
     if p and notify is not None:
         notify(proc.name, t.str255(p), lambda: proc.responses_due.append(rec))
@@ -790,14 +800,14 @@ def NMRemove(t, rec):
 @trap
 def ShutDwnInstall(t, proc, flags):
     procs = t.process.shutdown_procs
-    proc &= ADDRESS_MASK
+    proc &= t.mem.system.addr_mask
     procs[proc] = procs.get(proc, 0) | flags & 0xF
 
 
 @trap
 def ShutDwnRemove(t, proc):
     """It's removed at every point it was installed for."""
-    t.process.shutdown_procs.pop(proc & ADDRESS_MASK, None)
+    t.process.shutdown_procs.pop(proc & t.mem.system.addr_mask, None)
 
 
 # =========================================================================
@@ -849,17 +859,7 @@ def Microseconds(t, word):
 
 @trap
 def StripAddress(t, addr):
-    return addr & 0x00FFFFFF
-
-
-@trap
-def SwapMMUMode(t, mode):
-    """D0's low byte: the addressing mode wanted, 1 for 32-bit; back in
-    D0, the mode there was, the rest of D0 clear: Prince of Persia 2's
-    sprite code goes on counting a row's pixels in D0's low word.  macrt's
-    addresses are all 24-bit ones, the screen's too, so it stays in
-    24-bit mode."""
-    return None, t.mem.r8(lowmem.MMU32Bit)
+    return addr & t.system.addr_mask
 
 
 # =========================================================================
@@ -1135,7 +1135,7 @@ def SysError(t, word):
     t.mem.w16(lowmem.DSErrCode, error_id & 0xFFFF)
     if error_id < 0 or error_id == dsReinsert:
         return
-    t.system_error(error_id, f"SysError at ${t.cpu.pc - 2 & ADDRESS_MASK:06X}")
+    t.system_error(error_id, f"SysError at {t.mem.addr_str(t.cpu.pc - 2)}")
 
 
 @raw(0xA9F2)
@@ -1147,9 +1147,9 @@ def Launch(t, word):
     sizes back.  The configuration is the page option, for CurPageOption:
     Dark Castle asks for the alternate screen with it.  Unless
     launchContinue is set, this application quits for it."""
-    mem, pb = t.mem, t.cpu.a(0) & ADDRESS_MASK
+    mem, pb = t.mem, t.cpu.a(0) & t.mem.system.addr_mask
     if mem.r16(pb + 6) == LC:
-        spec = mem.r32(pb + 16) & ADDRESS_MASK
+        spec = mem.r32(pb + 16) & mem.system.addr_mask
         app = _app_at(t, spec) if spec else None
         if app is not None:
             preferred, minimum = size_resource(app) or (DEFAULT_PARTITION, DEFAULT_PARTITION)
@@ -1161,7 +1161,7 @@ def Launch(t, word):
             mem.w32(pb + 20, 0)
             mem.w32(pb + 24, proc.serial_number)
     else:
-        name = t.str255(mem.r32(pb) & ADDRESS_MASK)
+        name = t.str255(mem.r32(pb) & mem.system.addr_mask)
         _start(t, _app_named(t, name), mem.r16(pb + 4), 0, _finder_information(t))
 
 
@@ -1208,7 +1208,7 @@ def _finder_information(t) -> bytes | None:
     Macintosh II, the Segment Loader), so a program that launches another
     with documents to open puts them there first.  Cipher names itself,
     a program for PShell, and launches PShell to run it."""
-    h, heap = t.process.world.r32(lowmem.AppParmHandle) & ADDRESS_MASK, t.process.heap
+    h, heap = t.process.world.r32(lowmem.AppParmHandle) & t.mem.system.addr_mask, t.process.heap
     if not heap.is_handle(h) or heap.is_empty(h) or heap.handle_size(h) < 4:
         return None
     return t.mem.read(heap.deref(h), heap.handle_size(h))
@@ -1281,7 +1281,7 @@ def MethodDispatch(t, word):
     them; on a 64K ROM it uses its own copy of the same code."""
     cpu, m = t.cpu, t.mem
     table = cpu.pc
-    cls = m.r16(m.r32(m.r32(cpu.sp + 4) & ADDRESS_MASK) & ADDRESS_MASK)
+    cls = m.r16(m.r32(m.r32(cpu.sp + 4) & cpu.mask) & cpu.mask)
     count = m.r16(table)
     first = entry = table + 2
 
@@ -1303,11 +1303,11 @@ def MethodDispatch(t, word):
     if not found:
         m.w16(entry, cls)
         entry, count, found = search(entry, count, True)
-        classes = m.r32(m.r32(lowmem.ClassTable) & ADDRESS_MASK) & ADDRESS_MASK
+        classes = m.r32(m.r32(lowmem.ClassTable) & cpu.mask) & cpu.mask
         for _ in range(0x8000):         # as many classes as there can be
             if found:
                 break
-            cls = m.r16(classes + _signed16(cls) & ADDRESS_MASK)
+            cls = m.r16(classes + _signed16(cls) & cpu.mask)
             if not cls:
                 break
             entry, count, found = search(entry, count, False)
@@ -1316,7 +1316,7 @@ def MethodDispatch(t, word):
         else:
             m.w32(first, 0)
             cpu.set_d(0, 0)
-            cpu.pc = m.r32(lowmem.MethodNotFound) & ADDRESS_MASK
+            cpu.pc = m.r32(lowmem.MethodNotFound) & cpu.mask
         cpu.set_d(1, cpu.d(1) & ~0xFFFF | count)
         cpu.set_d(2, first)
     cpu.set_a(0, entry)
@@ -1324,7 +1324,7 @@ def MethodDispatch(t, word):
         offset = m.r16(entry + 2)
         cpu.set_d(0, cpu.d(0) & ~0xFFFF | offset & ~1)
         base = entry + 2 if offset & 1 else cpu.a(5)
-        cpu.pc = base + _signed16(offset & ~1) & ADDRESS_MASK
+        cpu.pc = base + _signed16(offset & ~1) & cpu.mask
 
 
 def _signed16(v: int) -> int:

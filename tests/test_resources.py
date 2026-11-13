@@ -2,6 +2,7 @@
 templates, and the Toolbox calls built on them."""
 
 import struct
+from types import SimpleNamespace
 
 import pytest
 from guest import Guest
@@ -36,6 +37,8 @@ from macrt.toolbox.windows import WindowRecord
 from builders import ditl_item, menu, pstr, size_res, wind
 from conftest import Recorder
 from test_dialogs import NoDisplay
+
+SYSTEM_24 = SimpleNamespace(mmu_32_bit=False, addr_mask=0xFFFFFF)
 
 
 APP_FORK = build_fork([
@@ -91,7 +94,7 @@ def contents(system, h):
 
 # -- purging ----------------------------------------------------------------
 def test_purgeable_blocks_go_when_space_runs_out():
-    heap = Heap(RAM(0x10000), 0x1000, 0x9000)
+    heap = Heap(RAM(SYSTEM_24, 0x10000), 0x1000, 0x9000)
     keep = heap.new_handle(0x1000)
     gone = heap.new_handle(0x1000)
     pinned = heap.new_handle(0x1000)
@@ -106,7 +109,7 @@ def test_purgeable_blocks_go_when_space_runs_out():
 
 
 def test_empty_and_realloc_handle():
-    heap = Heap(RAM(0x10000), 0x1000, 0x9000)
+    heap = Heap(RAM(SYSTEM_24, 0x10000), 0x1000, 0x9000)
     h = heap.new_handle(100)
     heap.empty_handle(h)
     assert heap.is_empty(h) and heap.handle_size(h) == 0
@@ -118,7 +121,7 @@ def test_empty_and_realloc_handle():
 
 
 def test_purging_never_takes_the_block_being_grown():
-    heap = Heap(RAM(0x10000), 0x1000, 0x5000)
+    heap = Heap(RAM(SYSTEM_24, 0x10000), 0x1000, 0x5000)
     h = heap.new_handle(0x800)
     heap.set_purgeable(h)
     heap.new_ptr(heap.max_block() - 0x10)

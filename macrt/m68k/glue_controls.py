@@ -20,7 +20,7 @@ from contextlib import contextmanager
 
 from PyQt6.QtGui import QPainterPath
 
-from ..memory import ADDRESS_MASK, to_mac
+from ..memory import to_mac
 from ..toolbox import constants as k
 from ..toolbox import controls, lowmem
 from ..toolbox.controls import TITLE, Control
@@ -42,22 +42,22 @@ OUTSIDE_SLOP = Point(-0x8000, -0x8000)
 # =========================================================================
 def _ctl(t, h: int) -> Control | None:
     """The control a ControlHandle is, None for NIL or an empty handle."""
-    h &= ADDRESS_MASK
-    if not h or not t.mem.r32(h) & ADDRESS_MASK:
+    h &= t.mem.system.addr_mask
+    if not h or not t.mem.r32(h) & t.mem.system.addr_mask:
         return None
     return Control(t.mem, h)
 
 
 def controls_of(t, w) -> list[Control]:
     """A window's controls, in list order (newest first)."""
-    out, h, seen = [], w.control_list & ADDRESS_MASK, set()
+    out, h, seen = [], w.control_list & t.mem.system.addr_mask, set()
     while h and h not in seen:
         seen.add(h)
         c = _ctl(t, h)
         if c is None:
             break
         out.append(c)
-        h = c.next_control & ADDRESS_MASK
+        h = c.next_control & t.mem.system.addr_mask
     return out
 
 
@@ -67,22 +67,22 @@ def _proc_id(t, c: Control) -> int:
     so its "ID" is -1: never a standard one.  It's a CDEF in one of its
     files, found before the System's with the same ID (Flash 2's CDEF 0
     draws its buttons), or code it put there itself (Excel does)."""
-    kind, def_id = t.system.defproc_id(c.def_proc & ADDRESS_MASK)
+    kind, def_id = t.system.defproc_id(c.def_proc & t.mem.system.addr_mask)
     return (def_id if kind == "CDEF" else -1) << 4 | c.variation
 
 
 def _entry(t, c: Control) -> int:
     """Where a 68k CDEF starts; 0 if there's no code (no System file)."""
-    h = c.def_proc & ADDRESS_MASK
-    p = t.mem.r32(h) & ADDRESS_MASK
+    h = c.def_proc & t.mem.system.addr_mask
+    p = t.mem.r32(h) & t.mem.system.addr_mask
     if not p:
         t.process.resources.LoadResource(h)
-        p = t.mem.r32(h) & ADDRESS_MASK
+        p = t.mem.r32(h) & t.mem.system.addr_mask
     return p if p and t.mem.r16(p) != RTS else 0
 
 
 def _the_port_var(t) -> int:
-    return t.mem.r32(t.process.partition.a5) & ADDRESS_MASK
+    return t.mem.r32(t.process.partition.a5) & t.mem.system.addr_mask
 
 
 # =========================================================================
@@ -137,7 +137,7 @@ def _standard(t, c: Control, proc_id: int, msg: int, param: int) -> int:
     elif msg in (k.calcCRgns, k.calcCntlRgn, k.calcThumbRgn):
         thumb = msg == k.calcThumbRgn or (msg == k.calcCRgns and param & 0x80000000)
         r = controls.Geometry(c).thumb if thumb and proc_id >> 4 == 1 else c.rect
-        rgn = param & ADDRESS_MASK
+        rgn = param & t.mem.system.addr_mask
         set_rect_rgn(t.system.heap_of(rgn), rgn, r or Rect(0, 0, 0, 0))
     return 0
 
@@ -269,11 +269,11 @@ def _unlink(t, c: Control) -> None:
     w = t.window(c.owner)
     if w is None:
         return
-    if w.control_list & ADDRESS_MASK == c.handle:
+    if w.control_list & t.mem.system.addr_mask == c.handle:
         w.control_list = c.next_control
         return
     for other in controls_of(t, w):
-        if other.next_control & ADDRESS_MASK == c.handle:
+        if other.next_control & t.mem.system.addr_mask == c.handle:
             other.next_control = c.next_control
             return
 
@@ -462,7 +462,7 @@ def drag_outline(t, port, start: Point, outline: Region, limit: Rect, slop: Rect
                 if now != OUTSIDE_SLOP:
                     _ghost(t, port, outline.offset(now.h, now.v), pat)
                 moved = now
-            for proc in (action, t.mem.r32(lowmem.DragHook) & ADDRESS_MASK):
+            for proc in (action, t.mem.r32(lowmem.DragHook) & t.mem.system.addr_mask):
                 if proc:
                     t.call(proc)
             if not t.tb.StillDown():

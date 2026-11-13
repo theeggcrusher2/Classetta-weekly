@@ -22,6 +22,8 @@ from macrt.toolbox.types import Point, Rect
 from macrt.toolbox.windows import WindowKind, describe_proc
 from macrt.ui import theme
 
+SYSTEM_24 = SimpleNamespace(mmu_32_bit=False, addr_mask=0xFFFFFF)
+
 
 def test_rect_basics():
     r = Rect.from_xywh(10, 20, 100, 50)
@@ -167,7 +169,7 @@ def test_every_signature_takes_what_its_selector_says():
 def test_pascal_arguments_come_off_the_stack_in_declaration_order():
     """The last pushed is at the top of the stack; a byte is in its word's
     high byte; a Point is its v, then its h."""
-    mem = RAM(0x1000)
+    mem = RAM(SYSTEM_24, 0x1000)
     sp = 0x800
     mem.w32(sp, 0xABCDEF)               # p
     mem.w32(sp + 4, -2)                 # l

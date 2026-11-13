@@ -1,22 +1,36 @@
 """
-Guest memory: the Mac's RAM as one big-endian byte array, and typed views
-of the records that live in it.
+memory.py: the Mac's RAM as a big-endian byte array, with annotated views
+of the records stored in it.
 
-Everything a Mac program can see lives here: low-memory globals, heaps,
-window and menu records.  Python classes such as WindowRecord are views.
-They hold an address and read and write their fields in place, so a 68k
-program that pokes a field and the Toolbox that reads it agree.
+Everything the Mac program sees is located in here: low-memory globals,
+the heap, and window/menu records.
 
-Addresses are 24-bit, as on a 68000: the top byte is ignored.  That is
-what lets the Memory Manager keep flags in a master pointer's high byte.
+Python classes such as WindowRecord are views that use this as a backing
+store. They contain a reference to an address inside the Mac's memory,
+and their variables are read from / written to the Mac's memory, so Classetta
+is fully compatible with Mac apps that write directly to such structures
+without going via the Toolbox (a bit naughty, but quite common).
 
-The 68k CPU (macrt.m68k) runs on this same byte array.  It caches code it
-has translated, so writes made from Python -- a segment loaded, a jump
-table entry patched -- are noted for it to drop before it runs: by page,
-and in each page, from the first byte written to the last.
+When in 24-bit mode, addresses are 24-bit: the top byte is masked off.
+$00112233 is the same memory address as $99112233, but for clarity we'll
+output it as just $112233.
 
-A range of addresses may be another way to some of the memory under it, as
-a Mac Plus's RAM repeats through its 4 MB of addresses (see RAM.mirror).
+In 24 bit mode, the Memory Manager kept flags in a master pointer's high
+byte. This was a "clever" trick to save a bit of RAM, but it backfired
+when 32 bit mode came into existance to allow Macs to have >8MB of RAM,
+as apps (and Apple's own Toolbox code) sometimes messed with these
+values directly - only now they were part of the address. We try to retain
+compatibility with this for very old apps that rely on it.
+
+Some machines with smaller amounts of RAM than the maximum may not decode
+all address lines i.e. multiple copies of memory will be "mirrored" throughout
+the address space. We allow for this on the Mac Plus.
+
+In 32-bit mode, the full pointer is used, and no such tricks are employed.
+
+The emulated M68k CPU (macrt.m68k) runs using this byte array for RAM.
+It makes use of JIT translation for speed, so when we write any code to
+the ROM, we must ensure that page is invalidated in the translation cache.
 """
 
 from __future__ import annotations
@@ -25,8 +39,6 @@ import struct
 from typing import Any, Callable, NamedTuple
 
 from .toolbox.types import Point, Rect
-
-ADDRESS_MASK = 0x00FFFFFF
 
 
 class BusError(Exception):
@@ -37,7 +49,8 @@ PAGE_SHIFT = 12
 
 
 class RAM:
-    def __init__(self, size: int):
+    def __init__(self, system, size: int):
+        self.system = system
         self.size = size
         self._b = bytearray(size)
         self._v = memoryview(self._b)   # to copy from without copying twice
@@ -46,6 +59,14 @@ class RAM:
         self.dirty: dict[int, list[int]] = {}
         self.mirror_lo = self.mirror_hi = size      # none, until mirror()
         self.mirror_by = 0
+
+        mask = self.addr_mask
+        width = 8 if mask == 0xFFFFFFFF else 6
+        self.addr_str = lambda value: f"${(value & mask):0{width}X}"
+
+    @property
+    def addr_mask(self) -> int:
+        return self.system.addr_mask
 
     def mirror(self, lo: int, hi: int, to: int) -> None:
         """Make the addresses from lo to hi another way to the memory from
@@ -56,25 +77,25 @@ class RAM:
 
     def physical(self, addr: int) -> int:
         """Where in the bytes an address is."""
-        a = addr & ADDRESS_MASK
+        a = addr & self.system.addr_mask
         return a - self.mirror_by if self.mirror_lo <= a < self.mirror_hi else a
 
     def _at(self, addr: int, n: int) -> int:
-        a = addr & ADDRESS_MASK
+        a = addr & self.system.addr_mask
         if self.mirror_lo <= a < self.mirror_hi:
             a -= self.mirror_by
         if a + n > self.size:
-            raise BusError(f"access to ${a:06X} is outside RAM")
+            raise BusError(f"access to {self.addr_str(a)} is outside RAM")
         return a
 
     def _wat(self, addr: int, n: int) -> int:
         """_at for a write: note what it writes."""
-        a = addr & ADDRESS_MASK
+        a = addr & self.system.addr_mask
         if self.mirror_lo <= a < self.mirror_hi:
             a -= self.mirror_by
         end = a + n
         if end > self.size:
-            raise BusError(f"access to ${a:06X} is outside RAM")
+            raise BusError(f"access to {self.addr_str(a)} is outside RAM")
         if n:
             first, last = a >> PAGE_SHIFT, (end - 1) >> PAGE_SHIFT
             if first == last:

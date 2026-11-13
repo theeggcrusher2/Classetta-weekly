@@ -24,8 +24,10 @@ import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from unicorn.m68k_const import UC_CPU_M68K_M68020, UC_CPU_M68K_M68030
+
 from ..macfile import MacFile, finder_beside, fonts_beside
-from ..memory import ADDRESS_MASK, RAM, from_mac, to_mac
+from ..memory import RAM, from_mac, to_mac
 from ..resfork import (InvalidForkError, build_fork, open_fork, resCompressed, resLocked,
                        resSysHeap, restype)
 from . import lowmem, printing, sysres
@@ -45,7 +47,20 @@ from .qdraw import FAMILIES, MONO
 from .quickdraw import QD_GLOBALS_SIZE, BitMap, GrafPort, init_qd_globals, new_rgn
 from .types import Rect
 
+# 8MB of RAM for 24 bit machines
+# This was the usual maximum for a 24 bit machine, although since the
+# address space was 16MB in total, a few Macs allowed a little more -
+# (LC/LCII/Classic II and Color Classic: 10MB,
+# non-backlit Mac Portable: 9MB.)
 RAM_SIZE = 8 << 20
+
+# For 32 bit machines, 128MB of RAM, as that was the
+# maximum for a number of them. RAM will span from $00000000 to $08000000
+RAM32_SIZE = 128 << 20
+
+ROM32_BASE = 0xFFC00000         # a IIci's ROMBase
+ROM32_SLACK = 0x1000            # room above the ROM page to mirror into
+ROM32_END = 0x100000000         # the top of the address space
 # Over the top of RAM, where a Mac II's is with 24-bit addresses: a page of
 # ROM, with the model's version at ROMBase + 8.  ROM85 says whether it has
 # Color QuickDraw: a Mac II's does.  What the System leaves in the exception
@@ -160,16 +175,106 @@ class Model:
     # bits 0-8 of the word, bit 9 being "reserved for future use" (Inside
     # Macintosh I and IV, Using Assembly Language).
     toolbox_traps: int = 1024
+    # Whether to use 32 bit addressing or not.
+    mmu_32_bit: bool = False
+    # Which core unicorn runs.  macrt answers for a 68000 with a 68020's
+    # instructions either way; a model that claims a 68030 gets the 68030
+    # core, which is the same translator with its own instructions.
+    cpu_core: int = UC_CPU_M68K_M68020
 
 
 MODELS = {
-    "plus": Model("Macintosh Plus", 0, 0, gestalt=4, environs=2, rom=0x0075, keyboard=3,
-                  hardware=0x91, toolbox_traps=512),
-    "ii": Model("Macintosh II", 2, 1, gestalt=6, environs=4, rom=0x0178, keyboard=5,
-                hardware=0x9B, color=True, slots=True, adb=True),
-    "iix": Model("Macintosh IIx", 3, 2, gestalt=7, environs=5, rom=0x0178, keyboard=5,
-                 hardware=0x9B, color=True, slots=True, adb=True),
+    "plus": Model(
+        name="Macintosh Plus",
+        cpu=0, # 68000
+        fpu=0, # No FPU
+        gestalt=4,
+        environs=2,
+        rom=0x0075,
+        keyboard=3,
+        hardware=0x91,
+        toolbox_traps=512
+    ),
+    "ii": Model(
+        "Macintosh II",
+        cpu=2, # 68020
+        fpu=1, # 68881
+        gestalt=6,
+        environs=4,
+        rom=0x0178,
+        keyboard=5,
+        hardware=0x9B,
+        color=True,
+        slots=True,
+        adb=True
+    ),
+    "iix": Model(
+        "Macintosh IIx",
+        cpu=3, # 68030
+        fpu=2, # 68882
+        gestalt=7,
+        environs=5,
+        rom=0x0178,
+        keyboard=5,
+        hardware=0x9B,
+        color=True,
+        slots=True,
+        adb=True
+    ),
+    "iici": Model(
+        "Macintosh IIci",
+        cpu=3, # 68030
+        fpu=2, # 68882
+        gestalt=19,
+        environs=19,
+        rom=0x0178,
+        keyboard=5,
+        hardware=0x9B,
+        color=True,
+        slots=True,
+        adb=True,
+        mmu_32_bit=True,
+        cpu_core=UC_CPU_M68K_M68030
+    ),
 }
+
+
+@dataclass(frozen=True)
+class DeviceMap:
+    """Where a machine's chips answer, and the pages around them."""
+
+    via: int
+    via_window: tuple[int, int]
+    iwm: int
+    iwm_window: tuple[int, int]
+    asc: int
+    scc_a_data: int
+
+
+# A 24-bit Mac's chips, and macrt's own place for the ASC above the ROM's
+# empty space (a Mac Plus has neither ASC nor SCC).
+CHIPS_24 = DeviceMap(
+    via=0xEFE1FE,
+    via_window=(0xEFE000, 0xF00000),
+    iwm=0xDFE1FF,
+    iwm_window=(0xDFE000, 0xE00000),
+    asc=0xC00000,
+    scc_a_data=0x9FFFFE
+)
+
+# The chip map for a 32 bit Mac, inspired by the Mac IIci.
+CHIPS_32 = DeviceMap(
+    via=0x50F00000,
+    via_window=(0x50F00000, 0x50F02000),
+    iwm=0x50F1C000,
+    iwm_window=(0x50F1C000, 0x50F1E000),
+    asc=0x50F18000,
+    scc_a_data=0x50F10004
+)
+
+
+def device_map(model: Model) -> DeviceMap:
+    return CHIPS_32 if model.mmu_32_bit else CHIPS_24
 
 RTS = 0x4E75
 VBL_TASK_SIZE = 14
@@ -267,6 +372,16 @@ class System:
         self.speed = speed
         self.sound = list(sound)
         self.model = MODELS[model]
+        # Whether addresses are whole: a 24-bit Mac ignores the top byte,
+        # so the mask strips it.  RAM and the heaps take their copy from
+        # here, so this must be set before the RAM is made.
+        self.mmu_32_bit = self.model.mmu_32_bit
+        self.addr_mask = 0xFFFFFFFF if self.mmu_32_bit else 0xFFFFFF
+        # 32-bit addressing: RAM to MemTop, the ROM's page over the top of
+        # the address space, and the devices in the slot space between.
+        self.ram_size = RAM32_SIZE if self.model.mmu_32_bit else RAM_SIZE
+        self.chips = device_map(self.model)
+        self.rom_base = ROM32_BASE if self.model.mmu_32_bit else self.ram_size
         self.version = system_version(system_file or disk_system)
         if depth is None:
             depth = COLOR_DEPTH if self.model.color else 1
@@ -276,7 +391,11 @@ class System:
         self._width, self._row_bytes = w, (row_bytes or 0, depth)
         if row_bytes is not None and (row_bytes & 1 or not 0 < row_bytes < 0x4000):
             raise ValueError(f"a screen's rows can't be {row_bytes} bytes apart")
-        self.mem = mem = RAM(RAM_SIZE + ROM_SIZE)
+        self.mem = mem = RAM(self, self.ram_size + ROM_SIZE)
+        if self.mmu_32_bit:
+            # The ROM page is the last of the bytes, reached from over the
+            # top of the address space: what a IIci's ROMBase says it is.
+            mem.mirror(self.rom_base, self.rom_base + ROM_SIZE, self.ram_size)
         self.lock = threading.RLock()
         row_bytes = self.row_bytes_for(depth)
         # Applications' partitions start where the System heap stops, or
@@ -285,14 +404,17 @@ class System:
         # (SYS7_HEAP_END).  Excel 1.0 keeps itself to the first megabyte,
         # and can't start if none of its heap is there.
         self._reserved: list[tuple[int, int]] = []      # what partitions keep out of
-        classic = (w, h) == CLASSIC_SIZE and depth == 1 and row_bytes == w // 8
+        # The classic screen and its mirroring belong to a 24-bit Mac: a
+        # 32-bit one's $3F2000 is just RAM, and nothing repeats through it.
+        classic = ((w, h) == CLASSIC_SIZE and depth == 1 and row_bytes == w // 8
+                   and not self.model.mmu_32_bit)
         if classic:
             base, sys_heap_end = CLASSIC_SCREEN, CLASSIC_ALTERNATE
-            self.partitions_start, self.partitions_end = CLASSIC_END, RAM_SIZE
+            self.partitions_start, self.partitions_end = CLASSIC_END, self.ram_size
             mem.mirror(PLUS_SCREENS, PLUS_SCREENS_END, CLASSIC_ALTERNATE & ~0xFFF)
             self._reserved.append((PLUS_SCREENS, PLUS_SCREENS_END))
         else:
-            base = (RAM_SIZE - row_bytes * h) & ~3
+            base = (self.ram_size - row_bytes * h) & ~3
             if base < SYS_HEAP_END + DEFAULT_PARTITION:
                 raise ValueError(f"a {w}x{h} screen leaves no room for applications")
             sys_heap_end = SYS_HEAP_END
@@ -337,9 +459,9 @@ class System:
         self._rts = self.sys_heap.new_ptr(2)            # a routine that does nothing
         mem.w16(self._rts, RTS)
 
-        mem.w32(lowmem.MemTop, RAM_SIZE)
-        mem.w32(lowmem.ROMBase, ROM_BASE)
-        mem.w16(ROM_BASE + 8, self.model.rom)
+        mem.w32(lowmem.MemTop, self.ram_size)
+        mem.w32(lowmem.ROMBase, self.rom_base)
+        mem.w16(self.rom_base + 8, self.model.rom)
         mem.w32(lowmem.ScrnBase, base)
         # The top of applications' memory, as when nothing is installed
         # under the screen: Dark Castle asks for the alternate screen only
@@ -406,15 +528,15 @@ class System:
         pixel values (and each GrafPort's rowBytes)."""
         mem, devices = self.mem, self.devices
         main = devices.pixmap(devices.main)
-        base, matching = main.base_addr & ADDRESS_MASK, devices.matching()
+        base, matching = main.base_addr & self.addr_mask, devices.matching()
         for port in list(self.ports.values()):
-            if port.port_bits_base & ADDRESS_MASK != base and not port.is_color:
+            if port.port_bits_base & self.addr_mask != base and not port.is_color:
                 continue
             if not port.is_color:
                 port.port_bits_row_bytes = self.screen_bits.row_bytes
                 continue
             p = port.pixmap()
-            if not p or mem.r32(p) & ADDRESS_MASK != base:
+            if not p or mem.r32(p) & self.addr_mask != base:
                 continue
             pm = PixMap(mem, p)
             pm.row_bytes, pm.pixel_type, pm.pixel_size = (main.row_bytes, main.pixel_type,
@@ -647,7 +769,7 @@ class System:
     def zone(self, start: int) -> Heap | None:
         """The zone starting at start, if it's the system heap or one
         InitZone made."""
-        start &= ADDRESS_MASK
+        start &= self.addr_mask
         if start == self.sys_heap.start:
             return self.sys_heap
         zone = self._zones.get(start)
@@ -656,7 +778,7 @@ class System:
     def find_heap(self, addr: int) -> Heap | None:
         """The heap addr is in; None for one in none, such as a handle
         whose master pointer is in a program's globals."""
-        a = addr & ADDRESS_MASK
+        a = addr & self.addr_mask
         for heap, _ in self._zones.values():
             if heap.contains(a):
                 return heap
@@ -672,7 +794,7 @@ class System:
     def heap_of(self, addr: int) -> Heap:
         heap = self.find_heap(addr)
         if heap is None:
-            raise ValueError(f"${addr & ADDRESS_MASK:06X} is not in a heap")
+            raise ValueError(f"${addr & self.addr_mask:06X} is not in a heap")
         return heap
 
     # =====================================================================
@@ -684,21 +806,21 @@ class System:
         # in the high byte, as SuperPaint passes a locked handle's master
         # pointer to NewWindow, and use it without them after.
         with self.lock:
-            self.ports[port.addr & ADDRESS_MASK] = port
+            self.ports[port.addr & self.addr_mask] = port
 
     def unregister(self, port: GrafPort) -> None:
         with self.lock:
-            self.ports.pop(port.addr & ADDRESS_MASK, None)
+            self.ports.pop(port.addr & self.addr_mask, None)
 
     def port_at(self, addr: int) -> GrafPort | None:
-        return self.ports.get(addr & ADDRESS_MASK)
+        return self.ports.get(addr & self.addr_mask)
 
     def port_with_pixmap(self, pm: int) -> GrafPort | None:
         """The cGrafPort whose portPixMap is the PixMap at pm, if one's is."""
         with self.lock:
             ports = list(self.ports.values())
         for port in ports:
-            if port.is_color and port.pixmap() == pm & ADDRESS_MASK:
+            if port.is_color and port.pixmap() == pm & self.addr_mask:
                 return port
         return None
 

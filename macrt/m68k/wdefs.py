@@ -30,7 +30,6 @@ from contextlib import nullcontext
 
 from PyQt6.QtGui import QColor, QImage, QPainter, QRegion
 
-from ..memory import ADDRESS_MASK
 from ..toolbox import constants as k
 from ..toolbox import lowmem
 from ..toolbox.events import ProcessKilled
@@ -46,14 +45,14 @@ def entry(t, w: WindowRecord) -> int:
     """Where w's own WDEF starts; 0 if it has none to run."""
     if not w.own_wdef:
         return 0
-    h = w.window_def_proc & ADDRESS_MASK
-    p = t.mem.r32(h) & ADDRESS_MASK
+    h = w.window_def_proc & t.mem.system.addr_mask
+    p = t.mem.r32(h) & t.mem.system.addr_mask
     if not p:
         res = t.process.resources
         err = res.error
         res.LoadResource(h)             # purged, as a Mac's Window Manager would find it
         res.error = err
-        p = t.mem.r32(h) & ADDRESS_MASK
+        p = t.mem.r32(h) & t.mem.system.addr_mask
     return p if p and t.mem.r16(p) != RTS else 0
 
 
@@ -69,7 +68,7 @@ def message(t, w: WindowRecord, msg: int, param: int = 0) -> int:
     if not at:
         return 0
     with nullcontext() if t.holding else t.resumed():
-        var = t.mem.r32(t.process.partition.a5) & ADDRESS_MASK     # thePort
+        var = t.mem.r32(t.process.partition.a5) & t.mem.system.addr_mask     # thePort
         saved = t.mem.r32(var)
         t.mem.w32(var, t.mem.r32(lowmem.WMgrPort))
         bounds = t.mem.read(w.addr + 8, 8) if msg == k.wCalcRgns and w.is_color else None
@@ -137,7 +136,7 @@ def draw(t, w: WindowRecord, part: int = 0) -> None:
     # clipped to the structure region.
     surfaces = t.tb.qd.surfaces
     saved = []
-    for wmgr in dict.fromkeys(mem.r32(a) & ADDRESS_MASK for a in (lowmem.WMgrPort,
+    for wmgr in dict.fromkeys(mem.r32(a) & mem.system.addr_mask for a in (lowmem.WMgrPort,
                                                                   lowmem.WMgrCPort)):
         port = t.system.port_at(wmgr) if wmgr else None
         if port is None:
@@ -216,7 +215,7 @@ class WindowDefinitions:
 # The System's WDEF 0 and 1
 # =========================================================================
 def system_wdef(t, def_id: int, var: int, w_ptr: int, msg: int, param: int) -> int:
-    w = t.window(w_ptr & ADDRESS_MASK)
+    w = t.window(w_ptr & t.mem.system.addr_mask)
     if w is None:
         return 0
     if msg == k.wDraw and param in (k.wInGoAway, k.wInZoomIn, k.wInZoomOut):
@@ -236,7 +235,7 @@ def system_wdef(t, def_id: int, var: int, w_ptr: int, msg: int, param: int) -> i
         for h, rgn in ((w.cont_rgn, cont), (w.struc_rgn, struc)):
             write_rgn(t.system.heap_of(h), h, rgn)
     elif msg == k.wDraw and w.visible:
-        surface = t.tb.qd.surfaces.get(t.mem.r32(lowmem.WMgrPort) & ADDRESS_MASK)
+        surface = t.tb.qd.surfaces.get(t.mem.r32(lowmem.WMgrPort) & t.mem.system.addr_mask)
         if isinstance(surface, ImageSurface):    # the image draw() has it draw in
             with surface.painter() as p:
                 p.translate(x0, y0)

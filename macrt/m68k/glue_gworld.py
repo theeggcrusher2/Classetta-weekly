@@ -54,7 +54,7 @@ from __future__ import annotations
 from PyQt6.QtCore import QRect
 from PyQt6.QtGui import QImage, QPainter
 
-from ..memory import ADDRESS_MASK, BusError
+from ..memory import BusError
 from ..toolbox import lowmem, pixels
 from ..toolbox.color import color_table, standard_table
 from ..toolbox.gdevice import (DEPTH_MODES, GDEVICE_SIZE, ITAB_RES, PIXMAP_SIZE,
@@ -88,8 +88,8 @@ def _deref(t, h: int) -> int:
 
 def _dispose(t, h: int) -> None:
     heap = t.system.find_heap(h) if h else None
-    if heap is not None and heap.is_handle(h & ADDRESS_MASK):
-        heap.dispose_handle(h & ADDRESS_MASK)
+    if heap is not None and heap.is_handle(h & t.mem.system.addr_mask):
+        heap.dispose_handle(h & t.mem.system.addr_mask)
 
 
 def _row_bytes(width: int, depth: int) -> int:
@@ -136,7 +136,7 @@ def _new_pixels(t, size: int, flags: int) -> int:
 def _pixels_handle(t, pm: PixMap) -> int:
     """The handle a screen buffer's pixels are in, from its baseAddr.  (A
     world keeps its own: a program may point its baseAddr elsewhere.)"""
-    base = pm.base_addr & ADDRESS_MASK
+    base = pm.base_addr & t.mem.system.addr_mask
     heap = t.system.find_heap(base) if base else None
     return heap.recover_handle(base) if heap is not None else 0
 
@@ -246,7 +246,7 @@ def _shares_table(t, port: GrafPort, ct_h: int) -> bool:
     if port.gw_own_device or not ct_h:
         return False
     pm = _device_pixmap(t, port.gw_device)
-    return pm is not None and pm.pm_table & ADDRESS_MASK == ct_h & ADDRESS_MASK
+    return pm is not None and pm.pm_table & t.mem.system.addr_mask == ct_h & t.mem.system.addr_mask
 
 
 def _new_gworld(t, gw_p: int, depth: int, bounds: Rect, table: bytes, device: int,
@@ -349,7 +349,7 @@ def DisposeGWorld(t, gw):
         return
     mem = t.mem
     if (port.gw_device
-            and mem.r32(lowmem.TheGDevice) & ADDRESS_MASK == port.gw_device & ADDRESS_MASK):
+            and mem.r32(lowmem.TheGDevice) & mem.system.addr_mask == port.gw_device & mem.system.addr_mask):
         mem.w32(lowmem.TheGDevice, t.system.devices.main)
     pm_h = _pix_map_h(port)
     p = _deref(t, pm_h)
@@ -365,8 +365,8 @@ def DisposeGWorld(t, gw):
     port.close((t.system.find_heap(port.vis_rgn) or heap) if port.vis_rgn else heap)
     t.system.unregister(port)
     port.gw_device = port.gw_pix_map = port.gw_pixels = 0
-    if heap.contains(gw & ADDRESS_MASK):
-        heap.dispose_ptr(gw & ADDRESS_MASK)
+    if heap.contains(gw & mem.system.addr_mask):
+        heap.dispose_ptr(gw & mem.system.addr_mask)
 
 
 @trap
@@ -392,7 +392,7 @@ def SetGWorld(t, p, gdh):
     if not device:
         port, main = t.system.port_at(p) if p else None, devices.pixmap(devices.main)
         if (port is not None and main is not None
-                and port.port_bits_base & ADDRESS_MASK == main.base_addr & ADDRESS_MASK):
+                and port.port_bits_base & t.mem.system.addr_mask == main.base_addr & t.mem.system.addr_mask):
             device = devices.main
     if device:
         t.mem.w32(lowmem.TheGDevice, device)
@@ -450,7 +450,7 @@ def UpdateGWorld(t, gw_p, depth, bounds_p, ct_h, gdh, flags):
         depth = device.pixel_size
         table = _table_data(t, depth, device.pm_table)
         if (depth <= 8 and not port.gw_own_device
-                and port.gw_device & ADDRESS_MASK == gdh & ADDRESS_MASK):
+                and port.gw_device & t.mem.system.addr_mask == gdh & t.mem.system.addr_mask):
             shared = device.pm_table
     elif depth == 0 or ct_h or depth != old_depth:
         got = _depth_and_table(t, depth, ct_h)
@@ -477,7 +477,7 @@ def UpdateGWorld(t, gw_p, depth, bounds_p, ct_h, gdh, flags):
     if not pix:
         _qd_error(t, cNoMemErr)
         return gwFlagErr
-    old_image = pixels.decode(mem.read(pm.base_addr & ADDRESS_MASK, old_rb * old_bounds.height),
+    old_image = pixels.decode(mem.read(pm.base_addr & mem.system.addr_mask, old_rb * old_bounds.height),
                               old_bounds.width, old_bounds.height, old_rb, old_depth,
                               old_table).convertToFormat(QImage.Format.Format_ARGB32)
     if shared:
@@ -528,7 +528,7 @@ def UpdateGWorld(t, gw_p, depth, bounds_p, ct_h, gdh, flags):
 def _share_table(t, port: GrafPort, pm: PixMap, ct_h: int) -> None:
     """Give a world made on a device with noNewDevice that device's colour
     table, ct_h, in place of one of its own."""
-    if pm.pm_table & ADDRESS_MASK != ct_h & ADDRESS_MASK:
+    if pm.pm_table & t.mem.system.addr_mask != ct_h & t.mem.system.addr_mask:
         if pm.pm_table and not _shares_table(t, port, pm.pm_table):
             _dispose(t, pm.pm_table)
         pm.pm_table = ct_h
@@ -571,7 +571,7 @@ def _redraw(t, pm: PixMap, img: QImage, old: Rect, keep: int) -> None:
         p.drawImage(QRect(0, 0, b.width, b.height), img)
     p.end()
     data, bpl = pixels.encode(out, depth, table)
-    base = pm.base_addr & ADDRESS_MASK
+    base = pm.base_addr & mem.system.addr_mask
     n = min(bpl, rb)
     for v in range(b.height):
         mem.write(base + v * rb, data[v * bpl:v * bpl + n])
@@ -587,7 +587,7 @@ def _states(t) -> dict[int, int]:
 
 def _set_state(t, pm: int, on: int = 0, off: int = 0) -> None:
     states = _states(t)
-    key = pm & ADDRESS_MASK
+    key = pm & t.mem.system.addr_mask
     states[key] = (states.get(key, 0) | on) & ~off
 
 
@@ -615,12 +615,12 @@ def NoPurgePixels(t, pm):
 
 @trap
 def GetPixelsState(t, pm):
-    return _states(t).get(pm & ADDRESS_MASK, 0)
+    return _states(t).get(pm & t.mem.system.addr_mask, 0)
 
 
 @trap
 def SetPixelsState(t, pm, state):
-    _states(t)[pm & ADDRESS_MASK] = state & (pixelsLocked | pixelsPurgeable)
+    _states(t)[pm & t.mem.system.addr_mask] = state & (pixelsLocked | pixelsPurgeable)
 
 
 @trap
@@ -655,14 +655,14 @@ def CTabChanged(t, ct_h):
     if devices is None or not ct:
         return
     main = devices.pixmap(devices.main)
-    if main is not None and main.pm_table & ADDRESS_MASK == ct_h & ADDRESS_MASK:
+    if main is not None and main.pm_table & t.mem.system.addr_mask == ct_h & t.mem.system.addr_mask:
         _new_colors(t, devices.main, ct)
         return
     t.mem.w32(ct, devices.next_seed())
     for port in list(t.system.ports.values()):
         if port.gw_own_device:
             p = _deref(t, port.port_pix_map)
-            if p and PixMap(t.mem, p).pm_table & ADDRESS_MASK == ct_h & ADDRESS_MASK:
+            if p and PixMap(t.mem, p).pm_table & t.mem.system.addr_mask == ct_h & t.mem.system.addr_mask:
                 _new_itable(t, t.process.heap, port.gw_device)
 
 

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import struct
 
-from ..memory import ADDRESS_MASK, BusError, from_mac, to_mac
+from ..memory import BusError, from_mac, to_mac
 from ..toolbox import files as fm
 from ..toolbox import lowmem, sysres
 from ..toolbox.files import Dir, File, FileError, noErr
@@ -139,7 +139,7 @@ vcbVRefNum = 78
 def _run(t, pb: int, is_async: bool, fn, *args) -> int:
     """Do a call, leave its result in ioResult, and call the completion
     routine of an asynchronous one."""
-    pb &= ADDRESS_MASK
+    pb &= t.mem.system.addr_mask
     if is_async and fn is _read and t.mem.r16s(pb + ioRefNum) in SERIAL_INPUTS:
         _wait_for_input(t, pb)
         return noErr
@@ -147,7 +147,7 @@ def _run(t, pb: int, is_async: bool, fn, *args) -> int:
     if err == fm.nsvErr and _switch_disk(t, pb):
         err = _do(t, pb, fn, args)
     t.mem.w16(pb + ioResult, err)
-    completion = t.mem.r32(pb + ioCompletion) & ADDRESS_MASK if is_async else 0
+    completion = t.mem.r32(pb + ioCompletion) & t.mem.system.addr_mask if is_async else 0
     if completion:
         cpu = t.cpu
         cpu.set_a(0, pb)
@@ -176,14 +176,14 @@ def _switch_disk(t, pb: int) -> bool:
     m, fs = t.mem, t.system.files
     vref = m.r16s(pb + ioVRefNum)
     ours = {vol.vcb for vol in fs.volumes}
-    vcb = m.r32(lowmem.VCBQHdr + 2) & ADDRESS_MASK
+    vcb = m.r32(lowmem.VCBQHdr + 2) & t.mem.system.addr_mask
     for _ in range(64):                     # as many as a queue gone round on itself has
         if not vcb:
             return False
         if (vcb not in ours and m.r16s(vcb + vcbVRefNum) == vref
                 and not m.r16(vcb + vcbDrvNum)):
             break
-        vcb = m.r32(vcb) & ADDRESS_MASK
+        vcb = m.r32(vcb) & t.mem.system.addr_mask
     else:
         return False
     try:
@@ -219,12 +219,12 @@ def _files(t) -> fm.FileManager:
 
 
 def _name(t, pb: int) -> str | None:
-    p = t.mem.r32(pb + ioNamePtr) & ADDRESS_MASK
+    p = t.mem.r32(pb + ioNamePtr) & t.mem.system.addr_mask
     return t.str255(p) if p else None
 
 
 def _put_name(t, pb: int, name: str, at: int = ioNamePtr) -> None:
-    p = t.mem.r32(pb + at) & ADDRESS_MASK
+    p = t.mem.r32(pb + at) & t.mem.system.addr_mask
     if p:
         t.mem.w_pstr(p, to_mac(name)[:255])
 
@@ -296,12 +296,12 @@ def _read(t, pb, hfs):
     p = t.system.files.fcb(refnum)
     if count > 0:
         err = glue_sony.read_file(t, p, fm.FileManager._position(p, mode, offset), count,
-                                  m.r32(pb + ioBuffer) & ADDRESS_MASK)
+                                  m.r32(pb + ioBuffer) & t.mem.system.addr_mask)
         if err:
             return err
     data, err = _files(t).read(refnum, count, mode, offset)
     if data:
-        m.write(m.r32(pb + ioBuffer) & ADDRESS_MASK, data)
+        m.write(m.r32(pb + ioBuffer) & t.mem.system.addr_mask, data)
     m.w32(pb + ioActCount, len(data))
     m.w32(pb + ioPosOffset, t.system.files.fcb(refnum).mark)
     return err
@@ -319,7 +319,7 @@ def _write(t, pb, hfs):
     refnum = _refnum(t, pb)
     if count < 0:
         raise FileError(fm.paramErr)
-    data = m.read(m.r32(pb + ioBuffer) & ADDRESS_MASK, count) if count else b""
+    data = m.read(m.r32(pb + ioBuffer) & t.mem.system.addr_mask, count) if count else b""
     n = _files(t).write(refnum, data, m.r16(pb + ioPosMode), m.r32s(pb + ioPosOffset))
     m.w32(pb + ioActCount, n)
     m.w32(pb + ioPosOffset, t.system.files.fcb(refnum).mark)
@@ -372,7 +372,7 @@ def _delete(t, pb, hfs):
 
 
 def _rename(t, pb, hfs):
-    new = t.mem.r32(pb + ioMisc) & ADDRESS_MASK
+    new = t.mem.r32(pb + ioMisc) & t.mem.system.addr_mask
     if not new:
         raise FileError(fm.bdNamErr)
     _files(t).rename(*_where(t, pb, hfs), t.str255(new))
@@ -690,7 +690,7 @@ def _abort_reads(t, refnum: int) -> None:
     with abortErr, its completion routine called (IM II, PBKillIO)."""
     for pb in getattr(t.process, "serial_reads", {}).pop(refnum, []):
         t.mem.w16(pb + ioResult, abortErr)
-        completion = t.mem.r32(pb + ioCompletion) & ADDRESS_MASK
+        completion = t.mem.r32(pb + ioCompletion) & t.mem.system.addr_mask
         if completion:
             t.call_with(completion, a0=pb, d0=abortErr & 0xFFFFFFFF)
 
@@ -796,7 +796,7 @@ def _get_fcb_info(t, pb):
 def _cat_move(t, pb):
     m = t.mem
     vref, dirid, name = _where(t, pb, True)
-    new = m.r32(pb + ioNewName) & ADDRESS_MASK
+    new = m.r32(pb + ioNewName) & t.mem.system.addr_mask
     _files(t).move(vref, dirid, name, m.r32(pb + ioNewDirID), t.str255(new) if new else None)
 
 
@@ -809,7 +809,7 @@ def _exchange(t, pb):
     m = t.mem
     files = _files(t)
     a = files.lookup_file(*_where(t, pb, True))
-    dest = m.r32(pb + ioDestNamePtr) & ADDRESS_MASK
+    dest = m.r32(pb + ioDestNamePtr) & t.mem.system.addr_mask
     b = files.lookup_file(m.r16s(pb + ioVRefNum), m.r32(pb + ioDestDirID),
                           t.str255(dest) if dest else None)
     files.exchange(a, b)
@@ -822,7 +822,7 @@ def _get_vol_parms(t, pb):
     _files(t).volume_for(m.r16s(pb + ioVRefNum), _name(t, pb))
     info = struct.pack(">HIIIIH", 2, bHasCatSearch, 0, 0, 0, 0)
     n = max(0, min(m.r32s(pb + ioReqCount), len(info)))
-    m.write(m.r32(pb + ioBuffer) & ADDRESS_MASK, info[:n])
+    m.write(m.r32(pb + ioBuffer) & t.mem.system.addr_mask, info[:n])
     m.w32(pb + ioActCount, n)
 
 
@@ -854,11 +854,11 @@ def _cat_search(t, pb):
     if want < 1:
         raise FileError(fm.paramErr)
     bits = m.r32(pb + ioSearchBits)
-    lo = m.read(m.r32(pb + ioSearchInfo1) & ADDRESS_MASK, CINFO_SIZE)
-    hi = m.read(m.r32(pb + ioSearchInfo2) & ADDRESS_MASK, CINFO_SIZE)
+    lo = m.read(m.r32(pb + ioSearchInfo1) & m.system.addr_mask, CINFO_SIZE)
+    hi = m.read(m.r32(pb + ioSearchInfo2) & m.system.addr_mask, CINFO_SIZE)
     target = None
     if bits & (fsSBPartialName | fsSBFullName):
-        name = struct.unpack_from(">I", lo, ioNamePtr)[0] & ADDRESS_MASK
+        name = struct.unpack_from(">I", lo, ioNamePtr)[0] & m.system.addr_mask
         if not name:
             raise FileError(fm.paramErr)
         target = fm.name_key(t.str255(name))
@@ -866,7 +866,7 @@ def _cat_search(t, pb):
     start, changes = struct.unpack(">II", m.read(pb + ioCatPosition, 8))
     if start and changes != vol.changes & 0xFFFFFFFF:
         raise FileError(catChangedErr)
-    matches = m.r32(pb + ioMatchPtr) & ADDRESS_MASK
+    matches = m.r32(pb + ioMatchPtr) & m.system.addr_mask
     negate = bool(bits & fsSBNegate)
     i, found = max(start - 1, 0), 0
     while i < len(entries) and found < want:

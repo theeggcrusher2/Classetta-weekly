@@ -51,7 +51,7 @@ from weakref import WeakKeyDictionary
 from PyQt6.QtCore import QRect, Qt
 from PyQt6.QtGui import QImage, QPainter
 
-from ..memory import ADDRESS_MASK, from_mac
+from ..memory import from_mac
 from ..toolbox import aliases as al
 from ..toolbox import files as fm
 from ..toolbox import pict
@@ -309,7 +309,7 @@ def _publishers(t, control: Control) -> list[Section]:
 # =========================================================================
 def _record_of(t, h: int) -> int | None:
     """The address of the section record h holds; None if it isn't one."""
-    h &= ADDRESS_MASK
+    h &= t.mem.system.addr_mask
     if not h:
         return None
     try:
@@ -362,7 +362,7 @@ def _container_file(t, spec: int) -> File | None:
 
 def _document(t, spec: int) -> fm.Node | None:
     """The node an FSSpecPtr gives, if it's there."""
-    spec &= ADDRESS_MASK
+    spec &= t.mem.system.addr_mask
     return _lookup(t, *_spec(t, spec)) if spec else None
 
 
@@ -381,7 +381,7 @@ def _alias_for(t, spec: int, document: fm.Node | None) -> al.Alias:
 
 def _target(t, p: int, document: fm.Node | None = None) -> tuple[al.Alias | None, al.Found | None]:
     """A section's alias and where it leads, None for either it hasn't."""
-    alias_h = t.mem.r32(p + srAlias) & ADDRESS_MASK
+    alias_h = t.mem.r32(p + srAlias) & t.mem.system.addr_mask
     try:
         alias = _record(t, alias_h)
     except FileError:
@@ -462,7 +462,7 @@ def _on_stack(t, size: int):
 def _call_opener(t, opener: int, verb: int, pb: int) -> int:
     if opener == STANDARD_OPENER:
         return _standard_opener(t, verb, pb)
-    opener &= ADDRESS_MASK
+    opener &= t.mem.system.addr_mask
     if not opener or opener & 1:
         return paramErr
     return t.call(opener, (("B", verb), ("p", pb)), "e")
@@ -471,7 +471,7 @@ def _call_opener(t, opener: int, verb: int, pb: int) -> int:
 def _call_io(t, proc: int, verb: int, pb: int) -> int:
     if proc == STANDARD_IO:
         return _standard_io(t, verb, pb)
-    proc &= ADDRESS_MASK
+    proc &= t.mem.system.addr_mask
     if not proc or proc & 1:
         return paramErr
     return t.call(proc, (("B", verb), ("p", pb)), "e")
@@ -564,7 +564,7 @@ def _standard_io(t, verb: int, pb: int) -> int:
             m.w32(pb + ioBuffLen, 0)
             return eofErr
         got = bytes(data[offset:offset + n])
-        m.write(m.r32(pb + ioBuffPtr) & ADDRESS_MASK, got)
+        m.write(m.r32(pb + ioBuffPtr) & t.mem.system.addr_mask, got)
         m.w32(pb + ioBuffLen, len(got))
         return noErr
     if verb not in (ioNewFormat, ioWriteFormat):
@@ -587,7 +587,7 @@ def _standard_io(t, verb: int, pb: int) -> int:
         return fm.dskFulErr                 # more than the edition's volume can hold
     if len(data) < offset:
         data.extend(bytes(offset - len(data)))
-    data[offset:offset + n] = m.read(m.r32(pb + ioBuffPtr) & ADDRESS_MASK, n)
+    data[offset:offset + n] = m.read(m.r32(pb + ioBuffPtr) & t.mem.system.addr_mask, n)
     return noErr
 
 
@@ -720,7 +720,7 @@ def _register(t, st: Editions, h: int, document: fm.Node | None) -> tuple[int, b
     node = found.node if found is not None and isinstance(found.node, File) else None
     if node is not None:
         fresh = al.updated(alias, node, document)
-        if fresh is not None and not _replace(t, m.r32(p + srAlias) & ADDRESS_MASK, fresh):
+        if fresh is not None and not _replace(t, m.r32(p + srAlias) & t.mem.system.addr_mask, fresh):
             updated = True
     err = noErr
     wrote = False
@@ -841,7 +841,7 @@ def NewSection(t, container, section_document, kind, section_id, initial_mode, s
 def RegisterSection(t, section_document, section_h, alias_was_updated):
     st = _state(t)
     t.mem.w8(alias_was_updated, 0)
-    err, updated = _register(t, st, section_h & ADDRESS_MASK, _document(t, section_document))
+    err, updated = _register(t, st, section_h & t.mem.system.addr_mask, _document(t, section_document))
     t.mem.w8(alias_was_updated, int(updated))
     return err
 
@@ -849,7 +849,7 @@ def RegisterSection(t, section_document, section_h, alias_was_updated):
 @trap
 def UnRegisterSection(t, section_h):
     st = _state(t)
-    s = st.sections.get(section_h & ADDRESS_MASK)
+    s = st.sections.get(section_h & t.mem.system.addr_mask)
     if s is None:
         return notRegisteredSectionErr
     if s.busy:
@@ -863,7 +863,7 @@ def UnRegisterSection(t, section_h):
 
 @trap
 def IsRegisteredSection(t, section_h):
-    return noErr if section_h & ADDRESS_MASK in _state(t).sections else notRegisteredSectionErr
+    return noErr if section_h & t.mem.system.addr_mask in _state(t).sections else notRegisteredSectionErr
 
 
 @trap
@@ -874,7 +874,7 @@ def AssociateSection(t, section_h, new_section_document):
         return paramErr
     st = _state(t)
     document = _document(t, new_section_document)
-    s = st.sections.get(section_h & ADDRESS_MASK)
+    s = st.sections.get(section_h & t.mem.system.addr_mask)
     node = s.control.node if s is not None and s.control is not None else None
     if not _exists(node):
         alias, found = _target(t, p, document)
@@ -883,7 +883,7 @@ def AssociateSection(t, section_h, new_section_document):
         node = found.node if found is not None else None
     if not isinstance(node, File):
         return fnfErr
-    return _replace(t, t.mem.r32(p + srAlias) & ADDRESS_MASK, al.make(node, document))
+    return _replace(t, t.mem.r32(p + srAlias) & t.mem.system.addr_mask, al.make(node, document))
 
 
 @trap
@@ -927,7 +927,7 @@ def GetLastEditionContainerUsed(t, container):
 @trap
 def GetEditionInfo(t, section_h, edition_info):
     st = _state(t)
-    s = st.sections.get(section_h & ADDRESS_MASK)
+    s = st.sections.get(section_h & t.mem.system.addr_mask)
     if s is None or s.control is None or not _exists(s.control.node):
         return fnfErr
     _put_info(t, edition_info, s.control.node)
@@ -985,7 +985,7 @@ def _opened(t, st: Editions, h: int, p: int, verb: int, refnum_p: int, document:
 def OpenEdition(t, subscriber_section_h, refnum):
     st = _state(t)
     t.mem.w32(refnum, 0)
-    h = subscriber_section_h & ADDRESS_MASK
+    h = subscriber_section_h & t.mem.system.addr_mask
     p = _record_of(t, h)
     if p is None or _is_publisher(t, p):
         return permErr
@@ -997,7 +997,7 @@ def OpenNewEdition(t, publisher_section_h, fd_creator, publisher_section_documen
     st = _state(t)
     m = t.mem
     m.w32(refnum, 0)
-    h = publisher_section_h & ADDRESS_MASK
+    h = publisher_section_h & t.mem.system.addr_mask
     p = _record_of(t, h)
     if p is None or not _is_publisher(t, p):
         return wrPermErr
@@ -1005,7 +1005,7 @@ def OpenNewEdition(t, publisher_section_h, fd_creator, publisher_section_documen
     if s is not None and s.control is not None and s.control.writer is not None:
         return fLckdErr                     # another publisher is writing it
     creator = (fd_creator & 0xFFFFFFFF).to_bytes(4, "big")
-    document = publisher_section_document & ADDRESS_MASK
+    document = publisher_section_document & t.mem.system.addr_mask
     err = _opened(t, st, h, p, eoOpenNew, refnum, document, creator)
     if err:
         return err
@@ -1034,7 +1034,7 @@ def OpenNewEdition(t, publisher_section_h, fd_creator, publisher_section_documen
 
 
 def _open_edition(t, st: Editions, refnum: int) -> Open | None:
-    return st.opens.get(refnum & ADDRESS_MASK)
+    return st.opens.get(refnum & t.mem.system.addr_mask)
 
 
 @trap
@@ -1167,7 +1167,7 @@ def GetStandardFormats(t, container, preview_format, preview, publisher_alias, f
         return o
     result = noErr
     try:
-        wanted = [(h & ADDRESS_MASK, kinds) for h, kinds in
+        wanted = [(h & t.mem.system.addr_mask, kinds) for h, kinds in
                   ((preview, (PRVW, PICT, TEXT, SND)), (publisher_alias, (ALIS,)),
                    (formats, (FMTS,)))]
         for h, kinds in wanted:
@@ -1188,7 +1188,7 @@ def GetStandardFormats(t, container, preview_format, preview, publisher_alias, f
                 result = memFullErr
                 continue
             m.write(heap.deref(h), data)
-            if h == preview & ADDRESS_MASK and preview_format:
+            if h == preview & t.mem.system.addr_mask and preview_format:
                 m.write(preview_format, fmt)
     finally:
         _close(t, o, True)
@@ -1286,7 +1286,7 @@ class EditionDialog(sf.Dialog):
 
 def _preview(t, h: int, fmt: bytes) -> QImage | None:
     """A publisher's preview as the dialog shows it, 120 by 120."""
-    h &= ADDRESS_MASK
+    h &= t.mem.system.addr_mask
     if not h or fmt not in (PRVW, PICT, TEXT) or sf.display_of(t) is None:
         return None
     try:
@@ -1319,7 +1319,7 @@ def _preview(t, h: int, fmt: bytes) -> QImage | None:
 
 def _publisher_dialog(t, reply, ditl=0, hook=0, data=0) -> int:
     m = t.mem
-    reply &= ADDRESS_MASK
+    reply &= t.mem.system.addr_mask
     if m.r8(reply + npUsePart):
         return badSubPartErr
     img = _preview(t, m.r32(reply + npPreview), m.read(reply + npPreviewFormat, 4))
@@ -1341,7 +1341,7 @@ def _publisher_dialog(t, reply, ditl=0, hook=0, data=0) -> int:
 
 def _subscriber_dialog(t, reply, ditl=0, hook=0, data=0) -> int:
     m = t.mem
-    reply &= ADDRESS_MASK
+    reply &= t.mem.system.addr_mask
     dialog = EditionDialog(t, False, reply + nsContainer, "Subscribe", hook=hook, ditl=ditl,
                            data=data, mask=m.r8(reply + nsFormatsMask))
     result = dialog.run()
@@ -1359,9 +1359,9 @@ def _date(secs: int) -> str:
 
 def _options_dialog(t, reply, ditl=0, hook=0, data=0) -> int:
     m = t.mem
-    reply &= ADDRESS_MASK
+    reply &= t.mem.system.addr_mask
     st = _state(t)
-    h = m.r32(reply + soSectionH) & ADDRESS_MASK
+    h = m.r32(reply + soSectionH) & t.mem.system.addr_mask
     m.w8(reply + soCanceled, 1)
     m.w8(reply + soChanged, 0)
     m.write(reply + soAction, b"    ")

@@ -12,7 +12,6 @@ import pytest
 from macrt.m68k import glue_cdrom as cd
 from macrt.m68k import glue_devices as dev
 from macrt.macfile import open_disks
-from macrt.memory import ADDRESS_MASK
 from macrt.toolbox import files as fm
 
 from guest import Processor
@@ -55,7 +54,7 @@ def test_a_cd_images_driver_is_in_the_unit_table_as_applecd(qapp, tmp_path, name
     p, vol = mounted(tmp_path, name, after=after)
     m = p.mem
     assert vol.cdrom and not vol.floppy and vol.driver <= -33
-    dce = m.r32(entry(p, vol.driver)) & ADDRESS_MASK
+    dce = m.r32(entry(p, vol.driver)) & m.system.addr_mask
     assert m.r16s(dce + dev.dCtlRefNum) == vol.driver
     assert m.r16(dce + dev.dCtlFlags) & dev.dOpened
     assert m.r_pstr(m.r32(dce + dev.dCtlDriver) + dev.drvrName) == b".AppleCD"

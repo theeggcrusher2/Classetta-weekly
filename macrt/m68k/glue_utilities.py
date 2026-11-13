@@ -8,7 +8,7 @@ from __future__ import annotations
 import math
 import struct
 
-from ..memory import ADDRESS_MASK, to_mac
+from ..memory import to_mac
 from ..toolbox import sane
 from ..toolbox.pict import pack_bits, unpack_bits_from
 from ..toolbox.system import APP_PACKS, init_pack
@@ -100,7 +100,7 @@ def UnpackBits(t, src_var, dst_var, count):
     m = t.mem
     src, dst, count = m.r32(src_var), m.r32(dst_var), max(count, 0)
     most = count + count // 128 + 2                 # all of it literal
-    data, took = unpack_bits_from(m.read(src, min(most, m.size - (src & ADDRESS_MASK))), count)
+    data, took = unpack_bits_from(m.read(src, min(most, m.size - (src & t.mem.system.addr_mask))), count)
     m.write(dst, data)
     m.w32(src_var, (src + took) & 0xFFFFFFFF)
     m.w32(dst_var, (dst + count) & 0xFFFFFFFF)
