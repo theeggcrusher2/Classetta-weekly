@@ -17,8 +17,10 @@ import builders
 from builders import SYNC, binhex, gcr_sector, mfs_image, moof_image
 from macrt import moof
 from macrt.macfile import (
-    HostFolder, MacFile, MemoryFolder, VolumeFolder, is_control_panel, is_disk_image, load_file,
-    load_volume, open_application, open_applications, open_disks, volume_files,
+    ArchiveFolder, HostFolder, MacFile, MemoryFolder, VolumeFolder, archive_file,
+    is_control_panel,
+    is_disk_image, load_file, load_volume, open_application, open_applications,
+    open_disks, volume_files,
 )
 from macrt.resfork import (
     InvalidForkError, Resource, build_fork, is_fork, read_fork, resLocked, resPurgeable,
@@ -910,6 +912,41 @@ def test_archives_are_refused(tmp_path):
     # is refused downstream, and the Filer can browse it.
     rar_file = open_application(tmp_path / "Game.rar")
     assert rar_file.data.startswith(b"Rar!")
+    # SpaceSaver is in macextract's registry too, so it passes through
+    # the same way.
+    hdr = bytearray(84)
+    hdr[:8] = b"SIT!DFD3"
+    struct.pack_into(">I", hdr, 8, 3)
+    struct.pack_into(">I", hdr, 12, 84)
+    struct.pack_into(">III", hdr, 20, 9, 9, 84)
+    ssaved = bytes(hdr) + b"payload!!"
+    (tmp_path / "Packed.sit").write_bytes(ssaved)
+    ss_file = open_application(tmp_path / "Packed.sit")
+    assert ss_file.data.startswith(b"SIT!DFD3")
+
+
+def test_archive_file_browses_a_spacesaver(tmp_path):
+    # A SpaceSaver archive opens as a Filer listing whose one entry keeps
+    # the host file's name — the format compresses in situ, so there is
+    # no other name to give it — and its data fork round-trips.
+    payload = b"payload!!"
+    hdr = bytearray(84)
+    hdr[:8] = b"SIT!DFD3"
+    struct.pack_into(">I", hdr, 8, 3)
+    struct.pack_into(">I", hdr, 12, 84)
+    struct.pack_into(">III", hdr, 20, len(payload), len(payload), 84)
+    hdr[52:56] = b"TEXT"
+    hdr[56:60] = b"ttxt"
+    (tmp_path / "Packed.sit").write_bytes(bytes(hdr) + payload)
+
+    folder = archive_file(tmp_path / "Packed.sit")
+    assert isinstance(folder, ArchiveFolder)
+    assert folder.name == "Packed.sit"
+    entries = folder.files()
+    assert [f.name for f in entries] == ["Packed.sit"]
+    f = entries[0]
+    assert f.data == payload
+    assert f.type == b"TEXT" and f.creator == b"ttxt"
 
 
 def test_open_application_reads_single_files(tmp_path):

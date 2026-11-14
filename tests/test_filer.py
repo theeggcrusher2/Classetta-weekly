@@ -61,8 +61,21 @@ def _alias_volume() -> machfs.Volume:
     return v
 
 
+def _spacesaver_blob(payload: bytes) -> bytes:
+    """A minimal version 3 SpaceSaver file, fork 0 stored."""
+    import struct
+    hdr = bytearray(84)
+    hdr[:8] = b"SIT!DFD3"
+    struct.pack_into(">I", hdr, 8, 3)
+    struct.pack_into(">I", hdr, 12, 84)
+    struct.pack_into(">III", hdr, 20, len(payload), len(payload), 84)
+    hdr[52:56] = b"TEXT"
+    hdr[56:60] = b"ttxt"
+    return bytes(hdr) + payload
+
+
 def _archive_kinds_volume() -> machfs.Volume:
-    """A disk with a zip, a gzip and a plain document."""
+    """A disk with a zip, a gzip, a SpaceSaver and a plain document."""
     import gzip as gz
     import io
     import zipfile
@@ -77,6 +90,10 @@ def _archive_kinds_volume() -> machfs.Volume:
     gzipped = machfs.File()
     gzipped.type, gzipped.creator, gzipped.data = b"TEXT", b"ttxt", bytearray(gz.compress(b"x"))
     v["Packed.gz"] = gzipped
+    ssaved = machfs.File()
+    ssaved.type, ssaved.creator, ssaved.data = b"TEXT", b"ttxt", bytearray(
+        _spacesaver_blob(b"in situ, the file keeps its name. "))
+    v["Packed.sit"] = ssaved
     doc = machfs.File()
     doc.type, doc.creator, doc.data = b"TEXT", b"ttxt", b"plain"
     v["Plain"] = doc
@@ -395,7 +412,8 @@ def test_the_kind_column_names_known_archives(harness):
     h = harness(disks=[_archive_kinds_volume()])
     win = h.d.open_filer(h.d.config.disks[0])
     h.settle()
-    assert _rows(win) == [("Packed.gz", "gzip"), ("Packed.zip", "ZIP"), ("Plain", "document")]
+    assert _rows(win) == [("Packed.gz", "gzip"), ("Packed.sit", "SpaceSaver"),
+                          ("Packed.zip", "ZIP"), ("Plain", "document")]
 
 
 def test_the_kind_column_names_known_images(harness):

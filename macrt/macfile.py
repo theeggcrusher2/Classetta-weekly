@@ -1122,7 +1122,7 @@ _ARCHIVE_KINDS = {
     "dd": "DiskDoubler", "gzip": "gzip", "lha": "LHA", "mar": "MAR",
     "now": "Now Compress", "packit": "PackIt", "rar": "RAR",
     "segments": "split archive", "sevenz": "7z", "sit": "StuffIt",
-    "sit5": "StuffIt 5", "sqp": "AppleLink package", "tar": "tar",
+    "sit5": "StuffIt 5", "spacesaver": "SpaceSaver", "sqp": "AppleLink package", "tar": "tar",
     "tome": "Apple Installer Tome", "z": "Unix compress", "xz": "xz",
     "zip": "ZIP",
 }
@@ -1266,7 +1266,11 @@ def archive_entries(data: bytes, name: str = "archive") -> list[MacFile] | None:
     except ImportError:
         return None
     try:
-        archive = macextract.open(io.BytesIO(data))
+        buf = io.BytesIO(data)
+        # In-situ compressors keep the host's name; macextract names the
+        # entry from the file object's name.
+        buf.name = name
+        archive = macextract.open(buf)
     except macextract.UnsupportedError:
         return None
     except macextract.PasswordRequiredError:
