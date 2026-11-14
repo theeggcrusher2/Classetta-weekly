@@ -904,6 +904,9 @@ def test_archives_are_refused(tmp_path):
     (tmp_path / "game.zip").write_bytes(b"PK\x03\x04" + bytes(100))
     with pytest.raises(ValueError, match="zip archive"):
         open_application(tmp_path / "game.zip")
+    (tmp_path / "Game.rar").write_bytes(b"Rar!\x1a\x07\x00" + bytes(100))
+    with pytest.raises(ValueError, match="RAR archive"):
+        open_application(tmp_path / "Game.rar")
 
 
 def test_open_application_reads_single_files(tmp_path):

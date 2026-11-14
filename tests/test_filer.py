@@ -11,8 +11,8 @@ from PyQt6.QtTest import QTest
 
 from conftest import LB, NO_MODS, Recorder
 from macrt.demo import finish, open_targets, parse_args
-from macrt.macfile import (ContainerFolder, HostFolder, MacFile, image_kind, load_volume,
-                           open_disks)
+from macrt.macfile import (ContainerFolder, HostFolder, MacFile, image_kind, is_alias,
+                           load_volume, open_disks)
 from macrt.resfork import build_fork, Resource, resPurgeable
 from macrt.toolbox import constants as k
 from macrt.ui import theme
@@ -1973,3 +1973,123 @@ def test_record_sound_menu_item_starts_and_stops_recording(harness, monkeypatch,
     h.d.toggle_record_sound()
     assert h.d.config.record_sound is None
     assert not any(isinstance(o, WaveFile) for o in h.d.sound)
+
+
+def _image_volume() -> machfs.Volume:
+    """A disk with a disk image on it, and an alias file pointing at
+    that image — the shapes a double-click must not take for a file
+    that lost its resource fork."""
+    from macrt.toolbox import aliases as al
+    from macrt.toolbox import files as fm
+    inner = machfs.Volume()
+    inner.name = "Inner"
+    doc = machfs.File()
+    doc.type, doc.creator, doc.data = b"TEXT", b"TEST", b"Hello."
+    inner["Letter"] = doc
+    v = machfs.Volume()
+    v.name = "Browse"
+    img = machfs.File()
+    img.data = inner.write(size=800 * 1024)
+    v["Outer.dsk"] = img
+    record = al.Alias(volume="Browse", parid=fm.ROOT, name="Outer.dsk")
+    link = machfs.File()
+    link.type, link.creator = b"alis", b"MACS"
+    link.flags = 0x8000
+    link.rsrc = bytearray(build_fork([Resource(b"alis", 0, data=record.pack())]))
+    v["Link"] = link
+    return v
+
+
+def test_a_disk_image_in_the_filer_opens_as_a_volume(harness):
+    h = harness(disks=[_image_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    _dblclick(win, "Outer.dsk", h.settle)
+    h.settle()
+    opened = [w for w in h.d.filer_windows if w is not win]
+    assert len(opened) == 1
+    assert isinstance(opened[0].volume, machfs.Volume)
+    assert opened[0].volume.name == "Inner"
+    assert sorted(n for n, _ in opened[0].volume.items()) == ["Letter"]
+    assert not h.d._alerts
+    # mounted, so an alias into the image resolves, as for --disk
+    assert any(vol.name == "Inner" for vol in h.d.system.files.volumes)
+
+
+def test_a_loose_disk_image_opens_as_a_volume(harness, tmp_path):
+    inner = machfs.Volume()
+    inner.name = "Inner"
+    doc = machfs.File()
+    doc.type, doc.creator, doc.data = b"TEXT", b"TEST", b"Hello."
+    inner["Letter"] = doc
+    (tmp_path / "Outer.dsk").write_bytes(inner.write(size=800 * 1024))
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    _dblclick(win, "Outer.dsk", h.settle)
+    h.settle()
+    opened = [w for w in h.d.filer_windows if w is not win]
+    assert len(opened) == 1
+    assert isinstance(opened[0].volume, machfs.Volume)
+    assert opened[0].volume.name == "Inner"
+    assert not h.d._alerts
+
+
+def test_an_alias_to_a_disk_image_opens_the_image(harness):
+    h = harness(disks=[_image_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    _dblclick(win, "Link", h.settle)
+    h.settle()
+    opened = [w for w in h.d.filer_windows if w is not win]
+    assert len(opened) == 1
+    assert isinstance(opened[0].volume, machfs.Volume)
+    assert opened[0].volume.name == "Inner"
+    assert not h.d._alerts
+
+
+def test_an_archive_the_filer_cannot_read_says_to_unpack_it_first(harness):
+    v = machfs.Volume()
+    v.name = "Browse"
+    rar = machfs.File()
+    rar.data = b"Rar!\x1a\x07\x00" + bytes(64)
+    v["Game.rar"] = rar
+    h = harness(disks=[v])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    _dblclick(win, "Game.rar", h.settle)
+    h.settle()
+    assert h.d._alerts
+    assert "RAR archive: unpack it first" in h.d._alerts[0].text()
+
+
+def test_an_alias_that_lost_its_flag_is_still_an_alias():
+    from macrt.toolbox import aliases as al
+    from macrt.toolbox import files as fm
+    record = al.Alias(volume="Browse", parid=fm.ROOT, name="Widget",
+                      type=b"APPL", creator=b"TEST")
+    f = MacFile("Link", b"", build_fork([Resource(b"alis", 0, data=record.pack())]))
+    assert is_alias(f)              # no flag and no forks apart: an alias all the same
+    assert not is_alias(MacFile("Letter", b"Hello."))
+
+
+def test_an_alias_pointing_at_an_alias_opens_the_final_original(harness, monkeypatch):
+    from macrt.toolbox import aliases as al
+    from macrt.toolbox import files as fm
+    v = _alias_volume()
+    chain = al.Alias(volume="Browse", parid=fm.ROOT, name="Link",
+                     type=b"alis", creator=b"MACS")
+    outer = machfs.File()
+    outer.type, outer.creator = b"alis", b"MACS"
+    outer.flags = 0x8000
+    outer.rsrc = bytearray(build_fork([Resource(b"alis", 0, data=chain.pack())]))
+    v["Chain"] = outer
+    h = harness(disks=[v])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    launched = []
+    monkeypatch.setattr(h.d, "launch",
+                        lambda name, main, **kw: launched.append((name, kw["app"].name)))
+    _dblclick(win, "Chain", h.settle)
+    h.settle()
+    assert launched == [("Widget", "Widget")]

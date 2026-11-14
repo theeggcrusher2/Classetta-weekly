@@ -34,10 +34,11 @@ from PyQt6.QtWidgets import (
 
 from pathlib import Path
 
-from ..macfile import (ArchiveFolder, ContainerFolder, HostFolder, MacFile, alias_open,
-                       alias_original, archive_entries, archive_kind, archive_name,
-                       container_contents, extract_archive, image_kind, is_alias,
-                       is_control_panel, launch_target, list_folder)
+from ..macfile import (ArchiveFolder, ContainerFolder, HostFolder, MacFile, VolumeFolder,
+                       alias_open, alias_original, archive_entries, archive_kind,
+                       archive_name, container_contents, extract_archive, image_kind,
+                       is_alias, is_control_panel, launch_target, list_folder,
+                       load_volume, open_container)
 from ..process import size_resource
 from ..m68k.segload import has_code, why_no_code
 from ..resfork import InvalidForkError, is_fork, read_fork
@@ -654,8 +655,10 @@ class FilerWindow(_Hosted):
 
     def _open_item(self, f: MacFile, view: bool | None = None,
                    trace: bool | None = None) -> None:
-        """Open f, following an alias file to what it points at first."""
-        if is_alias(f):
+        """Open f, following alias files to what they point at first."""
+        for _ in range(8):
+            if not is_alias(f):
+                break
             target, volume, path = alias_open(f, self.display.system.files)
             if target is None and volume is None:
                 self._say(f"{f.name} is an alias, but its original can't be found.")
@@ -664,6 +667,9 @@ class FilerWindow(_Hosted):
                 self.display.open_filer(volume, path, self.options)
                 return
             f = target
+        else:
+            self._say(f"{f.name}'s aliases lead on eight deep, which they must not.")
+            return
         if f.type == FOLDER:
             if isinstance(self.volume, HostFolder):
                 sub_path = self.volume.path / f.name
@@ -797,6 +803,21 @@ class FilerWindow(_Hosted):
         if nested is not None:
             self.display.open_filer(ContainerFolder(nested, f.name), (), self.options)
             return
+        # A disk image is a volume to browse — what the command line
+        # opens it as — not a file to run.
+        if image_kind(f) is not None:
+            try:
+                p = Path(f.key)
+                volume = open_container(p) if p.is_file() else load_volume(f.data)
+            except (OSError, ValueError) as e:
+                self._say(str(e))
+                return
+            system = getattr(self.display, "system", None)
+            if system is not None and isinstance(volume, machfs.Volume):
+                # mounted, so aliases into it resolve, as for --disk
+                system.files.mount_folder(VolumeFolder(volume))
+            self.display.open_filer(volume, (), self.options)
+            return
         try:
             entries = archive_entries(f.data, f.name) if f.data else None
         except ValueError as e:
@@ -805,6 +826,14 @@ class FilerWindow(_Hosted):
         if entries is not None:
             self.display.open_filer(ArchiveFolder(entries, f.name, f.data), (),
                                     self.options)
+            return
+        kind = archive_kind(f)
+        if kind in ("StuffIt", "zip", "RAR", "7z"):
+            # an archive that is there but that the Filer cannot read:
+            # say so, as the command line does, rather than complain
+            # about a resource fork it never had
+            self._say(f"{f.name} is a {kind} archive: unpack it first, for "
+                      f"example with The Unarchiver (unar {f.name})")
             return
         try:
             target = launch_target(f)

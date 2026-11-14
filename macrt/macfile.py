@@ -338,8 +338,12 @@ def _alias_record(f: MacFile):
 
 
 def is_alias(f: MacFile) -> bool:
-    """Whether f is an alias file: isAlias set, and an 'alis' resource."""
-    return bool(f.flags & ALIAS_FLAG) and _alias_record(f) is not None
+    """Whether f is an alias file: an 'alis' resource, and the Finder's
+    isAlias flag or the file's own shape — type alis, or an empty data
+    fork — when a copy of it lost the flag."""
+    if _alias_record(f) is None:
+        return False
+    return bool(f.flags & ALIAS_FLAG) or f.type == b"alis" or not f.data
 
 
 def resolve_alias(f: MacFile, fs):
@@ -1094,6 +1098,10 @@ def archive_kind(f: MacFile) -> str | None:
         return "StuffIt"
     if d[:4] == b"PK\x03\x04":
         return "zip"
+    if d[:6] == b"Rar!\x1a\x07":
+        return "RAR"
+    if d[:6] == b"7z\xbc\xaf'\x1c":
+        return "7z"
     if not d:
         return None
     try:
@@ -1135,6 +1143,10 @@ def archive_name(f: MacFile) -> str | None:
         return "ZIP" if _eocd_in(f.tail(65536)) else None
     if d[:4] == b"SIT!" and d[10:14] == b"rLau" or d[:16] == b"StuffIt (c)1997-":
         return "StuffIt"
+    if d[:6] == b"Rar!\x1a\x07":
+        return "RAR"                    # until a reader is in macextract's registry
+    if d[:6] == b"7z\xbc\xaf'\x1c":
+        return "7z"
     return archive_name_on(d)
 
 
@@ -1492,7 +1504,7 @@ def _volume_or_file(path: str | os.PathLike) -> tuple[machfs.Volume | None, MacF
     if problem is not None and not f.rsrc:
         raise ValueError(f"{path.name}: {problem}")     # an image, but one that can't be read
     kind = archive_kind(f)
-    if kind in ("StuffIt", "zip"):
+    if kind in ("StuffIt", "zip", "RAR", "7z"):
         raise ValueError(f"{path.name} is a {kind} archive: unpack it first, for example "
                          f"with The Unarchiver (unar {path.name})")
     # Archive formats macextract recognises pass through: the Filer can
