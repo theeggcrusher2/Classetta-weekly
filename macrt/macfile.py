@@ -88,6 +88,16 @@ class MacFile:
         """Its data and resource forks' lengths."""
         return len(self.data), len(self.rsrc)
 
+    def head(self, size: int = 65536) -> bytes:
+        """Its data fork's first size bytes, for telling what it is
+        without reading a big file whole."""
+        return bytes(self.data[:size])
+
+    def tail(self, size: int = 65536) -> bytes:
+        """Its data fork's last size bytes, for finding a zip's end of
+        central directory without reading the fork whole."""
+        return bytes(self.data[-size:])
+
 
 class Folder(Protocol):
     def find(self, name: str) -> MacFile | None: ...
@@ -263,6 +273,34 @@ class _VolumeFile(MacFile):
             return self._node.sizes()
         return super().sizes()
 
+    def tail(self, size: int = 65536) -> bytes:
+        """Its data fork's last size bytes, reading only that much of
+        the disk image it's on."""
+        if isinstance(self._node, OnDisk):
+            _length, spans = self._node._forks.get("data", (0, []))
+            out = bytearray()
+            for at, end in reversed(spans):
+                want = size - len(out)
+                if want <= 0:
+                    break
+                out = self._node._disk[max(at, end - want):end] + out
+            return bytes(out[-size:])
+        return super().tail(size)
+
+    def head(self, size: int = 65536) -> bytes:
+        """Its data fork's first size bytes, reading only that much of
+        the disk image it's on."""
+        if isinstance(self._node, OnDisk):
+            _length, spans = self._node._forks.get("data", (0, []))
+            out = bytearray()
+            for at, end in spans:
+                want = size - len(out)
+                if want <= 0:
+                    break
+                out += self._node._disk[at:min(end, at + want)]
+            return bytes(out[:size])
+        return super().head(size)
+
     data = property(lambda self: self._get("data"), lambda self, v: self._set("data", v))
     rsrc = property(lambda self: self._get("rsrc"), lambda self, v: self._set("rsrc", v))
 
@@ -272,6 +310,127 @@ def _from_machfs(volume: machfs.Volume, folder: VolumeFolder, name: str,
     key = ":".join((volume.name, *folder.path, name))
     return _VolumeFile(f, name, None, None, bytes(f.type), bytes(f.creator), f.flags, key, folder,
                        crdate=getattr(f, 'crdate', 0), mddate=getattr(f, 'mddate', 0))
+
+
+# ---------------------------------------------------------------------------
+# Alias files
+# ---------------------------------------------------------------------------
+ALIAS_FLAG = 0x8000                  # the Finder's isAlias flag
+
+
+def _alias_record(f: MacFile):
+    """The alias record in f's resource fork, if it's one there."""
+    rsrc = getattr(f, "rsrc", b"")
+    if not rsrc:
+        return None
+    try:
+        fork = open_fork(bytes(rsrc))
+    except Exception:
+        return None
+    e = fork.find(b"alis", 0) or next((e for e in fork.entries if e.type == b"alis"), None)
+    if e is None:
+        return None
+    try:
+        from .toolbox import aliases as al
+        return al.Alias.parse(fork.raw(e))
+    except Exception:
+        return None
+
+
+def is_alias(f: MacFile) -> bool:
+    """Whether f is an alias file: isAlias set, and an 'alis' resource."""
+    return bool(f.flags & ALIAS_FLAG) and _alias_record(f) is not None
+
+
+def resolve_alias(f: MacFile, fs):
+    """Where an alias file's target is, as the Toolbox's Alias Manager
+    finds it; None when f isn't an alias or its original can't be found."""
+    from .toolbox import aliases as al
+    record = _alias_record(f)
+    if record is None or fs is None:
+        return None
+    try:
+        return al.resolve(fs, record)
+    except Exception:
+        return None
+
+
+def alias_original(f: MacFile, fs=None) -> str | None:
+    """The Mac pathname of an alias file's original, if it can be said."""
+    from .toolbox import aliases as al
+    found = resolve_alias(f, fs)
+    if found is None:
+        return None
+    if found.node is not None:
+        return al.path_of(found.node)
+    record = _alias_record(f)
+    if record is not None and record.path:
+        return record.path
+    return f"{found.volume.name}:{found.name}"
+
+
+def alias_open(f: MacFile, fs):
+    """What opening an alias file opens: the file, or a volume and the
+    path of the folder it points at — both None when its original can't
+    be found."""
+    found = resolve_alias(f, fs)
+    if found is None or found.node is None:
+        return None, None, ()
+    node = found.node
+    from .toolbox import files as fm
+    from .toolbox import aliases as al
+    if isinstance(node, (fm.File, fm.Dir)):
+        # The Alias Manager resolved it to a mounted catalog node: a File's
+        # own bytes are in its .ref (a machfs file a disk image was read
+        # into, or a MacFile when the volume is a host folder), and a
+        # Dir's is its name there.
+        path = tuple(n for n in al.path_of(node).split(":")[1:] if n)
+        if isinstance(node, fm.Dir):
+            machfs_volume = _machfs_volume(found.volume)
+            if machfs_volume is not None:
+                return None, machfs_volume, path       # a folder on a disk image
+            where = _host_path(found.volume, node)
+            return ((None, HostFolder(where), ()) if where is not None
+                    else (None, None, ()))
+        ref = node.ref
+        if isinstance(ref, MacFile):
+            return ref, None, ()                      # a file on a host folder
+        machfs_volume = _machfs_volume(found.volume)
+        if machfs_volume is not None:
+            folder = VolumeFolder(machfs_volume, path[:-1])
+            return (_from_machfs(machfs_volume, folder, node.name, ref), None, ())
+        return (MacFile(node.name, bytes(ref.data), bytes(ref.rsrc), bytes(ref.type),
+                        bytes(ref.creator), ref.flags, node.name), None, ())
+    if not isinstance(node, (machfs.File, machfs.Folder)):
+        return None, None, ()
+
+    def path_of(node) -> tuple[str, ...]:
+        names = []
+        while node.parent is not None:
+            names.append(node.name)
+            node = node.parent
+        return tuple(reversed(names))
+
+    if node.is_dir:
+        return None, found.volume, path_of(node)
+    return (_from_machfs(found.volume, VolumeFolder(found.volume, path_of(node.parent)),
+                         node.name, node), None, ())
+
+
+def _machfs_volume(volume):
+    """The machfs volume a mounted one was read from, if it was one."""
+    source = getattr(getattr(volume, "store", None), "source", None)
+    return source if isinstance(source, machfs.Volume) else None
+
+
+def _host_path(volume, node):
+    """Where a mounted directory is on the host, if its volume's store
+    keeps its files on the host."""
+    store = getattr(volume, "store", None)
+    try:
+        return store.path(node)
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -950,6 +1109,65 @@ def archive_kind(f: MacFile) -> str | None:
     return None
 
 
+# Each macextract module's name for itself, by its module name: the Kind
+# column's archive names.  Containers (MacBinary, BinHex, AppleSingle and
+# the text encodings) are left out: they hold one file, they aren't
+# archives to unpack.
+_ARCHIVE_KINDS = {
+    "abk": "Apple Backup", "arc": "ARC", "bzip2": "bzip2", "cpt": "Compact Pro",
+    "dd": "DiskDoubler", "gzip": "gzip", "lha": "LHA", "mar": "MAR",
+    "now": "Now Compress", "packit": "PackIt", "segments": "split archive",
+    "sit": "StuffIt", "sit5": "StuffIt 5", "sqp": "AppleLink package",
+    "tar": "tar", "tome": "Apple Installer Tome", "z": "Unix compress", "xz": "xz",
+    "zip": "ZIP",
+}
+
+
+def archive_name(f: MacFile) -> str | None:
+    """The name of the archive f is, if it's one macextract knows: the
+    Kind column's word for it, without opening it."""
+    d = f.head()
+    if not d:
+        return None
+    if d[:4] == b"PK\x03\x04":
+        # A bare PK header isn't enough to call it a zip: the end of
+        # central directory at the file's end is what says it's one.
+        return "ZIP" if _eocd_in(f.tail(65536)) else None
+    if d[:4] == b"SIT!" and d[10:14] == b"rLau" or d[:16] == b"StuffIt (c)1997-":
+        return "StuffIt"
+    return archive_name_on(d)
+
+
+def image_kind(f: MacFile) -> str | None:
+    """The name of the disk image f is, if it's one macrt opens: from its
+    first half-megabyte, so a big image isn't read whole for a listing."""
+    if getattr(f, "name", "").lower().endswith((".dtc", ".dt1")):
+        return "Disk Tracker catalog"
+    d = f.head(524296)
+    if not d:
+        return None
+    if moof.is_moof(d):
+        return "MOOF disk image"
+    if len(d) > DISKCOPY_HEADER and d[82:84] == b"\x01\x00" and d[0] < 64:
+        return "DiskCopy 4.2 image"
+    if _hfs_partition(d) is not None:
+        return "Apple partition map"
+    start = _volume_start(d)
+    if start is not None:
+        signature = start[1]
+        if signature == HFS_SIGNATURE:
+            return "HFS disk image"
+        if signature == MFS_SIGNATURE:
+            return "MFS disk image"
+        return "HFS+ disk image"
+    if len(d) > 16 * 2048 and d[16 * 2048:16 * 2048 + 6] == b"CD001\x01":
+        return "CD-ROM image"
+    sectors = _sectors(d)[0]
+    if sectors is not d and _volume_start(sectors) is not None:
+        return "Mac disk image"
+    return None
+
+
 def _container_kind(raw: bytes) -> str | None:
     """Which encoding raw is, if it's one load_file decodes — MacBinary,
     BinHex or AppleSingle — else None for plain bytes.  A container that's
@@ -1198,6 +1416,59 @@ def open_container(path: str | os.PathLike) -> machfs.Volume:
     if vol is not None:
         return vol
     raise ValueError(f"{Path(path).name}: not a recognized volume container")
+
+
+def archive_file(path: str | os.PathLike) -> ArchiveFolder | None:
+    """A Filer window's worth of an archive file on the host, or None when
+    it isn't one macextract reads.  Only the head of the file — and the
+    end, for a zip's central directory — is read to tell."""
+    path = Path(path)
+    try:
+        with path.open("rb") as f:
+            head = f.read(65536)
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            tail = f.read() if size <= 65536 else f.read()[-65536:]
+    except OSError:
+        return None
+    if is_disk_image(head):
+        return None                               # a volume, not an archive
+    d = head if size <= 65536 else head + tail      # a small file, whole
+    if not d:
+        return None
+    if not (archive_name_on(d) or (d[:4] == b"PK\x03\x04" and _eocd_in(tail or head))):
+        return None
+    with path.open("rb") as f:
+        raw = f.read()
+    entries = archive_entries(raw, path.name)
+    return None if entries is None else ArchiveFolder(entries, path.name, raw)
+
+
+def _eocd_in(tail: bytes) -> bool:
+    """Whether a zip's end-of-central-directory record is in its last bytes."""
+    at = tail.rfind(b"PK\x05\x06")
+    return at >= 0 and len(tail) - at >= 22
+
+
+def archive_name_on(d: bytes) -> str | None:
+    """archive_name, on bytes already read."""
+    if not d:
+        return None
+    try:
+        from macextract import formats
+    except ImportError:
+        return None
+    for module in formats.FORMATS:
+        name = module.__name__.rsplit(".", 1)[-1]
+        kind = _ARCHIVE_KINDS.get(name)
+        if kind is None:
+            continue
+        try:
+            if module.probe(d):
+                return kind
+        except Exception:
+            continue
+    return None
 
 
 def _volume_or_file(path: str | os.PathLike) -> tuple[machfs.Volume | None, MacFile | None]:

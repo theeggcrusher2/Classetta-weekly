@@ -33,7 +33,7 @@ from typing import Callable
 
 from PyQt6.QtCore import QEvent, QObject, QPoint, Qt, QTimer
 from PyQt6.QtGui import QCursor, QGuiApplication, QImage, QPainter, QPixmap
-from PyQt6.QtWidgets import QApplication, QMessageBox, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox, QVBoxLayout, QWidget
 
 from ..m68k.segload import Layout
 from ..m68k.sound import WaveFile
@@ -986,6 +986,32 @@ class Display(QObject):
         win.activateWindow()
         return win
 
+    def toggle_record_sound(self) -> None:
+        """File > Record Sound…: start or stop writing the Mac's sound to a
+        WAV file as it plays (--record-sound)."""
+        recording = [out for out in self.sound if isinstance(out, WaveFile)]
+        if recording:
+            for out in recording:
+                out.close()
+                self.sound.remove(out)
+            self.config.record_sound = None
+            self.show_alert(QMessageBox.Icon.Information, "Record Sound",
+                            "Stopped recording the Mac's sound.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self.host_window, "Record Sound", "sound.wav", "WAV files (*.wav)")
+        if not path:
+            return
+        try:
+            self.sound.append(WaveFile(path))
+        except OSError as e:
+            self.show_alert(QMessageBox.Icon.Warning, "Record Sound",
+                            f"Couldn't record to {path}: {e}")
+            return
+        self.config.record_sound = path
+        self.show_alert(QMessageBox.Icon.Information, "Record Sound",
+                        f"Recording the Mac's sound to {path}")
+
     def filer_menu_choice(self, menu_id: int, item: int) -> None:
         """A choice from the Filer's own menus, which no process answers."""
         if menu_id == APPLE_MENU_ID and item == 1:
@@ -1002,15 +1028,29 @@ class Display(QObject):
             front = self.front_filer
             if front is not None:
                 front.display_contents()
+        elif menu_id == FILE_MENU_ID and item == 5:
+            front = self.front_filer
+            if front is not None:
+                front.view_selected()
         elif menu_id == FILE_MENU_ID and item == 6:
             front = self.front_filer
             if front is not None:
-                front.save_catalog()
+                front.trace_selected()
         elif menu_id == FILE_MENU_ID and item == 7:
             front = self.front_filer
             if front is not None:
+                front.set_memory()
+        elif menu_id == FILE_MENU_ID and item == 9:
+            front = self.front_filer
+            if front is not None:
+                front.save_catalog()
+        elif menu_id == FILE_MENU_ID and item == 10:
+            front = self.front_filer
+            if front is not None:
                 front.extract()
-        elif menu_id == FILE_MENU_ID and item == 8:
+        elif menu_id == FILE_MENU_ID and item == 11:
+            self.toggle_record_sound()
+        elif menu_id == FILE_MENU_ID and item == 13:
             front = self.front_filer
             if front is not None:
                 front.close()

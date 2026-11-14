@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import time
 from concurrent.futures import Future
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
@@ -28,15 +28,16 @@ import machfs
 from PyQt6.QtCore import QEvent, QSize, Qt
 from PyQt6.QtGui import QFontMetrics, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QFileDialog, QHeaderView, QListWidget, QMessageBox,
-    QPlainTextEdit, QTreeWidget, QTreeWidgetItem, QWidget,
+    QApplication, QCheckBox, QFileDialog, QHeaderView, QInputDialog, QListWidget,
+    QMessageBox, QPlainTextEdit, QTreeWidget, QTreeWidgetItem, QWidget,
 )
 
 from pathlib import Path
 
-from ..macfile import (ArchiveFolder, ContainerFolder, HostFolder, MacFile, archive_entries,
-                       archive_kind, container_contents, extract_archive, is_control_panel,
-                       launch_target, list_folder)
+from ..macfile import (ArchiveFolder, ContainerFolder, HostFolder, MacFile, alias_open,
+                       alias_original, archive_entries, archive_kind, archive_name,
+                       container_contents, extract_archive, image_kind, is_alias,
+                       is_control_panel, launch_target, list_folder)
 from ..process import size_resource
 from ..m68k.segload import has_code, why_no_code
 from ..resfork import InvalidForkError, is_fork, read_fork
@@ -138,6 +139,11 @@ def _kind(f: MacFile) -> str:
         return "folder"
     if f.is_application:
         return "application"
+    if is_alias(f):
+        return "alias"
+    known = archive_name(f) or image_kind(f)
+    if known:
+        return known
     from ..assoc import associated_kind
     return associated_kind(f) or next((name for t, name in KINDS if f.type == t), "document")
 
@@ -147,6 +153,8 @@ def _icon_for(f: MacFile) -> str:
         return "folder"
     if f.is_application:
         return "application"
+    if is_alias(f):
+        return "alias"
     return SYSTEM_FILE_ICONS.get(f.type, "document")
 
 
@@ -618,16 +626,52 @@ class FilerWindow(_Hosted):
     def open_selected(self) -> None:
         """Open the currently selected item, as double-clicking it would."""
         item = self.selected_item()
-        if item is None:
-            return
-        if item.type == FOLDER:
+        if item is not None:
+            self._open_item(item)
+
+    def view_selected(self) -> None:
+        """Open the currently selected item showing its menus and windows
+        from its resources, without running its code."""
+        item = self.selected_item()
+        if item is not None:
+            self._open_item(item, view=True)
+
+    def trace_selected(self) -> None:
+        """Open the currently selected item logging the traps it calls."""
+        item = self.selected_item()
+        if item is not None:
+            self._open_item(item, trace=True)
+
+    def set_memory(self) -> None:
+        """Set the memory size, in K, launches from this window use in place
+        of what their SIZE resources ask for."""
+        current = (self.options.memory or 0) // 1024
+        k, ok = QInputDialog.getInt(
+            self, "Memory", "Memory size in K, in place of what SIZE asks for\n"
+            "(0: what the application asks for)", current, 0, 2 ** 24 - 1, 16)
+        if ok:
+            self.options = replace(self.options, memory=k * 1024 if k else None)
+
+    def _open_item(self, f: MacFile, view: bool | None = None,
+                   trace: bool | None = None) -> None:
+        """Open f, following an alias file to what it points at first."""
+        if is_alias(f):
+            target, volume, path = alias_open(f, self.display.system.files)
+            if target is None and volume is None:
+                self._say(f"{f.name} is an alias, but its original can't be found.")
+                return
+            if target is None:
+                self.display.open_filer(volume, path, self.options)
+                return
+            f = target
+        if f.type == FOLDER:
             if isinstance(self.volume, HostFolder):
-                sub_path = self.volume.path / item.name
+                sub_path = self.volume.path / f.name
                 self.display.open_filer(HostFolder(sub_path, self.volume.root), (), self.options)
             else:
-                self.display.open_filer(self.volume, self.path + (item.name,), self.options)
+                self.display.open_filer(self.volume, self.path + (f.name,), self.options)
             return
-        self._open(item)
+        self._open(f, view, trace)
 
     def get_info(self) -> None:
         """Open a Get Info window for the currently selected item."""
@@ -738,16 +782,10 @@ class FilerWindow(_Hosted):
         f = self.entries.get(name)
         if f is None:
             return
-        if f.type == FOLDER:
-            if isinstance(self.volume, HostFolder):
-                sub_path = self.volume.path / f.name
-                self.display.open_filer(HostFolder(sub_path, self.volume.root), (), self.options)
-            else:
-                self.display.open_filer(self.volume, self.path + (f.name,), self.options)
-            return
-        self._open(f)
+        self._open_item(f)
 
-    def _open(self, f: MacFile) -> None:
+    def _open(self, f: MacFile, view: bool | None = None,
+              trace: bool | None = None) -> None:
         # A file whose data fork is itself an encoding — MacBinary, BinHex
         # or AppleSingle — shows what it holds in a Filer window rather
         # than run.  A container that's there but damaged says so instead.
@@ -792,7 +830,7 @@ class FilerWindow(_Hosted):
         except ValueError as e:
             self._say(str(e))
             return
-        view = self.options.view
+        view = self.options.view if view is None else view
         if not view and not has_code(target) and not is_control_panel(target):
             print(f"{target.name} has no 68k code ({why_no_code(target)}), so macrt shows "
                   "its menus and windows from its resources.")
@@ -802,7 +840,8 @@ class FilerWindow(_Hosted):
             print(f"Opening {doc.name} with it.")
         try:
             self.display.launch(target.name, viewer_main if view else None, app=target,
-                                trace=self.options.trace, memory=self.options.memory)
+                                trace=self.options.trace if trace is None else trace,
+                                memory=self.options.memory)
         except (MemoryError, ValueError) as e:
             self._say(str(e))
 
@@ -1012,6 +1051,11 @@ class GetInfoWindow(AboutWindow):
     def __init__(self, display: Display, item: MacFile, parent: QWidget | None = None):
         lines = [f"Name: {item.name}"]
         lines.append(f"Kind: {_kind(item) if item.type != FOLDER else 'Folder'}")
+        if is_alias(item):
+            original = alias_original(item, getattr(getattr(display, "system", None),
+                                                    "files", None))
+            if original:
+                lines.append(f"Original: {original}")
         if item.type != FOLDER:
             data, rsrc = item.sizes()
             lines.append(f"Data fork: {data:,} bytes")
@@ -1269,13 +1313,36 @@ class AboutClassettaWindow(AboutWindow):
             f"Total Memory: {total_memory}K",
             f"Largest Unused Block: {largest_free}K",
         ]
-        super().__init__(display, title, lines, content_size=(400, 300),
+        super().__init__(display, title, lines, content_size=(400, 500),
                          parent=parent)
         self._processes = processes
         self._total_memory = total_memory
         self._largest_free = largest_free
         self._logo_icon = (theme.MAC_II_ICON if model_name == "Macintosh II"
                            else theme.MAC_PLUS_ICON)
+
+        # The command line's environment flags have no menu items — model,
+        # depth and their kin only set up how it runs — so they live here,
+        # populated.
+        cfg = display.config
+        self._env = [
+            ("Host", cfg.host),
+            ("Menu bar", cfg.menu_bar),
+            ("Screen", f"{cfg.screen_size[0]}×{cfg.screen_size[1]}"
+             if cfg.screen_size else "the host's"),
+            ("Speed", f"{cfg.speed}× a Mac Plus" if cfg.speed is not None
+             else "as fast as it goes"),
+            ("Model", model_name),
+            ("Depth", f"{cfg.depth} bits" if cfg.depth is not None else "the model's"),
+            ("Row bytes", str(cfg.row_bytes) if cfg.row_bytes is not None
+             else "a row's worth"),
+            ("Sound", "on" if cfg.sound else "off"),
+            ("Record sound", cfg.record_sound or "off"),
+            ("Sticky menus", "on" if cfg.sticky_menus else "classic"),
+            ("Rainbow apple", "on" if theme.RAINBOW_APPLE else "off"),
+            ("System file", cfg.system_file.name if cfg.system_file is not None
+             else "the built-in empty one"),
+        ]
 
         # Create scroll area for application list
         self._app_list_y = 0  # Will be set in paintEvent
@@ -1338,9 +1405,13 @@ class AboutClassettaWindow(AboutWindow):
         line_y = mem_top + row_h + 4
         p.drawLine(cx, line_y, cx + cw, line_y)
 
-        # Application list area
+        # The environment block's height: a divider over rows of label and value.
+        env_row = 16
+        env_height = 12 + len(self._env) * env_row + 8
+
+        # Application list area, above the environment block.
         self._app_list_y = line_y + 8
-        app_list_height = content.bottom() - self._app_list_y
+        app_list_height = content.bottom() - env_height - self._app_list_y
         row_height = self._row_height
 
         # Calculate total height of all rows
@@ -1378,7 +1449,7 @@ class AboutClassettaWindow(AboutWindow):
             row_y = self._app_list_y + i * row_height - self._scroll_offset
 
             # Skip rows that are not visible
-            if row_y + row_height < self._app_list_y or row_y > content.bottom():
+            if row_y + row_height < self._app_list_y or row_y > self._app_list_y + app_list_height:
                 continue
 
             # Clip drawing to the app list area
@@ -1423,6 +1494,19 @@ class AboutClassettaWindow(AboutWindow):
 
             p.restore()
 
+        # The divider over the environment, then its rows: label at the left,
+        # value beside it, elided if the text is longer than the window.
+        div_y = content.bottom() - env_height + 4
+        p.drawLine(cx, div_y, cx + cw, div_y)
+        label_x = col1_x
+        value_x = col1_x + max(bm.horizontalAdvance(label + ": ")
+                               for label, _ in self._env)
+        for i, (label, value) in enumerate(self._env):
+            y = div_y + 10 + i * env_row + bm.ascent()
+            p.drawText(label_x, y, label + ":")
+            p.drawText(value_x, y, bm.elidedText(value, Qt.TextElideMode.ElideRight,
+                                                   content.right() - 4 - value_x))
+
     def mousePressEvent(self, ev):  # noqa: N802
         # Handle scroll bar clicks
         if self._scroll_offset >= 0:
@@ -1437,7 +1521,11 @@ class AboutClassettaWindow(AboutWindow):
                     and pos.y() >= self._app_list_y):
                 # Click in scroll bar area
                 total_rows_height = len(self._processes) * self._row_height
-                app_list_height = content.bottom() - self._app_list_y
+                env_row = 16
+                env_height = 12 + len(self._env) * env_row + 8
+                app_list_height = content.bottom() - env_height - self._app_list_y
+                if pos.y() >= self._app_list_y + app_list_height:
+                    return
                 max_scroll = total_rows_height - app_list_height
 
                 if max_scroll > 0:
@@ -1486,7 +1574,8 @@ class FilerMenus:
             Menu(APPLE_MENU_ID, k.APPLE_MENU_TITLE,
                  parse_menu_items("About Classetta…;(-")),
             Menu(FILE_MENU_ID, "File", parse_menu_items(
-                 "(Open/O;(-;(Get Info…/I;(Display Contents/ ;(-;(Save Catalog…/S;(Extract…;(Close/W;(Eject/E")),
+                 "(Open/O;(-;(Get Info…/I;(Display Contents/ ;(View/R;(Trace Traps/T;"
+                 "(Memory…/M;(-;(Save Catalog…/S;(Extract…;(Record Sound…;(-;(Close/W;(Eject/E")),
             Menu(EDIT_MENU_ID, "Edit", parse_menu_items(
                 "(Undo/Z;(-;(Cut/X;(Copy/C;(Paste/V;(Clear;(Select All/A")),
             Menu(VIEW_MENU_ID, "View", parse_menu_items(
@@ -1498,8 +1587,9 @@ class FilerMenus:
 
     def bar_menus(self) -> list[Menu]:
         """The Filer's menu headings, with File > Open, File > Get Info,
-        File > Display Contents, File > Save Catalog and File > Extract
-        enabled only where appropriate."""
+        File > Display Contents, File > View and File > Trace Traps enabled
+        only where the selection takes them, and File > Save Catalog and
+        File > Extract enabled only where appropriate."""
         front = self.display.front_filer
         openable = front is not None and "open" in front.selected_actions()
         infoable = front is not None and "info" in front.selected_actions()
@@ -1512,7 +1602,11 @@ class FilerMenus:
             file_menu.items[0].enabled = openable
             file_menu.items[2].enabled = infoable
             file_menu.items[3].enabled = displayable
-            file_menu.items[5].enabled = savable
-            file_menu.items[6].enabled = extractable
-            file_menu.items[7].enabled = closeable
+            file_menu.items[4].enabled = openable     # View acts like Open
+            file_menu.items[5].enabled = openable     # Trace Traps too
+            file_menu.items[6].enabled = True         # Memory… sets the window default
+            file_menu.items[8].enabled = savable
+            file_menu.items[9].enabled = extractable
+            file_menu.items[10].enabled = True        # Record Sound… creates a host file
+            file_menu.items[12].enabled = closeable
         return list(self.menus.values())

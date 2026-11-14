@@ -37,9 +37,9 @@ from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication
 
 from .m68k.segload import has_code, why_no_code
-from .macfile import (ContainerFolder, HostFolder, archive_entries, ArchiveFolder,
-                     container_kind, is_control_panel,
-                      open_application, open_disks)
+from .macfile import (ArchiveFolder, ContainerFolder, HostFolder, MacFile, alias_open,
+                      archive_entries, archive_file, container_kind, is_alias,
+                      is_control_panel, launch_target, open_application, open_disks)
 from .resfork import is_fork
 from .toolbox import constants as k
 from .toolbox.api import Toolbox
@@ -351,6 +351,32 @@ def _screen_size(text: str) -> tuple[int, int] | None:
     return (w, h) if 0 < w <= 0x7FFF and 0 < h <= 0x7FFF else None
 
 
+def _target_error(f: MacFile) -> str | None:
+    """Why f can't be launched here, or None."""
+    if not f.rsrc and is_fork(f.data):
+        return (f"{f.name}'s resource fork is in its data fork: it was copied "
+                "by something that didn't keep its two forks apart.")
+    if not f.rsrc:
+        return (f"{f.name} has no resource fork. A Mac file has to travel in a "
+                "form that keeps it: MacBinary, BinHex, AppleDouble or a disk image.")
+    if not is_fork(f.rsrc):
+        return f"{f.name}'s resource fork is damaged"
+    return None
+
+
+def _launch_view(f: MacFile, view: bool) -> bool:
+    """Whether launching f shows its menus and windows from its resources:
+    asked for, or because f has no 68k code of its own."""
+    if view:
+        print("Showing its menus and windows from its resources, without running its code.")
+        return True
+    if has_code(f) or is_control_panel(f):
+        return False
+    print(f"{f.name} has no 68k code ({why_no_code(f)}), so macrt shows its menus "
+          "and windows from its resources.")
+    return True
+
+
 def open_targets(args):
     """The applications named on the command line, each with whether to
     show it from its resources rather than run its code, the disk images
@@ -358,13 +384,41 @@ def open_targets(args):
     no --app picks from, and with --filer a loose file's folder); or an
     error message."""
     browse = bool(args.file) and not args.app and not args.list
+    folders: list[HostFolder] = []
+    archives: list[ArchiveFolder] = []
+    files = []
+    for path in args.file or ():
+        p = Path(path)
+        if p.is_dir():                        # a host folder: browse it
+            folders.append(HostFolder(p))
+            continue
+        if not p.is_file():
+            files.append(path)                # let open_disks say it's missing
+            continue
+        try:
+            archive = archive_file(p)
+        except ValueError as e:          # a recognised archive, damaged
+            return None, None, None, str(e)
+        if archive is not None:               # an archive macextract reads: browse it
+            archives.append(archive)
+            continue
+        files.append(path)
     try:
-        apps, disks = open_disks(args.file, args.app, browse=browse)
+        apps, disks = open_disks(files, args.app, browse=browse)
     except (OSError, ValueError) as e:
         return None, None, None, str(e)
     targets = []
     filers = list(disks) if browse else []
+    filers += folders + archives
     for f in apps:
+        if is_alias(f):
+            # A loose alias file: the original it points at is what's
+            # opened, as from the Filer.  The volumes it points through are
+            # mounted only when the Display is made, so main resolves it
+            # before launch.
+            print(describe(f, full=args.list))
+            targets.append((f, bool(args.view)))
+            continue
         print(describe(f, full=args.list))
         for doc in f.documents:
             print(f"Opening {doc.name} with it.")
@@ -386,24 +440,10 @@ def open_targets(args):
                              for v in filers):
                     filers.append(f.folder)
             continue
-        if not f.rsrc and is_fork(f.data):
-            return None, None, None, (f"{f.name}'s resource fork is in its data fork: it "
-                                      "was copied by something that didn't keep its two "
-                                      "forks apart.")
-        if not f.rsrc:
-            return None, None, None, (f"{f.name} has no resource fork. A Mac file has to "
-                                      "travel in a form that keeps it: MacBinary, BinHex, "
-                                      "AppleDouble or a disk image.")
-        if not is_fork(f.rsrc):
-            return None, None, None, f"{f.name}'s resource fork is damaged"
-        view = args.view
-        if view:
-            print("Showing its menus and windows from its resources, without running its code.")
-        elif not has_code(f) and not is_control_panel(f):
-            print(f"{f.name} has no 68k code ({why_no_code(f)}), so macrt shows its menus "
-                  "and windows from its resources.")
-            view = True
-        targets.append((f, view))
+        err = _target_error(f)
+        if err is not None:
+            return None, None, None, err
+        targets.append((f, _launch_view(f, args.view)))
     return targets, disks, filers, None
 
 
@@ -450,6 +490,25 @@ def main(argv=None) -> int:
     if targets:
         try:
             for f, view in targets:
+                if is_alias(f):
+                    # A loose alias file: open the original it points at,
+                    # as the Filer does — an application, or a Filer window
+                    # on the folder it points at.
+                    target, volume, path = alias_open(f, display.system.files)
+                    if target is None and volume is None:
+                        raise ValueError(f"{f.name} is an alias, but its original "
+                                         "can't be found.")
+                    if target is None:
+                        display.open_filer(volume, path)
+                        continue
+                    print(describe(target, full=args.list))
+                    err = _target_error(target)
+                    if err is not None:
+                        raise ValueError(err)
+                    target = launch_target(target)
+                    for doc in target.documents:
+                        print(f"Opening {doc.name} with it.")
+                    f, view = target, _launch_view(target, view)
                 display.launch(f.name, viewer_main if view else None, app=f,
                                trace=args.trace_traps,
                                memory=args.memory * 1024 if args.memory else None)

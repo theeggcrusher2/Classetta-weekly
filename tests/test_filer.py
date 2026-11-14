@@ -11,12 +11,13 @@ from PyQt6.QtTest import QTest
 
 from conftest import LB, NO_MODS, Recorder
 from macrt.demo import finish, open_targets, parse_args
-from macrt.macfile import ContainerFolder, HostFolder, MacFile, open_disks
+from macrt.macfile import (ContainerFolder, HostFolder, MacFile, image_kind, load_volume,
+                           open_disks)
 from macrt.resfork import build_fork, Resource, resPurgeable
 from macrt.toolbox import constants as k
 from macrt.ui import theme
 from macrt.ui.filer import (ARCHIVE_ICON, FILE_MENU_ID, SPECIAL_MENU_ID, FilerOptions,
-                             _container_icon)
+                             GetInfoWindow, _container_icon)
 from macrt.ui.stdfile import DISK_ICON, DOCUMENT_ICON, FOLDER_ICON
 from builders import binhex
 from test_files import FORK, apple_single, macbinary
@@ -37,6 +38,48 @@ def _volume(games: bool = True) -> machfs.Volume:
         game.type, game.creator, game.rsrc = b"APPL", b"TEST", bytearray(FORK)
         games_["Game"] = game
         v["Games"] = games_
+    return v
+
+
+def _alias_volume() -> machfs.Volume:
+    """A disk with an application, and an alias file pointing at it."""
+    from macrt.toolbox import aliases as al
+    from macrt.toolbox import files as fm
+    v = machfs.Volume()
+    v.name = "Browse"
+    app = machfs.File()
+    app.type, app.creator, app.data, app.rsrc = b"APPL", b"TEST", bytearray(b"CODE"), bytearray(
+        FORK)
+    v["Widget"] = app
+    record = al.Alias(volume="Browse", parid=fm.ROOT, name="Widget",
+                      type=b"APPL", creator=b"TEST")
+    link = machfs.File()
+    link.type, link.creator = b"alis", b"MACS"
+    link.flags = 0x8000
+    link.rsrc = bytearray(build_fork([Resource(b"alis", 0, data=record.pack())]))
+    v["Link"] = link
+    return v
+
+
+def _archive_kinds_volume() -> machfs.Volume:
+    """A disk with a zip, a gzip and a plain document."""
+    import gzip as gz
+    import io
+    import zipfile
+    v = machfs.Volume()
+    v.name = "Kinds"
+    zipbuf = io.BytesIO()
+    with zipfile.ZipFile(zipbuf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("Inner.txt", b"payload")
+    zipped = machfs.File()
+    zipped.type, zipped.creator, zipped.data = b"TEXT", b"ttxt", bytearray(zipbuf.getvalue())
+    v["Packed.zip"] = zipped
+    gzipped = machfs.File()
+    gzipped.type, gzipped.creator, gzipped.data = b"TEXT", b"ttxt", bytearray(gz.compress(b"x"))
+    v["Packed.gz"] = gzipped
+    doc = machfs.File()
+    doc.type, doc.creator, doc.data = b"TEXT", b"ttxt", b"plain"
+    v["Plain"] = doc
     return v
 
 
@@ -277,6 +320,94 @@ def test_a_file_wears_its_own_icon_only_when_marked_as_having_one():
     v["Plain"] = plain
     assert _container_icon(v, ("Marked",)) == ["#" * 16] * 16
     assert _container_icon(v, ("Plain",)) == DOCUMENT_ICON
+
+
+def test_the_alias_file_is_kind_alias(harness):
+    h = harness(disks=[_alias_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    assert _rows(win) == [("Link", "alias"), ("Widget", "application")]
+
+
+def test_opening_an_alias_opens_its_original(harness, monkeypatch):
+    h = harness(disks=[_alias_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    launched = []
+    monkeypatch.setattr(h.d, "launch",
+                        lambda name, main, **kw: launched.append((name, kw["app"].name)))
+    _dblclick(win, "Link", h.settle)
+    h.settle()
+    assert launched == [("Widget", "Widget")]
+
+
+def _alias_image(tmp_path) -> machfs.Volume:
+    """A disk image with an application, and an alias file pointing at it,
+    read off the image so its files are the OnDisk kind an ISO's are."""
+    from macrt.toolbox import aliases as al
+    from macrt.toolbox import files as fm
+    v = machfs.Volume()
+    v.name = "Browse"
+    app = machfs.File()
+    app.type, app.creator, app.data, app.rsrc = b"APPL", b"TEST", bytearray(b"CODE"), bytearray(
+        FORK)
+    v["Widget"] = app
+    record = al.Alias(volume="Browse", parid=fm.ROOT, name="Widget",
+                      type=b"APPL", creator=b"TEST")
+    link = machfs.File()
+    link.type, link.creator = b"alis", b"MACS"
+    link.flags = 0x8000
+    link.rsrc = bytearray(build_fork([Resource(b"alis", 0, data=record.pack())]))
+    v["Link"] = link
+    p = tmp_path / "Alias.dsk"
+    p.write_bytes(v.write(size=800 * 1024))
+    return load_volume(str(p))
+
+
+def test_opening_an_alias_on_a_disk_image_reaches_its_original(harness, monkeypatch,
+                                                              tmp_path):
+    h = harness(disks=[_alias_image(tmp_path)])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    assert sorted((n, f.type) for n, f in win.volume.items()) == [
+        ("Link", b"alis"), ("Widget", b"APPL")]
+    launched = []
+    monkeypatch.setattr(h.d, "launch",
+                        lambda name, main, **kw: launched.append((name, kw["app"].name)))
+    _dblclick(win, "Link", h.settle)
+    h.settle()
+    assert launched == [("Widget", "Widget")]
+
+
+def test_get_info_on_an_alias_shows_its_original(harness):
+    h = harness(disks=[_alias_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    link = win.entries["Link"]
+    info = GetInfoWindow(h.d, link)
+    h.settle()
+    text = "\n".join(info._lines)
+    assert "Kind: alias" in text
+    assert "Original: Browse:Widget" in text
+
+
+def test_the_kind_column_names_known_archives(harness):
+    h = harness(disks=[_archive_kinds_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    assert _rows(win) == [("Packed.gz", "gzip"), ("Packed.zip", "ZIP"), ("Plain", "document")]
+
+
+def test_the_kind_column_names_known_images(harness):
+    import machfs
+    from macrt.macfile import MacFile
+    image = machfs.Volume()
+    image.name = "Tiny"
+    f = MacFile("Disk", image.write(800 * 1024), b"", b"disk", b"disk")
+    assert image_kind(f) == "HFS disk image"
+    assert MacFile("Cat.dtc", b"x", b"", b"TEXT", b"ttxt").name and \
+        image_kind(MacFile("Cat.dtc", b"x", b"", b"TEXT", b"ttxt")) == "Disk Tracker catalog"
+    assert image_kind(MacFile("No", b"plain", b"", b"TEXT", b"ttxt")) is None
 
 
 def test_the_same_folder_is_one_window(harness):
@@ -1129,7 +1260,7 @@ def test_special_shutdown_closes_the_windows_before_the_qt_app(harness, monkeypa
 def _file_menu_save_enabled(h) -> bool:
     for menu, _cell in h.d.global_bar.cells():
         if menu.title == "File":
-            return menu.items[5].enabled
+            return menu.items[8].enabled
     raise AssertionError("the menu bar is showing no File menu")
 
 
@@ -1729,7 +1860,7 @@ def test_extract_menu_extracts_the_browsed_archive(harness, tmp_path, monkeypatc
     dest = tmp_path / "out"
     dest.mkdir()
     _dir_dialog(monkeypatch, dest)
-    h.d.filer_menu_choice(FILE_MENU_ID, 7)          # File > Extract…
+    h.d.filer_menu_choice(FILE_MENU_ID, 10)         # File > Extract…
     h.settle()
     assert (dest / "Inner One").read_bytes() == b"data one"
     assert (dest / "Inner App").read_bytes() == b"data two"
@@ -1745,7 +1876,7 @@ def test_extract_menu_item_enabled_state(harness, tmp_path):
     def extract_enabled():
         for menu, _cell in h.d.global_bar.cells():
             if menu.title == "File":
-                return menu.items[6].enabled, menu.items[5].enabled
+                return menu.items[9].enabled, menu.items[8].enabled
         raise AssertionError("the menu bar is showing no File menu")
 
     assert extract_enabled()[0] is False            # a volume with nothing selected
@@ -1763,3 +1894,82 @@ def test_extract_menu_item_enabled_state(harness, tmp_path):
     extract, save = extract_enabled()
     assert extract is True                          # browsing an archive
     assert save is False                            # Save Catalog is for browse views
+
+
+def test_about_classetta_shows_the_command_line_environment(harness):
+    h = harness(disks=[_volume()], model="ii", depth=8, speed=1.5)
+    h.d.show_about_classetta()
+    h.settle()
+    about = h.d.about_windows[0]
+    env = dict(about._env)
+    assert env["Model"] == h.d.system.model.name
+    assert env["Depth"] == "8 bits"
+    assert env["Speed"] == "1.5× a Mac Plus"
+    assert env["Host"] == "screen"                    # the harness's host
+    assert env["Sound"] in ("on", "off")
+    assert env["Sticky menus"] in ("on", "classic")
+    assert env["System file"] == "the built-in empty one"
+    about.close()
+    h.settle()
+
+
+def test_view_menu_item_opens_from_resources(harness, monkeypatch):
+    from macrt.viewer import viewer_main
+    h = harness(disks=[_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    win.tree.setCurrentItem(_item(win, "Widget"))
+    h.settle()
+    launched = []
+    monkeypatch.setattr(h.d, "launch",
+                        lambda name, main, **kw: launched.append((name, main, kw)))
+    win.view_selected()
+    h.settle()
+    assert len(launched) == 1
+    assert launched[0][1] is viewer_main              # resources, not its code
+
+
+def test_trace_traps_menu_item_passes_trace(harness, monkeypatch):
+    h = harness(disks=[_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    win.tree.setCurrentItem(_item(win, "Widget"))
+    h.settle()
+    launched = []
+    monkeypatch.setattr(h.d, "launch",
+                        lambda name, main, **kw: launched.append((name, main, kw)))
+    win.trace_selected()
+    h.settle()
+    assert len(launched) == 1
+    assert launched[0][2]["trace"] is True
+
+
+def test_memory_menu_item_sets_the_window_default(harness, monkeypatch):
+    from PyQt6.QtWidgets import QInputDialog
+    h = harness(disks=[_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    monkeypatch.setattr(QInputDialog, "getInt",
+                        staticmethod(lambda *a, **k: (512, True)))
+    win.set_memory()
+    assert win.options.memory == 512 * 1024
+    monkeypatch.setattr(QInputDialog, "getInt",
+                        staticmethod(lambda *a, **k: (0, True)))
+    win.set_memory()
+    assert win.options.memory is None                # 0: what the SIZE resource asks for
+
+
+def test_record_sound_menu_item_starts_and_stops_recording(harness, monkeypatch, tmp_path):
+    from PyQt6.QtWidgets import QFileDialog
+    from macrt.m68k.sound import WaveFile
+    h = harness(disks=[_volume()])
+    out = tmp_path / "out.wav"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName",
+                        staticmethod(lambda *a, **k: (str(out), "")))
+    h.d.toggle_record_sound()
+    assert h.d.config.record_sound == str(out)
+    assert any(isinstance(o, WaveFile) for o in h.d.sound)
+    assert out.exists()
+    h.d.toggle_record_sound()
+    assert h.d.config.record_sound is None
+    assert not any(isinstance(o, WaveFile) for o in h.d.sound)

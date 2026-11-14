@@ -98,7 +98,7 @@ def test_command_line_errors(tmp_path, capsys):
     assert "No such file" in fails(tmp_path / "nothing.bin")
     sit = tmp_path / "Game.sit"
     sit.write_bytes(b"SIT!" + bytes(6) + b"rLau" + bytes(100))
-    assert "StuffIt archive: unpack it first" in fails(sit)
+    assert "StuffIt" in fails(sit)           # macextract says what's wrong with it
     bare = tmp_path / "Game"
     bare.write_bytes(b"just a data fork, the resource fork was lost on the way")
     assert "has no resource fork" in fails(bare)

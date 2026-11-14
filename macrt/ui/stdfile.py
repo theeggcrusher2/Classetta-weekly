@@ -177,6 +177,23 @@ DOCUMENT_ICON = [
     "###########",
 ]
 
+ALIAS_ICON = [
+    "########...",
+    "#......##..",
+    "#......#.#.",
+    "#......####",
+    "#.........#",
+    "#..#......#",
+    "#..##.....#",
+    "#..###....#",
+    "#..####...#",
+    "#..#####..#",
+    "#..###....#",
+    "#..##.....#",
+    "#..#......#",
+    "###########",
+]
+
 DISK_ICON = [
     "################",
     "#..............#",
@@ -266,8 +283,8 @@ FONT_ICON = [
     "###.........",
 ]
 
-ICONS = {"folder": FOLDER_ICON, "document": DOCUMENT_ICON, "volume": DISK_ICON,
-         "application": theme.GENERIC_APP_ICON, "desktop": DESKTOP_ICON,
+ICONS = {"folder": FOLDER_ICON, "document": DOCUMENT_ICON, "alias": ALIAS_ICON,
+         "volume": DISK_ICON, "application": theme.GENERIC_APP_ICON, "desktop": DESKTOP_ICON,
          "control_panel": CONTROL_PANEL_ICON, "extension": EXTENSION_ICON,
          "desk_accessory": DESK_ACCESSORY_ICON, "font": FONT_ICON}
 
