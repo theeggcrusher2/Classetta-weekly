@@ -11,8 +11,8 @@ from PyQt6.QtTest import QTest
 
 from conftest import LB, NO_MODS, Recorder
 from macrt.demo import finish, open_targets, parse_args
-from macrt.macfile import (ContainerFolder, HostFolder, MacFile, image_kind, is_alias,
-                           load_volume, open_disks)
+from macrt.macfile import (ArchiveFolder, ContainerFolder, HostFolder, MacFile, image_kind,
+                           is_alias, load_volume, open_disks)
 from macrt.resfork import build_fork, Resource, resPurgeable
 from macrt.toolbox import constants as k
 from macrt.ui import theme
@@ -2032,6 +2032,30 @@ def test_a_loose_disk_image_opens_as_a_volume(harness, tmp_path):
     assert len(opened) == 1
     assert isinstance(opened[0].volume, machfs.Volume)
     assert opened[0].volume.name == "Inner"
+    assert not h.d._alerts
+
+
+def test_an_archive_on_a_lazy_volume_opens(harness, tmp_path):
+    """An archive whose forks are still on the disk image — the shape
+    every file on an opened ISO has — lists and opens like any other."""
+    import zipfile
+    z = tmp_path / "t.zip"
+    with zipfile.ZipFile(z, "w") as f:
+        f.writestr("Inner", bytes(range(256)) * 40)      # spans several extents
+    inner = machfs.Volume()
+    inner.name = "Inner"
+    inner["Thing.zip"] = (lambda f: (setattr(f, "data", z.read_bytes()), f)[1])(
+        machfs.File())
+    img = tmp_path / "Outer.dsk"
+    img.write_bytes(inner.write(size=800 * 1024))
+    h = harness(disks=[])
+    win = h.d.open_filer(load_volume(str(img)))
+    h.settle()
+    _dblclick(win, "Thing.zip", h.settle)
+    h.settle()
+    opened = [w for w in h.d.filer_windows if w is not win]
+    assert len(opened) == 1
+    assert isinstance(opened[0].volume, ArchiveFolder)
     assert not h.d._alerts
 
 

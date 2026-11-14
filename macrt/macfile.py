@@ -283,7 +283,7 @@ class _VolumeFile(MacFile):
                 want = size - len(out)
                 if want <= 0:
                     break
-                out = self._node._disk[max(at, end - want):end] + out
+                out = bytearray(self._node._disk[max(at, end - want):end]) + out
             return bytes(out[-size:])
         return super().tail(size)
 
