@@ -905,8 +905,11 @@ def test_archives_are_refused(tmp_path):
     with pytest.raises(ValueError, match="zip archive"):
         open_application(tmp_path / "game.zip")
     (tmp_path / "Game.rar").write_bytes(b"Rar!\x1a\x07\x00" + bytes(100))
-    with pytest.raises(ValueError, match="RAR archive"):
-        open_application(tmp_path / "Game.rar")
+    # RAR is in macextract's registry, so it passes through like
+    # bzip2, xz and the rest: no archive refusal here; launching one
+    # is refused downstream, and the Filer can browse it.
+    rar_file = open_application(tmp_path / "Game.rar")
+    assert rar_file.data.startswith(b"Rar!")
 
 
 def test_open_application_reads_single_files(tmp_path):

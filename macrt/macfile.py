@@ -1098,10 +1098,6 @@ def archive_kind(f: MacFile) -> str | None:
         return "StuffIt"
     if d[:4] == b"PK\x03\x04":
         return "zip"
-    if d[:6] == b"Rar!\x1a\x07":
-        return "RAR"
-    if d[:6] == b"7z\xbc\xaf'\x1c":
-        return "7z"
     if not d:
         return None
     try:
@@ -1124,9 +1120,10 @@ def archive_kind(f: MacFile) -> str | None:
 _ARCHIVE_KINDS = {
     "abk": "Apple Backup", "arc": "ARC", "bzip2": "bzip2", "cpt": "Compact Pro",
     "dd": "DiskDoubler", "gzip": "gzip", "lha": "LHA", "mar": "MAR",
-    "now": "Now Compress", "packit": "PackIt", "segments": "split archive",
-    "sit": "StuffIt", "sit5": "StuffIt 5", "sqp": "AppleLink package",
-    "tar": "tar", "tome": "Apple Installer Tome", "z": "Unix compress", "xz": "xz",
+    "now": "Now Compress", "packit": "PackIt", "rar": "RAR",
+    "segments": "split archive", "sevenz": "7z", "sit": "StuffIt",
+    "sit5": "StuffIt 5", "sqp": "AppleLink package", "tar": "tar",
+    "tome": "Apple Installer Tome", "z": "Unix compress", "xz": "xz",
     "zip": "ZIP",
 }
 
@@ -1143,10 +1140,6 @@ def archive_name(f: MacFile) -> str | None:
         return "ZIP" if _eocd_in(f.tail(65536)) else None
     if d[:4] == b"SIT!" and d[10:14] == b"rLau" or d[:16] == b"StuffIt (c)1997-":
         return "StuffIt"
-    if d[:6] == b"Rar!\x1a\x07":
-        return "RAR"                    # until a reader is in macextract's registry
-    if d[:6] == b"7z\xbc\xaf'\x1c":
-        return "7z"
     return archive_name_on(d)
 
 
@@ -1504,7 +1497,7 @@ def _volume_or_file(path: str | os.PathLike) -> tuple[machfs.Volume | None, MacF
     if problem is not None and not f.rsrc:
         raise ValueError(f"{path.name}: {problem}")     # an image, but one that can't be read
     kind = archive_kind(f)
-    if kind in ("StuffIt", "zip", "RAR", "7z"):
+    if kind in ("StuffIt", "zip"):
         raise ValueError(f"{path.name} is a {kind} archive: unpack it first, for example "
                          f"with The Unarchiver (unar {path.name})")
     # Archive formats macextract recognises pass through: the Filer can

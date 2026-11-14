@@ -2072,7 +2072,7 @@ def test_an_alias_to_a_disk_image_opens_the_image(harness):
     assert not h.d._alerts
 
 
-def test_an_archive_the_filer_cannot_read_says_to_unpack_it_first(harness):
+def test_a_corrupt_rar_archive_says_what_is_wrong(harness):
     v = machfs.Volume()
     v.name = "Browse"
     rar = machfs.File()
@@ -2084,7 +2084,7 @@ def test_an_archive_the_filer_cannot_read_says_to_unpack_it_first(harness):
     _dblclick(win, "Game.rar", h.settle)
     h.settle()
     assert h.d._alerts
-    assert "RAR archive: unpack it first" in h.d._alerts[0].text()
+    assert "RAR" in h.d._alerts[0].text()
 
 
 def test_an_alias_that_lost_its_flag_is_still_an_alias():

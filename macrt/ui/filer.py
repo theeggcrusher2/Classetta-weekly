@@ -828,7 +828,7 @@ class FilerWindow(_Hosted):
                                     self.options)
             return
         kind = archive_kind(f)
-        if kind in ("StuffIt", "zip", "RAR", "7z"):
+        if kind in ("StuffIt", "zip"):
             # an archive that is there but that the Filer cannot read:
             # say so, as the command line does, rather than complain
             # about a resource fork it never had
