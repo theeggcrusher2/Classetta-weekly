@@ -255,6 +255,18 @@ Preserve existing behavior unless a task explicitly changes it. If the codebase 
   - Test progressively deeper nesting, including a case with multiple container types.
   - Ensure failures identify the level or item that could not be opened.
 
+- [ ] **30. Show version resources in Get Info windows**
+  - When a file's resource fork carries `vers` resources, show the short version string (ID 1) and the long version string (ID 2) in its Get Info window, as the Finder's Get Info does.
+  - Files without `vers` resources show neither field; the window is unchanged, and missing or malformed resources never crash it.
+  - Works for files reached any way: on a volume, inside a disk image, inside an archive.
+  - Test with generated fixtures only.
+
+- [ ] **31. Show archive contents as nested folders, not flat files with unix filepaths**
+  - Archive member names that contain "/" appear as folders containing the members beneath them, so the Filer window shows a tree, not one flat list of full unix paths.
+  - Drill-down, selection, extraction and the sanitiser keep working through the nesting; names that escape the archive ("..", leading "/") stay refused.
+  - Single-file and single-folder archives look the same as they do today.
+  - Test with generated fixtures only; no real archives committed.
+
 ## General acceptance criteria
 
 A task is complete when:
