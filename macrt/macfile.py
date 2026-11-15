@@ -99,6 +99,70 @@ class MacFile:
         return bytes(self.data[-size:])
 
 
+class LazyArchiveFile(MacFile):
+    """An archive member whose forks decode on first touch, so listing
+    an archive reads its directory only.
+
+    ``data`` and ``rsrc`` are properties: a fork the archive declares
+    empty is returned without decoding anything, and ``sizes()``
+    reports the declared lengths until a fork is touched.  A fork that
+    decodes damaged raises ValueError, as the archive's open does.
+    """
+
+    def __init__(self, name: str, type: bytes, creator: bytes, flags: int,
+                 crdate: int, mddate: int, data_size: int, rsrc_size: int,
+                 loader):
+        super().__init__(name, type=type, creator=creator, flags=flags,
+                         crdate=crdate, mddate=mddate)
+        self._declared_data = data_size
+        self._declared_rsrc = rsrc_size
+        self._loader = loader
+        self._loaded = False
+
+    def _materialise(self):
+        self._loaded = True
+        loader, self._loader = self._loader, None
+        self._data, self._rsrc = loader()
+
+    @property
+    def data(self) -> bytes:
+        if not self._loaded:
+            if self._declared_data == 0:
+                return b""
+            self._materialise()
+        return self._data
+
+    @data.setter
+    def data(self, value: bytes):
+        self._loaded = True
+        self._data = value
+
+    @property
+    def rsrc(self) -> bytes:
+        if not self._loaded:
+            if self._declared_rsrc == 0:
+                return b""
+            self._materialise()
+        return self._rsrc
+
+    @rsrc.setter
+    def rsrc(self, value: bytes):
+        self._loaded = True
+        self._rsrc = value
+
+    def sizes(self) -> tuple[int, int]:
+        """Its data and resource forks' lengths — the archive's own
+        declared lengths until a fork is decoded."""
+        if self._loaded:
+            return len(self._data), len(self._rsrc)
+        return self._declared_data, self._declared_rsrc
+
+    def __repr__(self):
+        # Without the forks: printing one must not decode it.
+        return (f"{type(self).__name__}({self.name!r}, "
+                f"declared={self._declared_data}+{self._declared_rsrc})")
+
+
 class Folder(Protocol):
     def find(self, name: str) -> MacFile | None: ...
 
@@ -1258,7 +1322,10 @@ def archive_entries(data: bytes, name: str = "archive") -> list[MacFile] | None:
     """macextract's entries as MacFiles — one per file in the archive —
     or None when macextract does not recognise the bytes.  Recognised
     but damaged raises ValueError, as the other parsers do; an archive
-    that wants a password says so the same way."""
+    that wants a password says so the same way.  The members' forks
+    decode on first touch, so listing reads the directory only; a
+    member whose body decodes damaged raises ValueError when its fork
+    is first touched."""
     if not data:
         return None
     try:
@@ -1281,12 +1348,18 @@ def archive_entries(data: bytes, name: str = "archive") -> list[MacFile] | None:
         raise ValueError(f"{name}: {e}")
     out: list[MacFile] = []
     for entry in archive.entries:
-        out.append(MacFile(entry.name,
-                           archive.read(entry, "data"),
-                           archive.read(entry, "rsrc"),
-                           entry.type, entry.creator,
-                           flags=entry.finder_flags,
-                           crdate=entry.created, mddate=entry.modified))
+        def _load(entry=entry):
+            try:
+                return (archive.read(entry, "data"),
+                        archive.read(entry, "rsrc"))
+            except macextract.MacExtractError as e:
+                raise ValueError(f"{entry.name}: {e}")
+        # The forks decode on first touch, not while the archive is
+        # listed — listing reads the directory only.
+        out.append(LazyArchiveFile(entry.name, entry.type, entry.creator,
+                                   entry.finder_flags, entry.created,
+                                   entry.modified, entry.data_size,
+                                   entry.resource_size, _load))
     return out
 
 
