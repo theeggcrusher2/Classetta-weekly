@@ -1122,8 +1122,8 @@ _ARCHIVE_KINDS = {
     "dd": "DiskDoubler", "gzip": "gzip", "lha": "LHA", "mar": "MAR",
     "now": "Now Compress", "packit": "PackIt", "rar": "RAR",
     "segments": "split archive", "sevenz": "7z", "sit": "StuffIt",
-    "sit5": "StuffIt 5", "spacesaver": "SpaceSaver", "sqp": "AppleLink package", "tar": "tar",
-    "tome": "Apple Installer Tome", "z": "Unix compress", "xz": "xz",
+    "sit5": "StuffIt 5", "spacesaver": "SpaceSaver", "sqp": "AppleLink package", "superdisk": "SuperDisk!",
+    "tar": "tar", "tome": "Apple Installer Tome", "z": "Unix compress", "xz": "xz",
     "zip": "ZIP",
 }
 

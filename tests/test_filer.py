@@ -74,8 +74,26 @@ def _spacesaver_blob(payload: bytes) -> bytes:
     return bytes(hdr) + payload
 
 
+def _superdisk_blob(payload: bytes) -> bytes:
+    """A minimal SuperDisk! single-file container, data fork stored."""
+    import struct
+    name = b"Packed"
+    head = bytearray(31)
+    struct.pack_into(">I", head, 0, len(payload))
+    struct.pack_into(">I", head, 4, len(payload))
+    head[12:16] = b"TEXT"
+    head[16:20] = b"ttxt"
+    head[30] = len(name)
+    head += name
+    if len(head) & 1:
+        head += b"\x00"
+    body = struct.pack(">H", 0x8000 | (len(payload) + 2)) + payload
+    return bytes(head) + body
+
+
 def _archive_kinds_volume() -> machfs.Volume:
-    """A disk with a zip, a gzip, a SpaceSaver and a plain document."""
+    """A disk with a zip, a gzip, a SpaceSaver, a SuperDisk! and a
+    plain document."""
     import gzip as gz
     import io
     import zipfile
@@ -94,6 +112,10 @@ def _archive_kinds_volume() -> machfs.Volume:
     ssaved.type, ssaved.creator, ssaved.data = b"TEXT", b"ttxt", bytearray(
         _spacesaver_blob(b"in situ, the file keeps its name. "))
     v["Packed.sit"] = ssaved
+    sdisk = machfs.File()
+    sdisk.type, sdisk.creator, sdisk.data = b"TEXT", b"ttxt", bytearray(
+        _superdisk_blob(b"an auto-expanding file. "))
+    v["Packed.x"] = sdisk
     doc = machfs.File()
     doc.type, doc.creator, doc.data = b"TEXT", b"ttxt", b"plain"
     v["Plain"] = doc
@@ -413,7 +435,8 @@ def test_the_kind_column_names_known_archives(harness):
     win = h.d.open_filer(h.d.config.disks[0])
     h.settle()
     assert _rows(win) == [("Packed.gz", "gzip"), ("Packed.sit", "SpaceSaver"),
-                          ("Packed.zip", "ZIP"), ("Plain", "document")]
+                          ("Packed.x", "SuperDisk!"), ("Packed.zip", "ZIP"),
+                          ("Plain", "document")]
 
 
 def test_the_kind_column_names_known_images(harness):

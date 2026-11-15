@@ -949,6 +949,34 @@ def test_archive_file_browses_a_spacesaver(tmp_path):
     assert f.type == b"TEXT" and f.creator == b"ttxt"
 
 
+def test_archive_file_browses_a_superdisk(tmp_path):
+    # A SuperDisk! single-file container opens as a Filer listing whose
+    # entry keeps the name the container itself carries, and its data
+    # fork round-trips.
+    payload = b"auto-expanded payload"
+    name = b"Expanded"
+    head = bytearray(31)
+    struct.pack_into(">I", head, 0, len(payload))
+    struct.pack_into(">I", head, 4, len(payload))
+    head[12:16] = b"TEXT"
+    head[16:20] = b"ttxt"
+    head[30] = len(name)
+    head += name
+    if len(head) & 1:
+        head += b"\x00"
+    blob = bytes(head) + struct.pack(">H", 0x8000 | (len(payload) + 2)) + payload
+    (tmp_path / "Expansion.x").write_bytes(blob)
+
+    folder = archive_file(tmp_path / "Expansion.x")
+    assert isinstance(folder, ArchiveFolder)
+    assert folder.name == "Expansion.x"
+    entries = folder.files()
+    assert [f.name for f in entries] == ["Expanded"]
+    f = entries[0]
+    assert f.data == payload
+    assert f.type == b"TEXT" and f.creator == b"ttxt"
+
+
 def test_open_application_reads_single_files(tmp_path):
     p = tmp_path / "app.bin"
     p.write_bytes(macbinary("Mac App", b"", FORK))
