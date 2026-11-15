@@ -1120,7 +1120,7 @@ def archive_kind(f: MacFile) -> str | None:
 _ARCHIVE_KINDS = {
     "abk": "Apple Backup", "arc": "ARC", "bzip2": "bzip2", "cpt": "Compact Pro",
     "dd": "DiskDoubler", "gzip": "gzip", "lha": "LHA", "mar": "MAR",
-    "now": "Now Compress", "packit": "PackIt", "rar": "RAR",
+    "now": "Now Compress", "packit": "PackIt", "pf": "Private File", "rar": "RAR",
     "segments": "split archive", "sevenz": "7z", "sit": "StuffIt",
     "sit5": "StuffIt 5", "spacesaver": "SpaceSaver", "sqp": "AppleLink package", "superdisk": "SuperDisk!",
     "tar": "tar", "tome": "Apple Installer Tome", "z": "Unix compress", "xz": "xz",

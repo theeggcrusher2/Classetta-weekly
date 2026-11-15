@@ -977,6 +977,29 @@ def test_archive_file_browses_a_superdisk(tmp_path):
     assert f.type == b"TEXT" and f.creator == b"ttxt"
 
 
+def test_archive_file_refuses_a_private_file_without_its_password(tmp_path):
+    # Aladdin Private File keeps its name inside the encrypted record,
+    # and the Filer cannot ask for a password: browsing one says so
+    # rather than listing nothing or guessing at the contents.
+    import hashlib
+    from macextract._rc4 import rc4
+    from macextract.formats.pf import _crc32_raw
+
+    name = b"Secret"
+    payload = b"payload!!"
+    key = hashlib.md5(b"letmein").digest()[:5]
+    rec = (b"CSIT" + bytes([len(name)]) + name + bytes(255 - len(name))
+           + b"TEXT" + b"ttxt" + bytes(8) + bytes(16)
+           + struct.pack(">4I", len(payload), 0, 0, 0))
+    blob = (struct.pack(">4s5HI", b"CSIT", 2, 1, 1, 5, 0, 0)
+            + rc4(rec, key) + rc4(payload, key)
+            + struct.pack(">4sII", b"CSIT", _crc32_raw(payload), 0))
+    (tmp_path / "Secret.pf").write_bytes(blob)
+
+    with pytest.raises(ValueError, match="needs a password"):
+        archive_file(tmp_path / "Secret.pf")
+
+
 def test_open_application_reads_single_files(tmp_path):
     p = tmp_path / "app.bin"
     p.write_bytes(macbinary("Mac App", b"", FORK))

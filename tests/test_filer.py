@@ -91,9 +91,17 @@ def _superdisk_blob(payload: bytes) -> bytes:
     return bytes(head) + body
 
 
+def _pf_blob() -> bytes:
+    """A minimal Aladdin Private File: the clear header and footer the
+    probe reads, around an empty file the kind column never opens."""
+    import struct
+    return (struct.pack(">4s5HI", b"CSIT", 2, 1, 1, 5, 0, 0) + bytes(308)
+            + struct.pack(">4sII", b"CSIT", 0, 0))
+
+
 def _archive_kinds_volume() -> machfs.Volume:
-    """A disk with a zip, a gzip, a SpaceSaver, a SuperDisk! and a
-    plain document."""
+    """A disk with a zip, a gzip, a SpaceSaver, a SuperDisk!, a Private
+    File and a plain document."""
     import gzip as gz
     import io
     import zipfile
@@ -116,6 +124,9 @@ def _archive_kinds_volume() -> machfs.Volume:
     sdisk.type, sdisk.creator, sdisk.data = b"TEXT", b"ttxt", bytearray(
         _superdisk_blob(b"an auto-expanding file. "))
     v["Packed.x"] = sdisk
+    privf = machfs.File()
+    privf.type, privf.creator, privf.data = b"TEXT", b"ttxt", bytearray(_pf_blob())
+    v["Packed.pf"] = privf
     doc = machfs.File()
     doc.type, doc.creator, doc.data = b"TEXT", b"ttxt", b"plain"
     v["Plain"] = doc
@@ -434,7 +445,8 @@ def test_the_kind_column_names_known_archives(harness):
     h = harness(disks=[_archive_kinds_volume()])
     win = h.d.open_filer(h.d.config.disks[0])
     h.settle()
-    assert _rows(win) == [("Packed.gz", "gzip"), ("Packed.sit", "SpaceSaver"),
+    assert _rows(win) == [("Packed.gz", "gzip"), ("Packed.pf", "Private File"),
+                          ("Packed.sit", "SpaceSaver"),
                           ("Packed.x", "SuperDisk!"), ("Packed.zip", "ZIP"),
                           ("Plain", "document")]
 
