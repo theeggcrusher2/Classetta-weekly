@@ -2265,3 +2265,26 @@ def _encode_v5_map(entries):
         b <<= 8 - len(bits[i:i + 8])        # pad zeros on the right
         out.append(b)
     return bytes(out), lengthbits, selfbits
+
+
+def test_a_qcow2_disk_image_in_the_filer_opens_as_a_volume(tmp_path, harness):
+    from test_qcow2 import CLUSTER, _qcow2_file
+    inner = machfs.Volume()
+    inner.name = "Inner"
+    doc = machfs.File()
+    doc.type, doc.creator, doc.data = b"TEXT", b"TEST", b"Hello."
+    inner["Letter"] = doc
+    raw = inner.write(size=800 * 1024)
+    (tmp_path / "Outer.qcow2").write_bytes(
+        _qcow2_file([raw[i:i + CLUSTER] for i in range(0, len(raw), CLUSTER)]))
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    _dblclick(win, "Outer.qcow2", h.settle)
+    h.settle()
+    opened = [w for w in h.d.filer_windows if w is not win]
+    assert len(opened) == 1
+    assert isinstance(opened[0].volume, machfs.Volume)
+    assert opened[0].volume.name == "Inner"
+    assert sorted(n for n, _ in opened[0].volume.items()) == ["Letter"]
+    assert not h.d._alerts

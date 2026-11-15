@@ -215,7 +215,7 @@ Preserve existing behavior unless a task explicitly changes it. If the codebase 
   - Open supported contents in a Filer window.
   - Add tests or representative fixtures for detection and browsing.
 
-- [ ] **25. Add qcow2 support**
+- [x] **25. Add qcow2 support**
   - Add qcow2 handling through an appropriate reader or adapter.
   - Open supported contents in a Filer window.
   - Add tests or representative fixtures for detection and browsing.

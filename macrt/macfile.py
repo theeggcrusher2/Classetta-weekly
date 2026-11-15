@@ -40,7 +40,7 @@ import machfs
 import machfs.main
 from machfs.btree import unpack_extent_record
 
-from . import chd, moof
+from . import chd, moof, qcow2
 from .resfork import InvalidForkError, is_fork, open_fork
 
 APPLE_SINGLE = 0x00051600
@@ -654,7 +654,7 @@ def _startup_name(boot: bytes) -> str | None:
 
 
 def is_disk_image(data: bytes) -> bool:
-    if moof.is_moof(data) or chd.is_chd(data):
+    if moof.is_moof(data) or chd.is_chd(data) or qcow2.is_qcow2(data):
         return True
     data = _sectors(data)[0]
     return (_hfs_partition(data) is not None or _volume_start(data) is not None or 
@@ -857,6 +857,8 @@ def load_volume(source: str | os.PathLike | bytes | mmap.mmap) -> machfs.Volume:
     else:
         if chd.is_chd(data):
             data = chd.read_image(data)
+        elif qcow2.is_qcow2(data):
+            data = qcow2.read_image(data)
         sectors, tags = _sectors(data)
         disk = Disk(sectors if isinstance(sectors, mmap.mmap) else bytearray(sectors),
                     bytearray(tags))
@@ -1234,6 +1236,8 @@ def image_kind(f: MacFile) -> str | None:
         return "MOOF disk image"
     if chd.is_chd(d):
         return "CHD disk image"
+    if qcow2.is_qcow2(d):
+        return "qcow2 disk image"
     if len(d) > DISKCOPY_HEADER and d[82:84] == b"\x01\x00" and d[0] < 64:
         return "DiskCopy 4.2 image"
     if _hfs_partition(d) is not None:
