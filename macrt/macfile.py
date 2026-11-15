@@ -658,7 +658,8 @@ def is_disk_image(data: bytes) -> bool:
         return True
     data = _sectors(data)[0]
     return (_hfs_partition(data) is not None or _volume_start(data) is not None or 
-            (len(data) > 16 * 2048 and data[16 * 2048:16 * 2048 + 6] == b'CD001\x01'))
+            (len(data) > 16 * 2048 + 6 and data[16 * 2048] == 1
+             and data[16 * 2048 + 1:16 * 2048 + 6] == b'CD001'))
 
 
 def _link_aliases(vol_cr_date, cnids):
@@ -889,8 +890,13 @@ def load_volume(source: str | os.PathLike | bytes | mmap.mmap) -> machfs.Volume:
                         folder[child['name']] = sub
                         populate(child, sub)
                     else:
-                        f = machfs.File()
-                        f.data = bytes(data[child['lba'] * 2048 : child['lba'] * 2048 + child['size']])
+                        # Its bytes stay on the disc until wanted: the
+                        # directory record says where they are, and the
+                        # ISO volume grades nothing to fail early.
+                        size = child['size']
+                        start = child['lba'] * 2048
+                        f = OnDisk(data, {"data": (size, [(start, start + size)]),
+                                          "rsrc": (0, [])})
                         f.type, f.creator = child.get('type', b'????'), child.get('creator', b'????')
                         f.crdate, f.mddate = child.get('crdate', 0), child.get('mddate', 0)
                         folder[child['name']] = f
@@ -1236,7 +1242,8 @@ def image_kind(f: MacFile) -> str | None:
         if signature == MFS_SIGNATURE:
             return "MFS disk image"
         return "HFS+ disk image"
-    if len(d) > 16 * 2048 and d[16 * 2048:16 * 2048 + 6] == b"CD001\x01":
+    if len(d) > 16 * 2048 + 6 and d[16 * 2048] == 1 \
+            and d[16 * 2048 + 1:16 * 2048 + 6] == b"CD001":
         return "CD-ROM image"
     sectors = _sectors(d)[0]
     if sectors is not d and _volume_start(sectors) is not None:

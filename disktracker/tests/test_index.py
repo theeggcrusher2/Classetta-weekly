@@ -325,3 +325,48 @@ def test_a_damaged_hfsplus_image_is_refused(tmp_path: Path):
     path.write_bytes(bytes(img))
     with pytest.raises(ValueError, match='no blocks|unsupported'):
         index_image(path)
+
+
+def test_load_volume_reads_iso_data_on_demand(iso_image: Path):
+    # The directory record locates the file's bytes; nothing is read
+    # until the file is. The ISO volume grades nothing, so a mangled
+    # body lists fine and reads back mangled (tar's precedent).
+    import machfs
+    from macrt.macfile import load_volume, volume_files
+
+    raw = bytearray(iso_image.read_bytes())
+    raw[19 * 2048] ^= 0xFF                     # HELLO.TXT's first byte
+    iso_image.write_bytes(bytes(raw))
+    vol = load_volume(iso_image)
+    assert vol.name == 'TESTISO'
+    files = {f.key: f for f in volume_files(vol)}
+    hello = files['TESTISO:HELLO.TXT']
+    assert hello._node._read == {}                   # nothing decoded for the listing
+    assert hello.sizes() == (11, 0)
+    assert hello.data[:1] != b'h'              # reads the mangled byte on demand
+    inner = files['TESTISO:SUBDIR:INNER.BIN']
+    assert inner._node._read == {}
+    assert inner.data == b'x' * 512
+
+
+def test_a_bin_with_a_cue_sidecar_lists_from_the_directory(iso_image: Path,
+                                                           tmp_path: Path):
+    # A BIN/CUE data disc is a raw MODE1/2048 image; the Filer opens
+    # the .bin and lists it from its directory. The .cue sidecar is a
+    # text manifest, not needed for reading.
+    from macrt.macfile import open_container, volume_files
+
+    raw = bytearray(iso_image.read_bytes())
+    raw[19 * 2048] ^= 0xFF
+    bin_path = tmp_path / 'disc.bin'
+    bin_path.write_bytes(bytes(raw))
+    (tmp_path / 'disc.cue').write_text(
+        'FILE "disc.bin" BINARY\n'
+        '  TRACK 01 MODE1/2048\n'
+        '    INDEX 01 00:00:00\n')
+    vol = open_container(bin_path)
+    assert vol.name == 'TESTISO'
+    files = {f.key: f for f in volume_files(vol)}
+    hello = files['TESTISO:HELLO.TXT']
+    assert hello._node._read == {}
+    assert hello.data[:1] != b'h'

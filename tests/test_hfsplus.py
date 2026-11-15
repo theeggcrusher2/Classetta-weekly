@@ -154,3 +154,23 @@ def test_spans_through_the_extents_overflow_file():
         _spans(512, 3 * 512, [(10, 1)], overflow, 42, 0)
     # An inline run that covers the fork never asks the overflow file.
     assert _spans(512, 2 * 512, [(10, 2)], {}, 42, 0) == [(10 * 512, 12 * 512)]
+
+
+def test_hfsplus_lists_from_the_catalog_only(tmp_path):
+    # The catalog B-tree locates each fork; the forks are read the
+    # first time they are wanted. The HFS+ catalog grades nothing,
+    # so a mangled body reads back mangled.
+    import struct as _struct
+    entries = [
+        {"kind": "file", "name": "Victim", "data": b"victim-body" * 300,
+         "rsrc": b"", "type": b"TEXT", "creator": b"ttxt"},
+    ]
+    img = bytearray(hfsplus_image("Lazily", entries))
+    at = img.find(b"victim-body")
+    assert at > 0
+    img[at] ^= 0xFF
+    vol = load_volume(bytes(img))
+    files = {f.name: f for f in volume_files(vol)}
+    victim = files["Victim"]
+    assert victim._node._read == {}
+    assert victim.data[:11] != b"victim-body"

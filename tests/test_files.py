@@ -1025,3 +1025,55 @@ def test_a_control_panel_without_code_is_refused_by_name(tmp_path):
     disk = _write(tmp_path / "system.img", v.write(800 * 1024))
     with pytest.raises(ValueError, match="'Labels' is a control panel with no code of its own"):
         open_disks([disk], ["Labels"])
+
+
+def test_a_toast_image_opens_as_a_volume_and_reads_forks_on_demand(tmp_path):
+    # A .toast is a raw HFS CD image; the Filer opens it through the
+    # raw path. The volume lists from the catalog B-tree; a file's
+    # bytes are read the first time they are wanted, and the HFS
+    # catalog grades nothing, so a mangled body reads back mangled.
+    import macrt.macfile as mf
+    v = machfs.Volume()
+    v.name = "Toast CD"
+    f = machfs.File()
+    payload = b"toast-payload" * 200
+    f.data = bytearray(payload)
+    f.type, f.creator = b"TEXT", b"ttxt"
+    v["payload.bin"] = f
+    img = bytearray(v.write(800 * 1024))
+    at = img.find(b"toast-payload")
+    assert at > 0
+    img[at] ^= 0xFF                          # inside the file's extent
+    path = tmp_path / "Toast CD.toast"
+    path.write_bytes(bytes(img))
+    volume = mf.open_container(path)
+    assert volume.name == "Toast CD"
+    files = {m.name: m for m in volume_files(volume)}
+    payload_file = files["payload.bin"]
+    assert payload_file.sizes() == (len(payload), 0)
+    assert payload_file._node._read == {}    # the body stayed on the disc
+    assert payload_file.data[:13] != payload[:13]
+    assert "data" in payload_file._node._read
+
+
+def test_a_raw_hfs_image_lists_from_the_catalog_only(tmp_path):
+    # The same proof for the plain raw path: list with the file body
+    # mangled; the volume opens and lists fine, the body reads mangled.
+    import macrt.macfile as mf
+    v = machfs.Volume()
+    v.name = "Raw"
+    f = machfs.File()
+    f.data = bytearray(b"raw-payload" * 400)
+    f.type, f.creator = b"TEXT", b"ttxt"
+    v["hello.txt"] = f
+    img = bytearray(v.write(800 * 1024))
+    at = img.find(b"raw-payload")
+    assert at > 0
+    img[at] ^= 0xFF
+    path = tmp_path / "raw.hfs"
+    path.write_bytes(bytes(img))
+    volume = mf.open_container(path)
+    files = {m.name: m for m in volume_files(volume)}
+    hello = files["hello.txt"]
+    assert hello._node._read == {}
+    assert hello.data[:11] != b"raw-payload"

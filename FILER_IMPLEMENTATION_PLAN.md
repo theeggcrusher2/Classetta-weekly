@@ -203,7 +203,7 @@ Preserve existing behavior unless a task explicitly changes it. If the codebase 
   - The remaining formats from uzTools/MacExtract's README, in small tested batches, each shipped list + extract with tests before the next begins: StuffIt classic → StuffIt 5 → StuffIt arsenic → Compact Pro → DiskDoubler → Now Compress → MacCompress (.Z) → ARC → LZH/LHA → PackIt splits → DiskDoubler/StuffIt split volumes → MAR → Apple Backup → Tomes → zip/gzip/tar → RAR, 7-Zip, bzip2 and xz (decompression only, the Python port taking the PC/general compressors the C project never had) → StuffIt SpaceSaver (with the Aladdin tables, attribution per its NOTICE). StuffIt X never.
   - Every batch is automatically browsable in the Filer once its format is registered in macextract.py; no per-format Filer work.
 
-- [ ] **23b. List archives from their directories only**
+- [x] **23b. List archives from their directories only**
   - Where a format states its members in a directory or in per-member headers, opening an archive for listing reads only that index: no member body is decoded until the entry is read, opened or extracted. A format with no directory at all (a bare `.Z`, a single BinHex stream) reads only its header for the listing.
   - The Filer's `archive_entries` stops reading every fork while building a listing: names, sizes and Finder info come from headers, and a MacFile materialises its forks on first use.
   - CRC and password checks that need decoded bytes move to first read, and the tests that grade them at `open()` move with them; a structurally damaged directory must still fail at list time.
