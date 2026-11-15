@@ -150,6 +150,13 @@ class LazyArchiveFile(MacFile):
         self._loaded = True
         self._rsrc = value
 
+    @property
+    def forks_pending(self) -> bool:
+        """True while the decoder has not run.  Both forks come out of
+        one loader, so this is not per fork; the icon paths use it to
+        show a generic icon until the forks are real."""
+        return not self._loaded
+
     def sizes(self) -> tuple[int, int]:
         """Its data and resource forks' lengths — the archive's own
         declared lengths until a fork is decoded."""

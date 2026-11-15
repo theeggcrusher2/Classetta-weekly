@@ -34,7 +34,8 @@ from PyQt6.QtWidgets import (
 
 from pathlib import Path
 
-from ..macfile import (ArchiveFolder, ContainerFolder, HostFolder, MacFile, VolumeFolder,
+from ..macfile import (ArchiveFolder, ContainerFolder, HostFolder, LazyArchiveFile,
+                       MacFile, VolumeFolder,
                        alias_open, alias_original, archive_entries, archive_kind,
                        archive_name, container_contents, extract_archive, image_kind,
                        is_alias, is_control_panel, launch_target, list_folder,
@@ -48,6 +49,7 @@ from ..toolbox.menus import Menu, parse_menu_items
 from ..toolbox.windows import WindowKind
 from ..viewer import describe, viewer_main
 from . import chrome, theme
+from .busy import run_busy
 from .stdfile import (CATALOG_ICON, CONTROL_PANEL_ICON, DESK_ACCESSORY_ICON, DISK_ICON,
                       DOCUMENT_ICON, EXTENSION_ICON, FONT_ICON, FOLDER_ICON, icon,
                       icon_from_bitmap)
@@ -261,6 +263,13 @@ def _custom_icon(node: machfs.Volume | machfs.Folder | machfs.File,
     return None
 
 
+def _fork_pending(f: MacFile) -> bool:
+    """True while an archive member's forks are still undecoded — the
+    icon paths then show a generic icon, and drawing a listing never
+    decodes an archive member's resources."""
+    return isinstance(f, LazyArchiveFile) and f.forks_pending
+
+
 def item_icon(f: MacFile, *, large: bool = False) -> list[str] | None:
     """The icon the item's own resources give it — an application's or a
     marked file's from its resource fork, a folder's from its Icon file,
@@ -277,6 +286,8 @@ def item_icon(f: MacFile, *, large: bool = False) -> list[str] | None:
             return _custom_icon(node[f.name], large=large)
         except KeyError:
             return None
+    if _fork_pending(f):
+        return None
     if f.is_application or f.flags & HAS_CUSTOM_ICON:
         return _icon_from(bytes(f.rsrc), large)
     from ..assoc import associated_icon_rows, declared_icon_rows
@@ -700,6 +711,9 @@ class FilerWindow(_Hosted):
         item = self.selected_item()
         if item is None:
             return
+        item = self._materialised(item)
+        if item is None:
+            return
         win = ContentViewerWindow(self.display, item)
         self.display.viewer_windows.append(win)
         self.display.front_aux_window = win
@@ -729,14 +743,22 @@ class FilerWindow(_Hosted):
             item = self.selected_item()
             if item is None or item.type == FOLDER or archive_kind(item) != "archive":
                 return
+            item = self._materialised(item)
+            if item is None:
+                return
             raw, stem = item.data, item.name
         dest = QFileDialog.getExistingDirectory(self, f"Extract {stem} to…")
         if not dest:
             return
         try:
-            written = extract_archive(raw, dest)
+            written = run_busy(self, f"Extracting {stem}",
+                               f"“{stem}” is extracting now; the Filer stays "
+                               "usable while it runs.",
+                               lambda: extract_archive(raw, dest))
         except ValueError as e:
             self._say(str(e))
+            return
+        if written is None:
             return
         self.display.show_alert(QMessageBox.Icon.Information, "Extract",
                                 f"Extracted {len(written)} file(s) to {dest}")
@@ -790,8 +812,33 @@ class FilerWindow(_Hosted):
             return
         self._open_item(f)
 
+    def _materialised(self, f: MacFile) -> MacFile | None:
+        """f with its forks decoded, off the GUI thread when f is an
+        archive member's: a big member's fork can take minutes, and the
+        Filer must stay up while it does.  None when the user stopped
+        waiting or the decode failed."""
+        if not isinstance(f, LazyArchiveFile) or not f.forks_pending:
+            return f
+        def work():
+            # The loader decodes both forks together; a fork the
+            # archive declares empty costs nothing.
+            _ = f.data
+            _ = f.rsrc
+            return f
+        try:
+            return run_busy(self, f"Reading {f.name}",
+                            f"“{f.name}” is inside an archive; its forks "
+                            "decode now, and the Filer stays usable.",
+                            work)
+        except Exception as e:
+            self._say(str(e))
+            return None
+
     def _open(self, f: MacFile, view: bool | None = None,
               trace: bool | None = None) -> None:
+        f = self._materialised(f)
+        if f is None:
+            return
         # A file whose data fork is itself an encoding — MacBinary, BinHex
         # or AppleSingle — shows what it holds in a Filer window rather
         # than run.  A container that's there but damaged says so instead.
@@ -922,6 +969,8 @@ def item_icon_qicon(f: MacFile, *, large: bool = False, depth: int = 1) -> QIcon
     """f's icon as a QIcon: its colour family at depth > 2 when its
     resources have one the depth can show, else the 1-bit icon (inverted
     when selected); None for an item with no icon of its own."""
+    if _fork_pending(f):
+        return None
     if depth <= 2 or f.type == FOLDER:
         rows = item_icon(f, large=large)
         return None if rows is None else icon_from_bitmap(rows)
