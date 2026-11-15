@@ -210,7 +210,7 @@ Preserve existing behavior unless a task explicitly changes it. If the codebase 
   - Verify the completed disk-image paths (raw, HFS, HFS+, ISO, Toast, BIN/CUE) list from filesystem directory structures only and read file contents on demand, and keep them that way as formats are added.
   - Tests: for every directory-bearing format, a listing succeeds even when a member body is corrupt — reading that entry then fails — with generated fixtures only.
 
-- [ ] **24. Add CHD support**
+- [x] **24. Add CHD support**
   - Add CHD handling through an appropriate reader or adapter.
   - Open supported contents in a Filer window.
   - Add tests or representative fixtures for detection and browsing.

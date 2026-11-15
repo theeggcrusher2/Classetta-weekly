@@ -5,6 +5,7 @@ import os
 import pytest
 import struct
 import sys
+import zlib
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QFontMetrics
 from PyQt6.QtTest import QTest
@@ -2170,3 +2171,97 @@ def test_an_alias_pointing_at_an_alias_opens_the_final_original(harness, monkeyp
     _dblclick(win, "Chain", h.settle)
     h.settle()
     assert launched == [("Widget", "Widget")]
+
+
+def test_a_chd_disk_image_in_the_filer_opens_as_a_volume(tmp_path, harness):
+    inner = machfs.Volume()
+    inner.name = "Inner"
+    doc = machfs.File()
+    doc.type, doc.creator, doc.data = b"TEXT", b"TEST", b"Hello."
+    inner["Letter"] = doc
+    raw = inner.write(size=800 * 1024)
+    hunks = [raw[i:i + 16384] for i in range(0, len(raw), 16384)]
+    (tmp_path / "Outer.chd").write_bytes(_chd_file(hunks))
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    _dblclick(win, "Outer.chd", h.settle)
+    h.settle()
+    opened = [w for w in h.d.filer_windows if w is not win]
+    assert len(opened) == 1
+    assert isinstance(opened[0].volume, machfs.Volume)
+    assert opened[0].volume.name == "Inner"
+    assert sorted(n for n, _ in opened[0].volume.items()) == ["Letter"]
+    assert not h.d._alerts
+
+
+def _chd_file(hunks: list[bytes]) -> bytes:
+    """A v5 zlib CHD holding the hunks, map and header per chd.h."""
+    entries, blocks = [], b""
+    for raw in hunks:
+        block = zlib.compress(raw, 9)
+        entries.append([0, len(block), 0, _crc16(raw)])
+        blocks += block
+    blob, lengthbits, selfbits = _encode_v5_map(entries)
+    at = 124 + 16 + len(blob)              # where the blocks begin
+    for e in entries:
+        e[2] = at
+        at += e[1] if e[0] <= 3 else 16384
+    rawmap = b"".join(struct.pack(">B", t) + length.to_bytes(3, "big")
+                      + offset.to_bytes(6, "big") + struct.pack(">H", crc)
+                      for t, length, offset, crc in entries)
+    hdr = bytearray(124)
+    hdr[0:8] = b"MComprHD"
+    struct.pack_into(">II", hdr, 8, 124, 5)
+    struct.pack_into(">I", hdr, 16, 0x7A6C6962)      # 'zlib'
+    struct.pack_into(">Q", hdr, 32, 16384 * len(hunks))
+    struct.pack_into(">Q", hdr, 40, 124)
+    struct.pack_into(">II", hdr, 56, 16384, 2048)
+    maphdr = struct.pack(">I", len(blob)) + (124 + 16 + len(blob)).to_bytes(6, "big") \
+        + struct.pack(">H", _crc16(rawmap)) + bytes([lengthbits, selfbits, 0, 0])
+    return bytes(hdr) + maphdr + blob + blocks
+
+
+def _crc16(data: bytes) -> int:
+    crc = 0xFFFF
+    for b in data:
+        crc ^= b << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+    return crc
+
+
+def _encode_v5_map(entries):
+    """The map blob: a uniform 16-symbol Huffman tree over the types,
+    then each entry's fields.  Returns it and the field widths."""
+    lengthbits = max((e[1] for e in entries if e[0] <= 3), default=0).bit_length()
+    selfbits = 16
+    bits = []
+
+    def write(value, n):
+        for i in range(n - 1, -1, -1):
+            bits.append((value >> i) & 1)
+
+    for _ in range(16):
+        write(4, 4)                          # every symbol is 4 bits
+    # the type stream comes first, then the per-entry fields, as the
+    # CHD map layout demands
+    for e in entries:
+        write(e[0], 4)
+    for e in entries:
+        t, length, offset, crc = e
+        if t <= 3:
+            write(length, lengthbits)
+            write(crc, 16)
+        elif t == 4:
+            write(crc, 16)
+        elif t == 5:
+            write(offset, selfbits)
+    out = bytearray()
+    for i in range(0, len(bits), 8):
+        b = 0
+        for bit in bits[i:i + 8]:
+            b = (b << 1) | bit
+        b <<= 8 - len(bits[i:i + 8])        # pad zeros on the right
+        out.append(b)
+    return bytes(out), lengthbits, selfbits
