@@ -239,7 +239,7 @@ class Toolbox:
             p.events.wake()
             return rec
         rec = self._gui(gui)
-        if rec is not None and self.wdefs is not None and rec.own_wdef:
+        if rec is not None and self.wdefs is not None and rec.has_custom_definition:
             self.wdefs.created(rec)
         return rec
 
@@ -266,7 +266,7 @@ class Toolbox:
         return self._gui(self._d.place_window, bounds, position, proc_id)
 
     def _close_window(self, w: WindowRecord, dispose: bool) -> None:
-        if self.wdefs is not None and w.own_wdef and w in self._p.windows:
+        if self.wdefs is not None and w.has_custom_definition and w in self._p.windows:
             self.wdefs.disposing(w)
 
         def gui():

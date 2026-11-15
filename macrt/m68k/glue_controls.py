@@ -41,11 +41,18 @@ OUTSIDE_SLOP = Point(-0x8000, -0x8000)
 # Finding things
 # =========================================================================
 def _ctl(t, h: int) -> Control | None:
-    """The control a ControlHandle is, None for NIL or an empty handle."""
+    """Find a Control object that has been previously created. We need to keep
+    track of them to store the variant ID persistently, as it's not visible on
+    the struct for 32 bit machines (24 bit machines put it in the top byte of
+    the address)"""
     h &= t.mem.system.addr_mask
     if not h or not t.mem.r32(h) & t.mem.system.addr_mask:
         return None
-    return Control(t.mem, h)
+    c = t.system.control_at(h)
+    if c is None:
+        c = Control(t.mem, h)
+        t.system.register_control(c)
+    return c
 
 
 def controls_of(t, w) -> list[Control]:
@@ -62,17 +69,22 @@ def controls_of(t, w) -> list[Control]:
 
 
 def _proc_id(t, c: Control) -> int:
-    """The procID the control was made with: its CDEF's ID * 16 + variation.
-    A contrlDefProc that is no System CDEF is the application's own code,
-    so its "ID" is -1: never a standard one.  It's a CDEF in one of its
-    files, found before the System's with the same ID (Flash 2's CDEF 0
-    draws its buttons), or code it put there itself (Excel does)."""
-    kind, def_id = t.system.defproc_id(c.def_proc & t.mem.system.addr_mask)
-    return (def_id if kind == "CDEF" else -1) << 4 | c.variation
+    # Look up the resource that the control's definition procedure
+    # handle is referencing, if any
+    defproc_masked = c.def_proc & t.mem.system.addr_mask
+    rsrc_type, rsrc_id = t.system.defproc_id(defproc_masked)
+
+    # The handle doesn't necessarily have to point to a resource
+    # TODO: is -1 actually the correct thing to return here?
+    if rsrc_type != "CDEF":
+        return (-1 << 4) | c.variation
+
+    # return CDEF resource ID in high 4 bits, variant ID in low 4 bits
+    return (rsrc_id << 4) | c.variation
 
 
 def _entry(t, c: Control) -> int:
-    """Where a 68k CDEF starts; 0 if there's no code (no System file)."""
+    """Get entry point for a control's CDEF"""
     h = c.def_proc & t.mem.system.addr_mask
     p = t.mem.r32(h) & t.mem.system.addr_mask
     if not p:
@@ -229,15 +241,27 @@ def new_control(t, w, bounds: Rect, name: bytes, visible: bool, value: int, min_
     h = t.process.heap.new_handle(TITLE + 1 + len(name), clear=True)
     if not h:
         return 0
-    c = Control(t.mem, h)
+
+    # Upper 12 bits of proc_id: ID of the CDEF resource
+    cdef_resource_id = proc_id >> 4
+    cdef_variant = proc_id & 0xF
+
+    c = Control(t.mem, h, cdef_variant)
+    t.system.register_control(c)      # the same object answers _ctl for this handle
     c.next_control = w.control_list
     w.control_list = h
     c.owner = w.addr
     c.rect = bounds
     c.vis = 255 if visible else 0
     c.value, c.min, c.max = value, min_, max_
-    cdef = t.process.resources.defproc("CDEF", (proc_id & 0xFFFF) >> 4)
-    c.def_proc = ((proc_id & 0xF) << 24) | cdef
+
+    cdef = t.process.resources.defproc("CDEF", cdef_resource_id)
+
+    if t.mem.system.mmu_32_bit:
+        c.def_proc = cdef
+    else:
+        c.def_proc = (cdef_variant << 24) | cdef
+
     c.ref_con = ref_con
     t.mem.w_pstr(c.addr + TITLE, name)
     message(t, c, k.initCntl)
@@ -282,6 +306,7 @@ def dispose(t, c: Control, erase: bool = True) -> None:
     if erase and c.visible:
         _erase(t, c)
     message(t, c, k.dispCntl)
+    t.system.unregister_control(c)
     _unlink(t, c)
     aux = find_aux_win(t.mem, c.handle, lowmem.AuxCtlHead)
     if aux:                                 # its auxiliary record goes too

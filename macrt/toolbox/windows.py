@@ -168,6 +168,11 @@ class WindowRecord(GrafPort):
     window_pic = Field(148, LONG)
     ref_con = Field(152, LONGINT)
 
+    # internal storage for the variant_id, stored separately on 32 bit systems
+    # but stored above the address in 24 bit systems
+    _variant_id: int = 0
+
+
     def __init__(self, system: System, process: Process, heap: Heap, addr: int):
         super().__init__(system.mem, addr)
         self.system = system
@@ -175,7 +180,7 @@ class WindowRecord(GrafPort):
         self.heap = heap                # where its regions and handles live
         self.owns_storage = False
         self.dialog = None              # the Dialog Manager's DialogState, for a dialog
-        self._proc_id: tuple[int, int, bool] | None = None  # (windowDefProc, procID, own)
+
         self.saved_vis: tuple[Region, Rect] | None = None   # BeginUpdate's: the visRgn, portRect
         self.updates_begun = 0          # its BeginUpdates so far
         # A window with a WDEF of the application's own (see own_wdef) has
@@ -209,8 +214,23 @@ class WindowRecord(GrafPort):
         rec.window_kind = userKind
         rec.visible = visible
         rec.go_away = go_away
-        wdef = process.resources.defproc("WDEF", proc_id >> 4)
-        rec.window_def_proc = ((proc_id & 0xF) << 24) | wdef
+
+        # Upeer 12 bits of proc_id: ID of the WDEF resource containing the procedure
+        wdef_resource_id = proc_id >> 4
+
+        # Lower 4 bits of proc_id: Variation Code to be passed to WDEF procedure
+        rec._variant_id = proc_id & 0xF
+
+        # Get a handle to the WDEF resource (whether ours or system)
+        wdef_handle = process.resources.defproc("WDEF", wdef_resource_id)
+
+        if system.mmu_32_bit:
+            # For a 32 bit system, store the WDEF handle in all of window_def_proc
+            rec.window_def_proc = wdef_handle
+        else:
+            # On a 24 bit system, the variation_code sits in the 4 bits above the address
+            rec.window_def_proc = (rec._variant_id << 24) | (wdef_handle & system.addr_mask)
+
         rec.struc_rgn = new_rgn(heap)
         rec.cont_rgn = new_rgn(heap)
         rec.update_rgn = new_rgn(heap)
@@ -377,27 +397,48 @@ class WindowRecord(GrafPort):
 
     @property
     def proc_id(self) -> int:
-        # Finding the WDEF's ID means searching the resource maps, and the
-        # chrome asks on every paint, so remember it until windowDefProc changes.
-        return self._defproc()[1]
+        """ Return the resource ID of the resource windowDefProc points to,
+            combined with the window's variant ID."""
+        # Look up the resource ID of the resource referenced from WindowDefProc
+        # Note: returns 0 if resource not found, which is a valid and common resource ID...
+        rsrc_type, rsrc_id = self.process.resources.defproc_id(self.custom_definition_handle)
+
+        if self.system.mmu_32_bit:
+            # On 32 bit machines, the variant ID is stored elsewhere
+            return (rsrc_id << 4) | self._variant_id
+        else:
+            # For 24 bit, read it from our window_def_proc bytes in the Mac's memory
+            # in case something's modified it (naughty!)
+            return (rsrc_id << 4) | ((self.window_def_proc >> 24) & 0xF)
+
 
     @property
-    def own_wdef(self) -> bool:
-        """True if windowDefProc is the application's own code (a WDEF
-        resource of its own, or code it put in a handle itself) rather than
-        the System's WDEF 0 or 1, whose frames the host draws."""
-        return self._defproc()[2]
+    def has_custom_definition(self) -> bool:
+        "Does this window have custom definition code?"
 
-    def _defproc(self) -> tuple[int, int, bool]:
-        wdp = self.window_def_proc
-        if self._proc_id is None or self._proc_id[0] != wdp:
-            # The low 24 bits are the WDEF's handle; the top byte, which 24-bit
-            # machines pack the ID and variation in, is part of the handle on
-            # a 32-bit machine, so addr_mask, not a 24-bit mask.
-            kind, wdef = self.process.resources.defproc_id(wdp & self.system.addr_mask)
-            own = bool(wdp & self.system.addr_mask) and not (kind == "WDEF" and wdef in (0, 1))
-            self._proc_id = (wdp, (wdef << 4) | ((wdp >> 24) & 0xF), own)
-        return self._proc_id
+        # if windowDefProc handle is nil -> no procedure handle is set
+        # so we definitely don't have a custom function
+        if not self.custom_definition_handle:
+            return False
+
+        # The handle is non-zero, so it could either be some random code
+        # in memory, or it could be the System's WDEF 0 or WDEF 1
+        rsrc_type, rsrc_id = self.process.resources.defproc_id(self.custom_definition_handle)
+
+        # If the handle's pointing to a WDEF 0 or WDEF 1 resource
+        # it's not a custom function, just the bog standard system one.
+        if rsrc_type == "WDEF" and rsrc_id in (0,1):
+            return False
+
+        # Otherwise at this point it's not Nil, and not a system resource
+        # so it's custom.
+        return True
+
+    @property
+    def custom_definition_handle(self) -> int:
+        """Return the handle to the custom window definition code."""
+        # On 24 bit systems we need to mask off the variant ID
+        return self.window_def_proc & self.system.addr_mask
 
     @property
     def definition(self) -> Definition:

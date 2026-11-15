@@ -2077,7 +2077,7 @@ def test_an_applications_wdef_shapes_and_draws_its_window(harness):
     a5 = proc.partition.a5
     h.wait_until(lambda: mem.r16(a5 + FRAMES_AT_MOVE), what="the BlockMove")
     assert (mem.r16(a5 + FRAMES_AT_NEW), mem.r16(a5 + FRAMES_AT_MOVE)) == (3, 3)
-    assert rec.own_wdef and rec.wdef_shaped
+    assert rec.has_custom_definition and rec.wdef_shaped
     f, o, (w, ht) = frames_geometry(rec)
     s = chrome.shadow(f)
     struc = qdraw.read_rgn(mem, rec.struc_rgn)

@@ -147,7 +147,7 @@ class MacWindowView(_Hosted):
         with its own WDEF is the WDEF's to shape and draw, on the
         application's thread (wdefs.refresh), which reshapes it after."""
         rec = self.rec
-        if rec.own_wdef and rec.process.runner is not None:
+        if rec.has_custom_definition and rec.process.runner is not None:
             rec.process.frames_due.add(rec)
         elif rec.wdef_shaped:
             rec.wdef_shaped = False         # it has a standard windowDefProc now

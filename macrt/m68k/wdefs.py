@@ -43,14 +43,16 @@ from .cpu import INTERRUPT_MASK
 
 def entry(t, w: WindowRecord) -> int:
     """Where w's own WDEF starts; 0 if it has none to run."""
-    if not w.own_wdef:
+    if not w.has_custom_definition:
         return 0
+    # The variation code sits in the handle's top byte in 24-bit mode.
+    # On a 32 bit system, the entire 32 bits is address.
     h = w.window_def_proc & t.mem.system.addr_mask
     p = t.mem.r32(h) & t.mem.system.addr_mask
     if not p:
         res = t.process.resources
         err = res.error
-        res.LoadResource(h)             # purged, as a Mac's Window Manager would find it
+        res.LoadResource(h)
         res.error = err
         p = t.mem.r32(h) & t.mem.system.addr_mask
     return p if p and t.mem.r16(p) != RTS else 0
@@ -76,7 +78,7 @@ def message(t, w: WindowRecord, msg: int, param: int = 0) -> int:
             t.mem.w_rect(w.addr + 8, w.port_bits_bounds)
         t.in_wdef += 1
         try:
-            return t.call(at, (("h", (w.window_def_proc >> 24) & 0xFF), ("p", w.addr),
+            return t.call(at, (("h", w.proc_id), ("p", w.addr),
                                ("h", msg), ("l", param)), "l")
         finally:
             t.in_wdef -= 1

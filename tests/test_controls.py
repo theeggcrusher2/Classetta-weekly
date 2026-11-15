@@ -208,6 +208,25 @@ def test_an_applications_own_cdef_0_is_called(qapp):
                         (("h", 0), ("p", button.handle), ("h", k.initCntl), ("l", 0)))]
 
 
+def test_a_32_bit_control_doesnt_get_upper_8_bits_corrupted(qapp):
+    """On a 32-bit machine contrlDefProc is just the handle: the variant is not stored
+    in the top byte like on a 24 bit machine, so check we don't end up corrupting
+    those bits."""
+    g = Guest(model="iici")
+    w = WindowRecord.new(g.system, g.process, g.heap, 0, Rect(80, 60, 140, 260),
+                         "Controls", True, k.documentProc, True, 0)
+    img = QImage(200, 60, QImage.Format.Format_RGB32)
+    img.fill(QColor(255, 255, 255))
+    g.tb.qd.surfaces[w.addr] = ImageSurface(img, w.port_rect)
+    g.set_port(w)
+    h = glue_controls.new_control(g, w, Rect(0, 0, 20, 60), b"Button", True, 0, 0, 1, 3, 0)
+    c = glue_controls._ctl(g, h)
+    cdef = g.process.resources.defproc("CDEF", 0)
+    assert c.def_proc == cdef                   # stored whole, no variation in its top byte
+    assert c.variation == 3                     # the variation code is still there
+    assert glue_controls._proc_id(g, c) == (0 << 4) | 3    # CDEF 0, variation 3
+
+
 def test_68k_code_can_call_cdef_0_itself(qapp):
     """Excel's own CDEF passes the messages it doesn't answer to CDEF 0,
     calling its code with the arguments on the stack."""
