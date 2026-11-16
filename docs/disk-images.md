@@ -17,6 +17,7 @@ will and will not open.
 | VMDK (`.vmdk`) | `macrt.vmdk` | Version 4 sparse extents (raw and zlib-compressed grains, with or without grain markers, grain directory in the footer) and version 3 COWD extents. |
 | UDIF (`.dmg`, `.smi`) | `macrt.dmg` | Uncompressed, zlib, ADC and sparse chunks; single-partition images; the `koly` trailer at the file's end, or at offset 0 in early ones. |
 | NDIF (Disk Copy 6, `.img`/`.smi`) | `macrt.dmg` | Raw, ADC and zero chunks, single-partition images whose chunk map lives in the `bcem` resource 128. |
+| MDF/MDS (Alcohol 1200, `.mds` + `.mdf`) | `macrt.mdf` | Mode 1 and Mode 2 Form 1 data tracks; 2352-byte stride, or 2448 with interleaved subchannel; the data track's 2048-byte user sectors are extracted into a raw CD volume. |
 
 All of these are read in full into memory before the volume readers see
 them; files inside a volume are still read on demand.
@@ -27,6 +28,11 @@ on its own when the file keeps both forks on the host, or nested in a
 MacBinary or AppleDouble container. A bare data fork with the chunk map
 stripped (copied through something that kept only the data fork) cannot
 be told from any other blob and will not open.
+
+An MDF/MDS pair is detected from either file of the pair: an `.mds`
+carries the `MEDIA DESCRIPTOR` signature, while a bare `.mdf` has no
+marker of its own, so it is found through a sibling `.mds` with the same
+stem on the host. The filename the `.mds` footer names is ignored.
 
 ## Unsupported
 
@@ -72,6 +78,10 @@ and a file in one of them will not browse as a volume.
   NDIF keeps its chunk map there, so the data fork alone cannot be read.
 - Encrypted UDIF images are not detected as such: they fail as damaged
   images and are reported as such.
+- MDF/MDS images that are DVDs, or whose data tracks are Mode 2 (2336
+  bytes a sector) or Mode 2 Form 2 (2324), or that carry more than one
+  data track.
+- MDF/MDS images whose tracks are all audio.
 
 Corrupt or unsupported images raise an error the Filer reports as an alert;
 they never crash the application.

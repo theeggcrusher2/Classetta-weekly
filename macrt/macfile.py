@@ -40,7 +40,7 @@ import machfs
 import machfs.main
 from machfs.btree import unpack_extent_record
 
-from . import chd, dmg, moof, qcow2, vhd, vmdk
+from . import chd, dmg, mdf, moof, qcow2, vhd, vmdk
 from .resfork import InvalidForkError, is_fork, open_fork
 
 APPLE_SINGLE = 0x00051600
@@ -655,7 +655,7 @@ def _startup_name(boot: bytes) -> str | None:
 
 def is_disk_image(data: bytes) -> bool:
     if moof.is_moof(data) or chd.is_chd(data) or qcow2.is_qcow2(data) or vhd.is_vhd(data) \
-            or vmdk.is_vmdk(data) or dmg.is_udif(data):
+            or vmdk.is_vmdk(data) or dmg.is_udif(data) or mdf.is_mds(data):
         return True
     data = _sectors(data)[0]
     return (_hfs_partition(data) is not None or _volume_start(data) is not None or 
@@ -848,11 +848,31 @@ def _image(path: Path) -> bytes | mmap.mmap:
         return mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_COPY)
 
 
+def _mdf_image(path: Path) -> bytes:
+    """The stream an .mdf/.mds pair holds: the data track's user sectors,
+    the form a raw CD image takes."""
+    mds_path = path if path.suffix.lower() == ".mds" else path.with_suffix(".mds")
+    mdf_path = mds_path.with_suffix(".mdf")
+    if not mds_path.is_file():
+        raise ValueError(f"{path.name}: it has no .mds sidecar beside it")
+    with mds_path.open("rb") as f:
+        mds_bytes = f.read()
+    if not mdf.is_mds(mds_bytes):
+        raise ValueError(f"{mds_path.name}: not an Alcohol .mds descriptor")
+    if not mdf_path.is_file():
+        raise ValueError(f"{mds_path.name}: {mdf_path.name} is missing")
+    return mdf.read_image(_image(mdf_path), mds_bytes)
+
+
 def load_volume(source: str | os.PathLike | bytes | mmap.mmap) -> machfs.Volume:
     """The volume on a disk image; its disk, for the disk driver, is its
     .disk."""
     path = source if not isinstance(source, (bytes, bytearray, mmap.mmap)) else None
     data = source if isinstance(source, (bytes, bytearray, mmap.mmap)) else _image(Path(source))
+    if path is not None and Path(path).suffix.lower() in (".mds", ".mdf"):
+        data = _mdf_image(Path(path))
+    if isinstance(source, (bytes, bytearray, mmap.mmap)) and mdf.is_mds(data):
+        raise ValueError("an .mds descriptor has to sit beside its .mdf; open it by its path")
     if dmg.is_udif(data):
         data = dmg.read_udif(data)
     elif path is not None and not (moof.is_moof(data) or chd.is_chd(data)
@@ -1299,6 +1319,10 @@ def image_kind(f: MacFile) -> str | None:
         return "UDIF disk image"
     if f.rsrc and dmg.is_ndif_fork(f.rsrc):
         return "NDIF disk image"
+    if mdf.is_mds(d):
+        return "MDF/MDS CD image"
+    if f.key.lower().endswith((".mds", ".mdf")):
+        return "MDF/MDS CD image"
     if len(d) > DISKCOPY_HEADER and d[82:84] == b"\x01\x00" and d[0] < 64:
         return "DiskCopy 4.2 image"
     if _hfs_partition(d) is not None:
@@ -1675,10 +1699,16 @@ def _volume_or_file(path: str | os.PathLike) -> tuple[machfs.Volume | None, MacF
                 volume = load_volume(dmg.read_ndif(probe.data, probe.rsrc))
             except (OSError, ValueError) as e:
                 problem = e
+    if volume is None and path.exists() and path.suffix.lower() in (".mds", ".mdf"):
+        try:
+            volume = load_volume(path)
+        except ValueError as e:
+            problem = e
     if volume is not None:
         return volume, None
     f = load_file(path)
-    if problem is not None and (not f.rsrc or dmg.is_ndif_fork(f.rsrc)):
+    if problem is not None and (not f.rsrc or dmg.is_ndif_fork(f.rsrc)
+                                or path.suffix.lower() in (".mds", ".mdf")):
         raise ValueError(f"{path.name}: {problem}")     # an image, but one that can't be read
     kind = archive_kind(f)
     if kind in ("StuffIt", "zip"):

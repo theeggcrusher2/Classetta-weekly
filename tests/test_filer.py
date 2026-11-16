@@ -2470,6 +2470,37 @@ def test_a_udif_disk_image_in_the_filer_opens_as_a_volume(tmp_path, harness):
     assert not h.d._alerts
 
 
+def test_an_mdf_mds_pair_in_the_filer_opens_as_a_volume(tmp_path, harness):
+    from test_mdf import _cd, _volume_raw
+    mds, mdf = _cd(_volume_raw())
+    (tmp_path / "ADC.mds").write_bytes(mds)
+    (tmp_path / "ADC.mdf").write_bytes(mdf)
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    _dblclick(win, "ADC.mds", h.settle)
+    h.settle()
+    opened = [w for w in h.d.filer_windows if w is not win]
+    assert len(opened) == 1
+    assert isinstance(opened[0].volume, machfs.Volume)
+    assert opened[0].volume.name == "Apple Disk"
+    assert sorted(n for n, _ in opened[0].volume.items()) == ["readme.txt"]
+    assert not h.d._alerts
+
+
+def test_an_mdf_without_its_sidecar_says_so_in_an_alert(tmp_path, harness):
+    from test_mdf import _cd, _volume_raw
+    mds, mdf = _cd(_volume_raw())
+    (tmp_path / "ADC.mdf").write_bytes(mdf)
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    _dblclick(win, "ADC.mdf", h.settle)
+    h.settle()
+    assert h.d._alerts and "sidecar" in h.d._alerts[0].text()
+    assert [w for w in h.d.filer_windows if w is not win] == []
+
+
 def test_a_macbinary_wrapped_ndif_in_the_filer_opens_as_a_volume(tmp_path, harness):
     from test_dmg import NDIF_RAW, _fork, _macbinary, _ndif, _volume_raw
     raw = _volume_raw()

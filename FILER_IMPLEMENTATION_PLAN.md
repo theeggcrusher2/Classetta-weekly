@@ -246,11 +246,13 @@ Preserve existing behavior unless a task explicitly changes it. If the codebase 
   - Cover the requested HFS, HFS+, UDF, and Rock Ridge contents as separate, verifiable format/filesystem combinations.
   - Handle unsupported filesystems and malformed images without crashing.
 
-- [ ] **27b. Add MDF/MDS (Alcohol 1200) CD-image reading**
+- [x] **27b. Add MDF/MDS (Alcohol 1200) CD-image reading**
   - Read MDF/MDS pairs: the `.mdf` sector image with its `.mds` sidecar describing tracks, sessions and sector format.
   - Open their contents through the existing disk-image path (`macrt.macfile`); the completed ISO, Toast and BIN/CUE images stay as they are.
   - Detect from either file of the pair; a missing sidecar, an unrecognised sector format or malformed metadata is reported without crashing the Filer.
   - Test detection, extraction to a readable volume, and failure paths with generated fixtures only. Manual sanity material: the 7-zipped ADC Developer CD MDF pairs in the gitignored `dt2/` folder — local checks only, never committed and never wired into the test scripts; unwrapping them also serves as manual sanity material for the planned 7z decompression batch.
+  - Done: `macrt.mdf` reads the descriptor's sessions and tracks, takes the one data track (Mode 1 or Mode 2 Form 1, 2352 or 2448 stride with or without interleaved subchannel), and hands its 2048-byte user sectors to the existing volume path; DVD, Mode 2, Mode 2 Form 2, multi-data-track and audio-only images are refused by name, a missing sidecar, junk descriptor or truncated `.mdf` raise specific errors.
+    tests/test_mdf.py plus two Filer tests; docs/disk-images.md updated. A bare `.mdf` has no marker, so it is detected through a sibling `.mds` with the same stem; the footer's filename is ignored.
 
 - [ ] **28. Extend drill-down to newly supported formats**
   - Allow newly supported archives and disk images to participate in nested browsing.
