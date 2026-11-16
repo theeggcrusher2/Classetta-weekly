@@ -18,6 +18,7 @@ will and will not open.
 | UDIF (`.dmg`, `.smi`) | `macrt.dmg` | Uncompressed, zlib, ADC and sparse chunks; single-partition images; the `koly` trailer at the file's end, or at offset 0 in early ones. |
 | NDIF (Disk Copy 6, `.img`/`.smi`) | `macrt.dmg` | Raw, ADC and zero chunks, single-partition images whose chunk map lives in the `bcem` resource 128. |
 | MDF/MDS (Alcohol 1200, `.mds` + `.mdf`) | `macrt.mdf` | Mode 1 and Mode 2 Form 1 data tracks; 2352-byte stride, or 2448 with interleaved subchannel; the data track's 2048-byte user sectors are extracted into a raw CD volume. |
+| DART / DiskMaker (`DMdf`/`DskM`, `DMd*`/`DART`) | `macrt.dart` | 'Fast' RLE and stored chunks; the 12-byte Apple II tag-RAM bytes are stripped; Mac 400K (MFS), 800K and 1440K (HFS) disks. |
 
 All of these are read in full into memory before the volume readers see
 them; files inside a volume are still read on demand.
@@ -35,6 +36,16 @@ marker of its own, so it is found through a sibling `.mds` with the same
 stem on the host. The filename the `.mds` footer names is ignored. The
 same holds for a pair nested in an archive: opening either member finds
 the other member with the same stem in the same archive.
+
+A DART or DiskMaker image is detected from its header and chunk-length
+table, not its name; Apple used it for the guided-tour disks on its
+Developer CDs (`DMdf`/`DskM`), and DART (`DMd*`/`DART`) is the same file
+written by its successor. Each chunk holds 40 512-byte sectors followed
+by 40 sets of 12 tag bytes — the Apple II tag-RAM bytes, which is also
+why DiskMaker archived ProDOS disks — and the tags are stripped, so the
+volume readers see the plain 512-byte sector stream. Mac 400K disks
+mount as MFS, 800K and 1440K disks as HFS; a chunk that would not
+compress is stored raw (block length `0xffff`) and read the same way.
 
 ## Unsupported
 
@@ -84,6 +95,10 @@ and a file in one of them will not browse as a volume.
   bytes a sector) or Mode 2 Form 2 (2324), or that carry more than one
   data track.
 - MDF/MDS images whose tracks are all audio.
+- DART images with 'best' LZHUF compression, not implemented.
+- DART images of Lisa, Apple II (ProDOS) or MS-DOS disk types: they are
+  detected (the Kind column says so) but the sector layout is not one a
+  Mac mounts.
 
 Corrupt or unsupported images raise an error the Filer reports as an alert;
 they never crash the application.

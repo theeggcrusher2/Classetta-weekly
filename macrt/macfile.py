@@ -40,7 +40,7 @@ import machfs
 import machfs.main
 from machfs.btree import unpack_extent_record
 
-from . import chd, dmg, mdf, moof, qcow2, vhd, vmdk
+from . import chd, dmg, dart, mdf, moof, qcow2, vhd, vmdk
 from .resfork import InvalidForkError, is_fork, open_fork
 
 APPLE_SINGLE = 0x00051600
@@ -655,7 +655,8 @@ def _startup_name(boot: bytes) -> str | None:
 
 def is_disk_image(data: bytes) -> bool:
     if moof.is_moof(data) or chd.is_chd(data) or qcow2.is_qcow2(data) or vhd.is_vhd(data) \
-            or vmdk.is_vmdk(data) or dmg.is_udif(data) or mdf.is_mds(data):
+            or vmdk.is_vmdk(data) or dmg.is_udif(data) or mdf.is_mds(data) \
+            or dart.is_dart(data):
         return True
     data = _sectors(data)[0]
     return (_hfs_partition(data) is not None or _volume_start(data) is not None or 
@@ -886,6 +887,8 @@ def load_volume(source: str | os.PathLike | bytes | mmap.mmap) -> machfs.Volume:
             probe = None
         if probe is not None and dmg.is_ndif_fork(probe.rsrc):
             data = dmg.read_ndif(probe.data, probe.rsrc)
+    if dart.is_dart(data):
+        data = dart.read_image(data)
     if moof.is_moof(data):
         tracks = moof.Disk(bytes(data))
         disk = Disk(bytearray(tracks.image), bytearray(tracks.tags), tracks)
@@ -1323,6 +1326,8 @@ def image_kind(f: MacFile) -> str | None:
         return "MDF/MDS CD image"
     if f.key.lower().endswith((".mds", ".mdf")):
         return "MDF/MDS CD image"
+    if dart.is_dart(d):
+        return "DART disk image"
     if len(d) > DISKCOPY_HEADER and d[82:84] == b"\x01\x00" and d[0] < 64:
         return "DiskCopy 4.2 image"
     if _hfs_partition(d) is not None:

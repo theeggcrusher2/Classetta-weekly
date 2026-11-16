@@ -254,6 +254,11 @@ Preserve existing behavior unless a task explicitly changes it. If the codebase 
   - Done: `macrt.mdf` reads the descriptor's sessions and tracks, takes the one data track (Mode 1 or Mode 2 Form 1, 2352 or 2448 stride with or without interleaved subchannel), and hands its 2048-byte user sectors to the existing volume path; DVD, Mode 2, Mode 2 Form 2, multi-data-track and audio-only images are refused by name, a missing sidecar, junk descriptor or truncated `.mdf` raise specific errors.
     tests/test_mdf.py plus two Filer tests; docs/disk-images.md updated. A bare `.mdf` has no marker, so it is detected through a sibling `.mds` with the same stem; the footer's filename is ignored. A pair inside an archive opens from either member, the sibling member found in the same archive.
 
+- [x] **27c. Add DART/DiskMaker disk-image reading**
+  - Read the `DMdf` (DiskMaker, `DskM`) and `DMd*` (DART, `DART`) floppy-image format Apple used on its Developer CDs: a 4-byte header (compression, disk type, size in kiB), a 16-bit chunk-length table, then 40-sector chunks of 512-byte blocks plus their 12 tag bytes (the Apple II tag-RAM area; zero on a Mac's disk).
+  - 'Fast' RLE and stored chunks are read; the tags are stripped and the plain 512-byte sector stream goes through the existing volume path (400K MFS, 800K and 1440K HFS mount).
+  - Done: `macrt.dart` decodes 'fast' RLE (word counts, a negative count repeating the following word) and stored (`0xffff`) chunks; the Kind column says "DART disk image" and a double-click opens the volume instead of launching the DiskMaker application. The 'best' LZHUF compression and the Lisa, Apple II (ProDOS) and MS-DOS disk types are recognised and refused by name. tests/test_dart.py plus a Filer double-click test; docs/disk-images.md updated. The nine guided-tour images on the ADC Developer CD (Volume 01) decode and mount as volumes (MFS for the 400K one, HFS elsewhere).
+
 - [ ] **28. Extend drill-down to newly supported formats**
   - Allow newly supported archives and disk images to participate in nested browsing.
   - Add one format at a time or in small tested batches.

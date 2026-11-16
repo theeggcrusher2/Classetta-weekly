@@ -2488,6 +2488,22 @@ def test_an_mdf_mds_pair_in_the_filer_opens_as_a_volume(tmp_path, harness):
     assert not h.d._alerts
 
 
+def test_a_dart_image_double_click_opens_the_volume(tmp_path, harness):
+    from test_dart import _dart, _volume_raw
+    (tmp_path / "Tour of the Macintosh").write_bytes(_dart(_volume_raw()))
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    _dblclick(win, "Tour of the Macintosh", h.settle)
+    h.settle()
+    opened = [w for w in h.d.filer_windows if w is not win]
+    assert len(opened) == 1
+    assert isinstance(opened[0].volume, machfs.Volume)
+    assert opened[0].volume.name == "Apple Disk"
+    assert sorted(n for n, _ in opened[0].volume.items()) == ["readme.txt"]
+    assert not h.d._alerts
+
+
 def test_an_mdf_mds_pair_in_a_zip_opens_from_either_member(tmp_path, harness):
     import zipfile
     from test_mdf import _cd, _volume_raw
