@@ -1054,6 +1054,16 @@ went on with a value that call should have filled in.
 | 15 | segment loader error | A `CODE` segment that's missing or compressed, or one built for the far code model that the application's own runtime doesn't load. |
 | 25 | out of memory | A Toolbox call couldn't get the memory it had to have. Most calls report `memFullErr` instead and let the application decide. |
 
+Some early applications wait on something macrt doesn't advance, and
+sit still alive: no window, no error, no missing calls to report.
+`--trace-traps` shows launch's first traps, then the same few over and
+over — `CopyBits`, `OffsetRect`, `TickCount` — and nothing after them.
+Mousing Around, on the ADC Developer CD's guided-tour disks, is one.
+Its bytes sit still from a disk image and from a host folder alike, so
+the wait isn't the image's or the Filer's, but the emulator's. Programs
+like that are the ones [Games from 1984](#games-from-1984) is about;
+what they wait on beyond it isn't there yet.
+
 ### Looking closer
 
 - `--trace-traps` logs every trap as it's called, with the address it was
