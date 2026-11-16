@@ -2488,6 +2488,34 @@ def test_an_mdf_mds_pair_in_the_filer_opens_as_a_volume(tmp_path, harness):
     assert not h.d._alerts
 
 
+def test_an_mdf_mds_pair_in_a_zip_opens_from_either_member(tmp_path, harness):
+    import zipfile
+    from test_mdf import _cd, _volume_raw
+    mds, mdf = _cd(_volume_raw())
+    with zipfile.ZipFile(tmp_path / "pair.zip", "w") as z:
+        z.writestr("ADC.mds", mds)
+        z.writestr("ADC.mdf", mdf)
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    _dblclick(win, "pair.zip", h.settle)
+    h.settle()
+    opened = [w for w in h.d.filer_windows if w is not win]
+    assert len(opened) == 1
+    assert isinstance(opened[0].volume, ArchiveFolder)
+    _dblclick(opened[0], "ADC.mds", h.settle)
+    h.settle()
+    vol_win = [w for w in h.d.filer_windows if w is not win and w is not opened[0]]
+    assert len(vol_win) == 1
+    assert vol_win[0].volume.name == "Apple Disk"
+    assert not h.d._alerts
+    _dblclick(opened[0], "ADC.mdf", h.settle)
+    h.settle()
+    vol_win = [w for w in h.d.filer_windows if w is not win and w is not opened[0]]
+    assert len(vol_win) == 2
+    assert all(w.volume.name == "Apple Disk" for w in vol_win)
+
+
 def test_an_mdf_without_its_sidecar_says_so_in_an_alert(tmp_path, harness):
     from test_mdf import _cd, _volume_raw
     mds, mdf = _cd(_volume_raw())

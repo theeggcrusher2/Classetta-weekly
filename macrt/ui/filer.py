@@ -470,8 +470,16 @@ class FilerWindow(_Hosted):
 
     # -- content ----------------------------------------------------------
     def _fill(self) -> None:
+        def list_it():
+            return sorted(list_folder(self.volume, self.path), key=lambda f: f.name.lower())
         try:
-            files = sorted(list_folder(self.volume, self.path), key=lambda f: f.name.lower())
+            # A host folder full of big files reads them whole while the
+            # listing is built; that work runs behind a busy window.
+            # No parent: this runs before the window is shown.
+            files = run_busy(None, f"Opening {self.windowTitle()}",
+                             f"“{self.windowTitle()}” is being listed now; the Filer stays "
+                             "usable while it runs.",
+                             list_it) or []
         except Exception:
             files = []
         self.entries = {f.name: f for f in files}
@@ -782,10 +790,15 @@ class FilerWindow(_Hosted):
         if not path:
             return
         try:
-            data = build_catalog(self.volume)
+            data = run_busy(self, f"Saving {self.windowTitle()}",
+                            f"“{self.windowTitle()}” is being written as a Disk Tracker "
+                            "catalog; the Filer stays usable while it runs.",
+                            lambda: build_catalog(self.volume))
         except Exception as e:
             self._say(f"Couldn't save the catalog: {e}")
             return
+        if data is None:
+            return                    # stopped waiting; the write runs on
         try:
             Path(path).write_bytes(data)
         except OSError as e:
@@ -854,24 +867,39 @@ class FilerWindow(_Hosted):
             self.display.open_filer(ContainerFolder(nested, f.name), (), self.options)
             return
         # A disk image is a volume to browse — what the command line
-        # opens it as — not a file to run.
+        # opens it as — not a file to run.  A big one, or one whose other
+        # half of an .mdf/.mds pair sits inside an archive, reads off the
+        # GUI thread behind a busy window.
         if image_kind(f) is not None:
             try:
-                volume = image_volume(f)
+                volume = run_busy(self, f"Opening {f.name}",
+                                  f"“{f.name}” is a disk image; its volume is read "
+                                  "now, and the Filer stays usable while it runs.",
+                                  lambda: image_volume(f))
             except (OSError, ValueError) as e:
                 self._say(str(e))
                 return
+            if volume is None:
+                return                    # stopped waiting; the read runs on
             system = getattr(self.display, "system", None)
             if system is not None and isinstance(volume, machfs.Volume):
                 # mounted, so aliases into it resolve, as for --disk
                 system.files.mount_folder(VolumeFolder(volume))
             self.display.open_filer(volume, (), self.options)
             return
+        # A big archive — the host's or an in-memory one — reads and
+        # lists off the GUI thread behind a busy window.
         try:
-            entries = archive_entries(f.data, f.name) if f.data else None
+            listed = run_busy(self, f"Opening {f.name}",
+                              f"“{f.name}” is an archive; its contents are listed "
+                              "now, and the Filer stays usable while it runs.",
+                              lambda: (archive_entries(f.data, f.name) if f.data else None,))
         except ValueError as e:
             self._say(str(e))
             return
+        if listed is None:
+            return                    # stopped waiting; the listing runs on
+        entries = listed[0]
         if entries is not None:
             self.display.open_filer(ArchiveFolder(entries, f.name, f.data), (),
                                     self.options)
