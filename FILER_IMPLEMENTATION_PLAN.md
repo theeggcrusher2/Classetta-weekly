@@ -225,6 +225,9 @@ Preserve existing behavior unless a task explicitly changes it. If the codebase 
   - Use an appropriate reader or adapter for each batch.
   - Do not treat "all QEMU and MAME formats" as one task.
   - Document formats that are not supported.
+  - [x] Batch 1: VHD (fixed and dynamic) — reader, Filer test, tests, docs/disk-images.md
+  - [ ] Batch 2: VMDK
+  - [ ] Batch 3: qcow version 1 (if capacity allows)
 
 - [ ] **26b. Add NDIF and UDIF disk-image reading**
   - Read compressed Apple disk images: NDIF (DiskCopy 6) and UDIF (`.dmg`, `.smi`).
