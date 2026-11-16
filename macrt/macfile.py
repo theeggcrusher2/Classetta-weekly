@@ -1175,8 +1175,15 @@ def load_file(path: str | os.PathLike, folder: Folder | None = None, *,
 def archive_kind(f: MacFile) -> str | None:
     """The kind of archive f is, if it's one: something to unpack first.
     Any format in macextract's registry counts — add one there and it
-    is recognised (and browsable) here with no change."""
-    d = getattr(f, "data", b"")
+    is recognised (and browsable) here with no change.
+
+    A sample of the fork answers, not the whole of it: the menu bar asks
+    this of the selected file on every paint, so reading the body there
+    would freeze the Filer on a large archive.  An archive member whose
+    forks are still inside the archive is not decoded to be asked."""
+    if isinstance(f, LazyArchiveFile) and f.forks_pending:
+        return None
+    d = _fork_sample(f)
     if d[:4] == b"SIT!" and d[10:14] == b"rLau" or d[:16] == b"StuffIt (c)1997-":
         return "StuffIt"
     if d[:4] == b"PK\x03\x04":
@@ -1194,6 +1201,16 @@ def archive_kind(f: MacFile) -> str | None:
         except Exception:
             continue
     return None
+
+
+def _fork_sample(f, size: int = 65536) -> bytes:
+    """The first size bytes of a file's data fork: from MacFile.head,
+    which reads only that much even of a file on a disk image, or of a
+    bare machfs node's data when there is no head to call."""
+    head = getattr(f, "head", None)
+    if head is not None:
+        return head(size)
+    return bytes(getattr(f, "data", b"")[:size])
 
 
 # Each macextract module's name for itself, by its module name: the Kind
@@ -1214,6 +1231,10 @@ _ARCHIVE_KINDS = {
 def archive_name(f: MacFile) -> str | None:
     """The name of the archive f is, if it's one macextract knows: the
     Kind column's word for it, without opening it."""
+    if isinstance(f, LazyArchiveFile) and f.forks_pending:
+        # The head is still compressed inside the archive: sampling it
+        # would decode the member, which drawing a listing must not do.
+        return None
     d = f.head()
     if not d:
         return None
@@ -1235,6 +1256,10 @@ def image_kind(f: MacFile) -> str | None:
         # A fixed VHD's footer is at the file's end, beyond the head sample,
         # so the extension is the only hint a listing has for one.
         return "VHD disk image"
+    if isinstance(f, LazyArchiveFile) and f.forks_pending:
+        # The bytes are still inside the archive: only the name says
+        # anything, and reading the body here would decode the member.
+        return None
     d = f.head(524296)
     if not d:
         return None
@@ -1649,6 +1674,34 @@ def _creator_on(volume: machfs.Volume, creator: bytes) -> MacFile | None:
     """The application on the volume with that creator, nearest the top."""
     apps = [f for f in volume_files(volume) if f.is_application and f.creator == creator]
     return min(apps, key=lambda f: f.key.count(":"), default=None)
+
+
+def creator_application(creator: bytes, files) -> MacFile | None:
+    """The application that made documents of `creator`, on the first of
+    the mounted volumes that has one — the Finder's look across the
+    disks, for a file whose own folder is not a volume: an archive's
+    member, a file on the host.  `files` is the System's FileSystem,
+    whose volumes are the Toolbox's; a plain sequence of machfs volumes
+    answers too."""
+    if files is None:
+        return None
+    volumes = getattr(files, "volumes", None)
+    if volumes is None:
+        for volume in files or ():
+            made = _creator_on(volume, creator)
+            if made is not None:
+                return made
+        return None
+    # Imported here: toolbox.files imports this module.
+    from .toolbox.files import File as VolumeNode
+    for volume in volumes:
+        found = [m for node in volume.nodes.values()
+                 if isinstance(node, VolumeNode) and node.type == b"APPL"
+                 and node.creator == creator
+                 and (m := files.macfile_of(node)) is not None]
+        if found:                       # the nearest the top, as _creator_on picks
+            return min(found, key=lambda f: f.key.count(":"))
+    return None
 
 
 def _ostype(code: bytes) -> str:

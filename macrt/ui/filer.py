@@ -18,6 +18,7 @@ changed.  FilerOptions.writable is how a window says otherwise.
 
 from __future__ import annotations
 
+import copy
 import time
 from concurrent.futures import Future
 from dataclasses import dataclass, replace
@@ -37,7 +38,8 @@ from pathlib import Path
 from ..macfile import (ArchiveFolder, ContainerFolder, HostFolder, LazyArchiveFile,
                        MacFile, VolumeFolder,
                        alias_open, alias_original, archive_entries, archive_kind,
-                       archive_name, container_contents, extract_archive, image_kind,
+                       archive_name, container_contents, creator_application,
+                       extract_archive, image_kind,
                        is_alias, is_control_panel, launch_target, list_folder,
                        load_volume, open_container)
 from ..process import size_resource
@@ -61,6 +63,7 @@ if TYPE_CHECKING:
     from .menubar import MenuBarWidget
 
 CONTENT = (316, 236)       # the list's size, inside the frame
+CONTENT_LIMIT = 65536      # bytes of a fork the Content Viewer shows at once
 LIST_STYLE = """
 QTreeWidget { background: white; color: black; border: none; outline: none; }
 QTreeWidget::item { padding: 1px; }
@@ -142,7 +145,7 @@ def _kind(f: MacFile) -> str:
         return "folder"
     if f.is_application:
         return "application"
-    if is_alias(f):
+    if not _fork_pending(f) and is_alias(f):
         return "alias"
     known = archive_name(f) or image_kind(f)
     if known:
@@ -885,8 +888,82 @@ class FilerWindow(_Hosted):
         try:
             target = launch_target(f)
         except ValueError as e:
+            if not isinstance(self.volume, ArchiveFolder):
+                self._say(str(e))
+                return
+            # A document inside an archive: its creator is not here to
+            # open it with, so either one is on a mounted volume or the
+            # archive is offered for extraction first.
+            target = self._member_target(f, e)
+            if target is None:
+                return                    # an offer is up, or it was refused
+        self._launch(target, view, trace)
+
+    def _member_target(self, f: MacFile, why: ValueError) -> MacFile | None:
+        """What to launch for a document inside this window's archive:
+        the application that made it, when one is on a mounted volume —
+        opening at once, as the Finder hands a document to the running
+        application.  Otherwise None with an offer up to extract the
+        archive and open the extracted copy; declining says why it
+        cannot open."""
+        made = creator_application(f.creator, self._mounted_volumes())
+        if made is not None:
+            return _opened_with(made, f)
+        message = str(why)
+        self.display.ask_question(
+            "Open",
+            f"“{f.name}” is a document in “{self.volume.name}”. Extract the "
+            "archive and open it?",
+            lambda yes: self._extract_and_open(f) if yes else self._say(message),
+            detail=message)
+        return None
+
+    def _extract_and_open(self, f: MacFile) -> None:
+        """Extract the archive this window browses into a folder the
+        user picks, then open the extracted copy of f with the
+        application that made it: beside it among the extracted files,
+        or on a mounted volume."""
+        archive = self.volume
+        dest = QFileDialog.getExistingDirectory(self, f"Extract {archive.name} to…")
+        if not dest:
+            return
+        try:
+            written = run_busy(self, f"Extracting {archive.name}",
+                               f"“{archive.name}” is extracting now; the Filer "
+                               "stays usable while it runs.",
+                               lambda: extract_archive(archive.raw, dest))
+        except ValueError as e:
             self._say(str(e))
             return
+        if written is None:
+            return
+        folder = HostFolder(dest)
+        extracted = folder.find(f.name)
+        if extracted is None:
+            self._say(f"{f.name} is not among the files extracted from {archive.name}.")
+            return
+        made = next((c for c in folder.files()
+                     if c.is_application and c.creator == extracted.creator), None)
+        if made is None:
+            made = creator_application(extracted.creator, self._mounted_volumes())
+        if made is None:
+            self._say(f"{extracted.name} is a document, and no application extracted "
+                      f"with it made it (its creator is "
+                      f"'{extracted.creator.decode('latin1', errors='replace')}').")
+            return
+        self._launch(_opened_with(made, extracted), None, None)
+
+    def _mounted_volumes(self):
+        """The System's FileSystem: the disks and disk images the Display
+        has mounted, for looking up the application that made a
+        document."""
+        system = getattr(self.display, "system", None)
+        return getattr(system, "files", None)
+
+    def _launch(self, target: MacFile, view: bool | None,
+                trace: bool | None) -> None:
+        """Run what was chosen to open: an application, or the one that
+        made a document with the document to open."""
         running = next((p for p in self.display.processes
                         if p.app is not None and p.app.key == target.key), None)
         if running is not None and not target.documents:
@@ -923,6 +1000,15 @@ class FilerWindow(_Hosted):
 
     def _say(self, message: str) -> None:
         self.display.show_alert(QMessageBox.Icon.Warning, "Could Not Open", message)
+
+
+def _opened_with(app: MacFile, doc: MacFile) -> MacFile:
+    """`app` set to open `doc`, as launch_target leaves it: a copy, so
+    the application found on a volume or extracted beside the document
+    is not marked with documents for every later launch of it."""
+    made = copy.copy(app)
+    made.documents = (doc,)
+    return made
 
 
 def _depth(display) -> int:
@@ -1295,12 +1381,20 @@ class ContentViewerWindow(AboutWindow):
             if not data:
                 self.text_edit.setPlainText("(empty)")
                 return
+            # A big fork is shown from its head: hex-dumping the whole of
+            # one froze the window for seconds on a large file, and the
+            # first bytes are what the viewer is opened to see.
+            note = ""
+            if len(data) > CONTENT_LIMIT:
+                note = (f"\n(showing the first {CONTENT_LIMIT:,} bytes "
+                        f"of {len(data):,})")
+                data = data[:CONTENT_LIMIT]
             if self.text_only:
                 try:
                     text = data.decode('utf-8', errors='replace')
                 except Exception:
                     text = data.decode('latin1', errors='replace')
-                self.text_edit.setPlainText(text)
+                self.text_edit.setPlainText(text + note)
             else:
                 lines = []
                 for i in range(0, len(data), 16):
@@ -1309,7 +1403,7 @@ class ContentViewerWindow(AboutWindow):
                     hex_part = hex_part.ljust(47)
                     ascii_part = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
                     lines.append(f"{i:08X}: {hex_part}  {ascii_part}")
-                self.text_edit.setPlainText("\n".join(lines))
+                self.text_edit.setPlainText("\n".join(lines) + note)
         except Exception:
             self.text_edit.setPlainText("(unreadable data fork)")
 

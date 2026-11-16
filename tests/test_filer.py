@@ -1869,6 +1869,152 @@ def test_an_archive_entry_launches(harness, tmp_path, monkeypatch):
     assert [name for name, _ in launched] == ["Inner App"]
 
 
+def test_a_document_in_an_archive_offers_to_extract_and_open(harness, tmp_path,
+                                                             monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+    p = tmp_path / "Outer.pit"
+    p.write_bytes(_packit([("Inner App", b"data two", FORK, b"APPL", b"TEST"),
+                           ("Inner One", b"data one", b"", b"TEXT", b"TEST")]))
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    _dblclick(win, "Outer.pit", h.settle)
+    h.settle()
+    inner = h.d.filer_windows[-1]
+    launched = []
+    monkeypatch.setattr(h.d, "launch",
+                        lambda name, main, **kw: launched.append((name, kw)))
+    _dblclick(inner, "Inner One", h.settle)
+    h.settle()
+    # An offer, not the old "no application on here made it" refusal.
+    assert h.d._alerts, "double-clicking the document offered nothing"
+    offer = h.d._alerts[-1]
+    assert "Extract the archive and open it?" in offer.text()
+    assert not any("no application on here" in a.text() for a in h.d._alerts)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    _dir_dialog(monkeypatch, dest)
+    offer.button(QMessageBox.StandardButton.Yes).click()
+    h.settle()
+    h.wait_until(lambda: launched, what="the launch after extracting")
+    assert (dest / "Inner One").read_bytes() == b"data one"
+    name, kw = launched[0]
+    assert name == "Inner App"
+    assert [d.name for d in kw["app"].documents] == ["Inner One"]
+    assert not h.d._alerts
+
+
+def test_declining_the_extract_offer_says_why_the_document_wont_open(harness,
+                                                                    tmp_path,
+                                                                    monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+    p = tmp_path / "Outer.pit"
+    p.write_bytes(_packit([("Inner One", b"data one", b"", b"TEXT", b"TTxt")]))
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    _dblclick(win, "Outer.pit", h.settle)
+    h.settle()
+    inner = h.d.filer_windows[-1]
+    _dblclick(inner, "Inner One", h.settle)
+    h.settle()
+    offer = h.d._alerts[-1]
+    offer.button(QMessageBox.StandardButton.No).click()
+    h.settle()
+    assert h.d._alerts, "declining said nothing"
+    refusal = h.d._alerts[-1]
+    assert refusal.windowTitle() == "Could Not Open"
+    assert "no application on here made it" in refusal.text()
+    assert h.d.filer_windows[-1] is inner      # no window opened for it
+
+
+def test_a_document_in_an_archive_opens_with_an_application_on_a_volume(harness,
+                                                                       tmp_path,
+                                                                       monkeypatch):
+    v = _volume()
+    raw = _packit([("Archived", b"payload", b"", b"TEXT", b"TEST")])
+    pit = machfs.File()
+    pit.type, pit.creator = b"????", b"????"
+    pit.data = bytearray(raw)
+    v["Outer.pit"] = pit
+    h = harness(disks=[v])
+    win = h.d.open_filer(v)
+    h.settle()
+    _dblclick(win, "Outer.pit", h.settle)
+    h.settle()
+    launched = []
+    monkeypatch.setattr(h.d, "launch",
+                        lambda name, main, **kw: launched.append((name, kw)))
+    inner = h.d.filer_windows[-1]
+    _dblclick(inner, "Archived", h.settle)
+    h.settle()
+    # Widget on the mounted volume made it: it opens at once, with no
+    # offer to extract anything.
+    assert [name for name, _ in launched] == ["Widget"]
+    assert [d.name for d in launched[0][1]["app"].documents] == ["Archived"]
+    assert not h.d._alerts
+
+
+def test_selecting_an_archive_leaves_its_body_unread_for_the_menus(harness,
+                                                                  tmp_path,
+                                                                  monkeypatch):
+    """The menu bar asks the selected file what it is every time it is
+    drawn; with a big archive on a disk image that must read a sample,
+    never the body."""
+    inner = machfs.Volume()
+    inner.name = "Inner"
+    pit = machfs.File()
+    pit.type, pit.creator = b"????", b"????"
+    pit.data = bytearray(_packit([("X", b"data", b"", b"TEXT", b"TTxt")]))
+    inner["Outer.pit"] = pit
+    img = tmp_path / "Outer.dsk"
+    img.write_bytes(inner.write(size=800 * 1024))
+    h = harness(disks=[])
+    win = h.d.open_filer(load_volume(str(img)))
+    h.settle()
+    win.tree.setCurrentItem(_item(win, "Outer.pit"))
+    h.settle()
+
+    def boom(self):
+        raise AssertionError("the archive's body was read to draw the menus")
+
+    item = win.entries["Outer.pit"]
+    monkeypatch.setattr(type(item), "data", property(boom))
+    menus = h.d.filer_menus.bar_menus()          # must not read the body
+    file_menu = next(m for m in menus if m.id == FILE_MENU_ID)
+    assert file_menu.items[9].enabled is True    # Extract… still knows it is one
+
+
+def test_listing_an_archive_does_not_decode_its_members(harness, tmp_path):
+    p = tmp_path / "Outer.pit"
+    p.write_bytes(_packit([("Inner One", b"data one" * 1000, b"", b"TEXT", b"TTxt")]))
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    _dblclick(win, "Outer.pit", h.settle)
+    h.settle()
+    inner = h.d.filer_windows[-1]
+    assert _rows(inner) == [("Inner One", "document")]
+    member = inner.volume.entries[0]
+    assert member.forks_pending          # the Kind column asked without decoding
+
+
+def test_display_contents_of_a_large_file_shows_its_head(harness, tmp_path):
+    p = tmp_path / "Big.pit"
+    p.write_bytes(_packit([("Big", b"x" * (1024 * 1024), b"", b"TEXT", b"TTxt")]))
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    win.tree.setCurrentItem(_item(win, "Big.pit"))
+    h.settle()
+    h.choose(h.d.global_bar, "File", 4)         # Display Contents
+    h.wait_until(lambda: len(h.d.viewer_windows) == 1, what="the Content Viewer")
+    text = h.d.viewer_windows[0].text_edit.toPlainText()
+    assert f"(showing the first 65,536 bytes of {p.stat().st_size:,})" in text
+    assert len(text.splitlines()) <= 4096 + 2   # the head, not the whole fork
+    assert not h.d._alerts
+
+
 def test_a_damaged_archive_is_refused_by_the_command_line(tmp_path):
     p = tmp_path / "Outer.pit"
     p.write_bytes(_packit([("Inner One", b"data one", b"", b"TEXT", b"TTxt")])[:50])

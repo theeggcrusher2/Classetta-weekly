@@ -456,6 +456,29 @@ class Display(QObject):
         self._alerts.append(box)
         box.show()
 
+    def ask_question(self, title: str, text: str, answered: Callable[[bool], None],
+                     detail: str = "") -> QMessageBox:
+        """A host question with Yes and No, shown as show_alert shows an
+        alert and recorded beside them; `answered` gets which button the
+        user pressed.  Dismissing it without pressing either (the
+        shutdown's dismiss) answers neither way, so nothing runs."""
+        if self._shut_down:
+            return None
+        box = QMessageBox(QMessageBox.Icon.Question, title, text,
+                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                          self.host_window)
+        if detail:
+            box.setDetailedText(detail)
+        box.setWindowModality(Qt.WindowModality.NonModal)
+        box.finished.connect(lambda _: self._alert_closed(box))
+        box.button(QMessageBox.StandardButton.Yes).clicked.connect(
+            lambda _: answered(True))
+        box.button(QMessageBox.StandardButton.No).clicked.connect(
+            lambda _: answered(False))
+        self._alerts.append(box)
+        box.show()
+        return box
+
     def dismiss_alerts(self) -> None:
         """OK every host alert that's up, as the user would."""
         for box in list(self._alerts):
