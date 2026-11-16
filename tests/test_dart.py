@@ -99,7 +99,7 @@ def test_a_fast_image_and_a_stored_one_are_both_dart():
     assert not dart.is_dart(b"")
     assert not dart.is_dart(b"not a disk image at all, just text")
     assert not dart.is_dart(_volume_raw()[:64])
-    assert not dart.is_dart(_dart(raw)[:84])            # the table cut short
+    assert not dart.is_dart(_dart(raw)[:83])            # the table cut short
     assert not dart.is_dart(b"\x00\x01\x01\x90" + b"\0" * 76)   # header only
 
 
@@ -109,6 +109,22 @@ def test_the_kind_column_says_dart():
     f = MacFile("Guided Tour Mac 128", d, b"", b"DMdf", b"DskM", 0, "Guided Tour Mac 128")
     assert image_kind(f) == "DART disk image"
     assert is_disk_image(f.head(524296))
+
+
+def test_a_head_sample_of_a_big_image_still_counts_as_dart():
+    # A listing reads only the first half-megabyte of a big file, so the
+    # table is checked on its own: the chunk lengths may run past the
+    # bytes in hand, which is what a prefix of a big image looks like.
+    lens = [0x2000] * 40                    # 40 chunks of 16 KiB apiece
+    d = _hand_dart(lens, [b"\x00\x01\xaa\x55"] * 4096, cmp_=0, size=800)
+    total = 84 + 40 * 0x2000 * 2
+    assert len(d) < 524296 < total
+    head = d[:524296]
+    assert dart.is_dart(head)
+    assert is_disk_image(head)
+    f = MacFile("Guided Tour Mac 512KE", head, b"", b"DMdf", b"DskM", 0,
+                "Guided Tour Mac 512KE")
+    assert image_kind(f) == "DART disk image"
 
 
 # --- reading -----------------------------------------------------------

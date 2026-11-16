@@ -59,7 +59,9 @@ class DartError(ValueError):
 
 def is_dart(data) -> bool:
     """Whether data looks like a DART or DiskMaker image, from its header
-    and chunk-length table alone."""
+    and chunk-length table alone.  A listing reads only the head of a
+    big file, so the chunk total isn't required to fit: the reader
+    checks the whole file when the image is opened."""
     if len(data) < HEADER + 2:
         return False
     cmp_, typ, size = data[0], data[1], struct.unpack_from(">H", data, 2)[0]
@@ -71,14 +73,13 @@ def is_dart(data) -> bool:
     lens = struct.unpack_from(f">{n}H", data, HEADER)
     if not any(lens):
         return False
-    total = HEADER + 2 * n
+    limit = CHUNK if cmp_ != FAST else CHUNK // 2
     for L in lens:
-        if L == 0:
-            continue
-        if L != 0xffff and L > CHUNK:
+        if L != 0xffff and L > limit:
             return False
-        total += CHUNK if L == 0xffff else (L * 2 if cmp_ == FAST else L)
-    return total <= len(data)
+        if cmp_ == STORED and L not in (CHUNK, 0xffff):
+            return False
+    return True
 
 
 def _fast(chunk: bytes) -> bytes:
