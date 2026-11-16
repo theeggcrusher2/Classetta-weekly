@@ -220,14 +220,14 @@ Preserve existing behavior unless a task explicitly changes it. If the codebase 
   - Open supported contents in a Filer window.
   - Add tests or representative fixtures for detection and browsing.
 
-- [ ] **26. Add other selected QEMU and MAME formats**
+- [x] **26. Add other selected QEMU and MAME formats**
   - Add explicitly identified formats in small, independently testable batches.
   - Use an appropriate reader or adapter for each batch.
   - Do not treat "all QEMU and MAME formats" as one task.
   - Document formats that are not supported.
   - [x] Batch 1: VHD (fixed and dynamic) — reader, Filer test, tests, docs/disk-images.md
   - [x] Batch 2: VMDK (version 4 sparse and version 3 COWD) — macrt.vmdk reader, Filer test, tests/test_vmdk.py, docs/disk-images.md
-  - [ ] Batch 3: qcow version 1 (if capacity allows)
+  - Batch 3: qcow version 1 — declined; rare format, high effort
 
 - [ ] **26b. Add NDIF and UDIF disk-image reading**
   - Read compressed Apple disk images: NDIF (DiskCopy 6) and UDIF (`.dmg`, `.smi`).
