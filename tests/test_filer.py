@@ -2453,6 +2453,41 @@ def test_a_vmdk_disk_image_in_the_filer_opens_as_a_volume(tmp_path, harness):
     assert not h.d._alerts
 
 
+def test_a_udif_disk_image_in_the_filer_opens_as_a_volume(tmp_path, harness):
+    from test_dmg import _udif, _volume_raw
+    raw = _volume_raw()
+    (tmp_path / "Oracle.dmg").write_bytes(_udif(raw))
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    _dblclick(win, "Oracle.dmg", h.settle)
+    h.settle()
+    opened = [w for w in h.d.filer_windows if w is not win]
+    assert len(opened) == 1
+    assert isinstance(opened[0].volume, machfs.Volume)
+    assert opened[0].volume.name == "Apple Disk"
+    assert sorted(n for n, _ in opened[0].volume.items()) == ["readme.txt"]
+    assert not h.d._alerts
+
+
+def test_a_macbinary_wrapped_ndif_in_the_filer_opens_as_a_volume(tmp_path, harness):
+    from test_dmg import NDIF_RAW, _fork, _macbinary, _ndif, _volume_raw
+    raw = _volume_raw()
+    data_fork, bcem = _ndif(raw, [(0, NDIF_RAW, 0, len(raw), raw)])
+    (tmp_path / "Disk.img.bin").write_bytes(_macbinary("Disk.img", data_fork, _fork(bcem)))
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    _dblclick(win, "Disk.img", h.settle)      # the image, as the Filer lists it
+    h.settle()
+    opened = [w for w in h.d.filer_windows if w is not win]
+    assert len(opened) == 1
+    assert isinstance(opened[0].volume, machfs.Volume)
+    assert opened[0].volume.name == "Apple Disk"
+    assert sorted(n for n, _ in opened[0].volume.items()) == ["readme.txt"]
+    assert not h.d._alerts
+
+
 def test_a_vhd_disk_image_in_the_filer_opens_as_a_volume(tmp_path, harness):
     from test_vhd import _fixed_vhd, _volume_raw
     raw = _volume_raw()

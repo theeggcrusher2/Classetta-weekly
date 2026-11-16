@@ -40,7 +40,7 @@ import machfs
 import machfs.main
 from machfs.btree import unpack_extent_record
 
-from . import chd, moof, qcow2, vhd, vmdk
+from . import chd, dmg, moof, qcow2, vhd, vmdk
 from .resfork import InvalidForkError, is_fork, open_fork
 
 APPLE_SINGLE = 0x00051600
@@ -655,7 +655,7 @@ def _startup_name(boot: bytes) -> str | None:
 
 def is_disk_image(data: bytes) -> bool:
     if moof.is_moof(data) or chd.is_chd(data) or qcow2.is_qcow2(data) or vhd.is_vhd(data) \
-            or vmdk.is_vmdk(data):
+            or vmdk.is_vmdk(data) or dmg.is_udif(data):
         return True
     data = _sectors(data)[0]
     return (_hfs_partition(data) is not None or _volume_start(data) is not None or 
@@ -851,7 +851,21 @@ def _image(path: Path) -> bytes | mmap.mmap:
 def load_volume(source: str | os.PathLike | bytes | mmap.mmap) -> machfs.Volume:
     """The volume on a disk image; its disk, for the disk driver, is its
     .disk."""
+    path = source if not isinstance(source, (bytes, bytearray, mmap.mmap)) else None
     data = source if isinstance(source, (bytes, bytearray, mmap.mmap)) else _image(Path(source))
+    if dmg.is_udif(data):
+        data = dmg.read_udif(data)
+    elif path is not None and not (moof.is_moof(data) or chd.is_chd(data)
+                                   or qcow2.is_qcow2(data) or vhd.is_vhd(data)
+                                   or vmdk.is_vmdk(data)):
+        # NDIF keeps its chunk map in the resource fork: the data fork
+        # alone isn't one the volume readers can see.
+        try:
+            probe = load_file(path)
+        except (OSError, ValueError):
+            probe = None
+        if probe is not None and dmg.is_ndif_fork(probe.rsrc):
+            data = dmg.read_ndif(probe.data, probe.rsrc)
     if moof.is_moof(data):
         tracks = moof.Disk(bytes(data))
         disk = Disk(bytearray(tracks.image), bytearray(tracks.tags), tracks)
@@ -1276,6 +1290,15 @@ def image_kind(f: MacFile) -> str | None:
         return "VHD disk image"
     if vmdk.is_vmdk(d):
         return "VMDK disk image"
+    if dmg.is_udif(d):
+        # An early image, with its koly trailer at offset 0 (or a file
+        # smaller than the sample): the head carries it.
+        return "UDIF disk image"
+    if dmg.is_udif(f.tail(512)):
+        # The normal place: the koly trailer in the file's last 512 bytes.
+        return "UDIF disk image"
+    if f.rsrc and dmg.is_ndif_fork(f.rsrc):
+        return "NDIF disk image"
     if len(d) > DISKCOPY_HEADER and d[82:84] == b"\x01\x00" and d[0] < 64:
         return "DiskCopy 4.2 image"
     if _hfs_partition(d) is not None:
@@ -1551,6 +1574,18 @@ def launch_target(f: MacFile) -> MacFile:
     return made
 
 
+def image_volume(f: MacFile) -> machfs.Volume:
+    """The volume on an image file, from its own forks when there is no
+    host path to use (an image nested in a MacBinary has nowhere to
+    look for its resource fork), else from its key, as open_container."""
+    if dmg.is_ndif_fork(f.rsrc):
+        return load_volume(dmg.read_ndif(f.data, f.rsrc))
+    p = Path(f.key)
+    if p.is_file():
+        return open_container(p)
+    return load_volume(f.data)
+
+
 def open_container(path: str | os.PathLike) -> machfs.Volume:
     """Open a recognized container (.dtc, .dt1, disk image) into a machfs.Volume,
     raising ValueError with a clear message for unsupported formats or invalid input."""
@@ -1628,10 +1663,22 @@ def _volume_or_file(path: str | os.PathLike) -> tuple[machfs.Volume | None, MacF
             volume = load_volume(raw)
         except ValueError as e:
             problem = e
+    if volume is None and not is_disk_image(raw) and path.exists():
+        # NDIF's chunk map lives in the resource fork: probe it before
+        # the file-or-archive fallback.
+        try:
+            probe = load_file(path)
+        except (OSError, ValueError):
+            probe = None
+        if probe is not None and dmg.is_ndif_fork(probe.rsrc):
+            try:
+                volume = load_volume(dmg.read_ndif(probe.data, probe.rsrc))
+            except (OSError, ValueError) as e:
+                problem = e
     if volume is not None:
         return volume, None
     f = load_file(path)
-    if problem is not None and not f.rsrc:
+    if problem is not None and (not f.rsrc or dmg.is_ndif_fork(f.rsrc)):
         raise ValueError(f"{path.name}: {problem}")     # an image, but one that can't be read
     kind = archive_kind(f)
     if kind in ("StuffIt", "zip"):

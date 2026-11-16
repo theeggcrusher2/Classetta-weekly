@@ -41,7 +41,7 @@ from ..macfile import (ArchiveFolder, ContainerFolder, HostFolder, LazyArchiveFi
                        archive_name, container_contents, creator_application,
                        extract_archive, image_kind,
                        is_alias, is_control_panel, launch_target, list_folder,
-                       load_volume, open_container)
+                       load_volume, open_container, image_volume)
 from ..process import size_resource
 from ..m68k.segload import has_code, why_no_code
 from ..resfork import InvalidForkError, is_fork, read_fork
@@ -857,8 +857,7 @@ class FilerWindow(_Hosted):
         # opens it as — not a file to run.
         if image_kind(f) is not None:
             try:
-                p = Path(f.key)
-                volume = open_container(p) if p.is_file() else load_volume(f.data)
+                volume = image_volume(f)
             except (OSError, ValueError) as e:
                 self._say(str(e))
                 return

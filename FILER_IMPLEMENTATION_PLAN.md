@@ -229,12 +229,16 @@ Preserve existing behavior unless a task explicitly changes it. If the codebase 
   - [x] Batch 2: VMDK (version 4 sparse and version 3 COWD) — macrt.vmdk reader, Filer test, tests/test_vmdk.py, docs/disk-images.md
   - Batch 3: qcow version 1 — declined; rare format, high effort
 
-- [ ] **26b. Add NDIF and UDIF disk-image reading**
+- [x] **26b. Add NDIF and UDIF disk-image reading**
   - Read compressed Apple disk images: NDIF (DiskCopy 6) and UDIF (`.dmg`, `.smi`).
   - Open their contents through the existing disk-image path (`macrt.macfile`), raw and DiskCopy 4.2 images staying as they are.
   - Support at least single-partition images first; handle segmented/multi-part images in a later increment if needed.
   - Report unsupported UDIF encodings and corrupt images without crashing.
   - Test detection, extraction to a readable volume, and failure paths.
+  - Done: `macrt.dmg` reads UDIF (uncompressed, zlib, ADC, sparse) and NDIF (raw, ADC, zero);
+    bzip2/LZFSE/lzma, KenCode, segmented, multi-table and version-≠4 images are refused by name.
+    tests/test_dmg.py plus two Filer tests; docs/disk-images.md updated. Encrypted UDIF images
+    are not specially detected; they fail as damaged images.
 
 - [x] **27. CD-image support incrementally**
   - Add one tested CD-image path first, then expand in separate increments.
