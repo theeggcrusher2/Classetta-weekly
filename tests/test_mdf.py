@@ -291,3 +291,29 @@ def test_a_track_table_running_off_the_end_says_so(tmp_path):
     (tmp_path / "CD.mdf").write_bytes(mdf_bytes)
     with pytest.raises(MdfError, match="session table runs off its end"):
         load_volume(tmp_path / "CD.mds")
+
+
+# --- a pair inside an archive -------------------------------------------
+
+def test_a_pair_in_an_archive_opens_from_either_member():
+    from macrt.macfile import ArchiveFolder, MacFile, image_volume
+    mds_bytes, mdf_bytes = _cd(_volume_raw())
+    mds = MacFile("ArchivePairFixture.mds", mds_bytes, b"", b"????", b"????",
+                  0, "ArchivePairFixture.mds")
+    mdf_file = MacFile("ArchivePairFixture.mdf", mdf_bytes, b"", b"????", b"????",
+                       0, "ArchivePairFixture.mdf")
+    ArchiveFolder([mds, mdf_file], "Pair.7z", b"")
+    for member in (mds, mdf_file):
+        vol = image_volume(member)
+        assert vol.name == "Apple Disk"
+        assert sorted(n for n, _ in vol.items()) == ["readme.txt"]
+
+
+def test_a_pair_member_without_its_other_half_says_so():
+    from macrt.macfile import ArchiveFolder, MacFile, image_volume
+    _, mdf_bytes = _cd(_volume_raw())
+    mdf_file = MacFile("LonelyPairFixture.mdf", mdf_bytes, b"", b"????", b"????",
+                       0, "LonelyPairFixture.mdf")
+    ArchiveFolder([mdf_file], "Pair.7z", b"")
+    with pytest.raises(ValueError, match="it has no .mds beside it"):
+        image_volume(mdf_file)

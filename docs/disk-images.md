@@ -32,7 +32,9 @@ be told from any other blob and will not open.
 An MDF/MDS pair is detected from either file of the pair: an `.mds`
 carries the `MEDIA DESCRIPTOR` signature, while a bare `.mdf` has no
 marker of its own, so it is found through a sibling `.mds` with the same
-stem on the host. The filename the `.mds` footer names is ignored.
+stem on the host. The filename the `.mds` footer names is ignored. The
+same holds for a pair nested in an archive: opening either member finds
+the other member with the same stem in the same archive.
 
 ## Unsupported
 

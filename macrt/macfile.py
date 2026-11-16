@@ -1416,6 +1416,8 @@ class ArchiveFolder:
         self.entries = entries
         self.name = name                      # the archive's own name, for the title
         self.raw = raw
+        for entry in entries:                 # as a folder holds its files
+            entry.folder = self
 
     def files(self) -> list[MacFile]:
         return self.entries
@@ -1598,6 +1600,22 @@ def launch_target(f: MacFile) -> MacFile:
     return made
 
 
+def _mdf_pair(f: MacFile) -> tuple[MacFile, MacFile] | None:
+    """The (.mds, .mdf) pair f is one half of, when both sit in the same
+    folder — an archive's members — else None."""
+    low = f.name.lower()
+    if not low.endswith((".mds", ".mdf")):
+        return None
+    other = ".mdf" if low.endswith(".mds") else ".mds"
+    folder = f.folder
+    sibling = folder.find(f.name[:-4] + other) if folder is not None else None
+    mds = f if low.endswith(".mds") else sibling
+    mdf = sibling if low.endswith(".mds") else f
+    if mds is None or mdf is None:
+        return None
+    return mds, mdf
+
+
 def image_volume(f: MacFile) -> machfs.Volume:
     """The volume on an image file, from its own forks when there is no
     host path to use (an image nested in a MacBinary has nowhere to
@@ -1607,6 +1625,14 @@ def image_volume(f: MacFile) -> machfs.Volume:
     p = Path(f.key)
     if p.is_file():
         return open_container(p)
+    low = f.name.lower()
+    if low.endswith((".mds", ".mdf")):
+        pair = _mdf_pair(f)
+        if pair is None:
+            other = ".mdf" if low.endswith(".mds") else ".mds"
+            raise ValueError(f"{f.name}: it has no {other} beside it")
+        mds_file, mdf_file = pair
+        return load_volume(mdf.read_image(mdf_file.data, mds_file.data))
     return load_volume(f.data)
 
 
