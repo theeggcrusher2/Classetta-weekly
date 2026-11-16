@@ -14,6 +14,7 @@ will and will not open.
 | CHD (`.chd`) | `macrt.chd` | Versions 3, 4 and 5; compression none, zlib and LZMA. |
 | qcow2 | `macrt.qcow2` | Versions 2 and 3; raw, deflate-compressed and zero/unallocated clusters. |
 | VHD (`.vhd`, `.vpc`) | `macrt.vhd` | Fixed (type 2) and dynamic (type 3) disks. |
+| VMDK (`.vmdk`) | `macrt.vmdk` | Version 4 sparse extents (raw and zlib-compressed grains, with or without grain markers, grain directory in the footer) and version 3 COWD extents. |
 
 All of these are read in full into memory before the volume readers see
 them; files inside a volume are still read on demand.
@@ -25,8 +26,6 @@ and a file in one of them will not browse as a volume.
 
 **QEMU / virtual machine formats**
 
-- **VMDK** (VMware): sparse (sparse extent) and monolithic disks. Not
-  implemented; planned as a later batch.
 - **qcow** (version 1): the predecessor of qcow2. Not implemented; planned
   as a later batch if capacity allows.
 - **QCOW3 / VHD differencing (type 4)**: refuse by name. A differencing
@@ -52,6 +51,9 @@ and a file in one of them will not browse as a volume.
 - VHD images saved with `saved_state == 1` (a suspended VM's image).
 - VHD images whose footer or dynamic-header checksum does not match.
 - CHD images with codecs or metadata this build does not carry.
+- VMDK images that are a text descriptor naming other files, or that name a
+  parent image.
+- VMDK images of versions past 3, or compressed with anything but deflate.
 
 Corrupt or unsupported images raise an error the Filer reports as an alert;
 they never crash the application.

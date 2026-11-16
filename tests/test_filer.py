@@ -2436,6 +2436,23 @@ def test_a_qcow2_disk_image_in_the_filer_opens_as_a_volume(tmp_path, harness):
     assert not h.d._alerts
 
 
+def test_a_vmdk_disk_image_in_the_filer_opens_as_a_volume(tmp_path, harness):
+    from test_vmdk import _grains, _v4, _volume_raw
+    raw = _volume_raw()
+    (tmp_path / "Outer.vmdk").write_bytes(_v4(_grains(raw), 2048))
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    _dblclick(win, "Outer.vmdk", h.settle)
+    h.settle()
+    opened = [w for w in h.d.filer_windows if w is not win]
+    assert len(opened) == 1
+    assert isinstance(opened[0].volume, machfs.Volume)
+    assert opened[0].volume.name == "VMDK Disk"
+    assert sorted(n for n, _ in opened[0].volume.items()) == ["readme.txt"]
+    assert not h.d._alerts
+
+
 def test_a_vhd_disk_image_in_the_filer_opens_as_a_volume(tmp_path, harness):
     from test_vhd import _fixed_vhd, _volume_raw
     raw = _volume_raw()

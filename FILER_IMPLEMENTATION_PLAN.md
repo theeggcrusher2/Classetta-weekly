@@ -226,7 +226,7 @@ Preserve existing behavior unless a task explicitly changes it. If the codebase 
   - Do not treat "all QEMU and MAME formats" as one task.
   - Document formats that are not supported.
   - [x] Batch 1: VHD (fixed and dynamic) — reader, Filer test, tests, docs/disk-images.md
-  - [ ] Batch 2: VMDK
+  - [x] Batch 2: VMDK (version 4 sparse and version 3 COWD) — macrt.vmdk reader, Filer test, tests/test_vmdk.py, docs/disk-images.md
   - [ ] Batch 3: qcow version 1 (if capacity allows)
 
 - [ ] **26b. Add NDIF and UDIF disk-image reading**
