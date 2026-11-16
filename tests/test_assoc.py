@@ -23,6 +23,18 @@ def _bndl(maps: list[tuple[bytes, list[tuple[int, int]]]]) -> bytes:
     return bytes(out)
 
 
+def _bndl_minus_one(maps: list[tuple[bytes, list[tuple[int, int]]]]) -> bytes:
+    """A bundle as Apple's compilers write it: every count field holds
+    the entries minus one, the way Rez compiles the Rez-source view
+    Inside Macintosh describes."""
+    out = bytearray(b"WILD" + b"\x00" * 2 + struct.pack(">H", len(maps) - 1))
+    for rtype, pairs in maps:
+        out += rtype + struct.pack(">H", len(pairs) - 1)
+        for local_id, resid in pairs:
+            out += struct.pack(">HH", local_id, resid)
+    return bytes(out)
+
+
 def _pstring(s: str) -> bytes:
     encoded = s.encode("mac_roman")
     return bytes([len(encoded)]) + encoded
@@ -71,6 +83,18 @@ def test_parse_bundle_reads_both_arrays():
     maps = assoc.parse_bundle(data)
     assert maps[b"ICN#"] == {0: 128, 1: 129}
     assert maps[b"FREF"] == {2: 150}
+
+
+def test_parse_bundle_reads_apples_compiled_counts():
+    # HyperCard's real bundle, byte for byte off the ADC CD: every count
+    # field stores the entries minus one (the Inside Macintosh prose
+    # describes the Rez source, not the compiled bytes).
+    data = bytes.fromhex(
+        "57 49 4C 44 00 00 00 01 49 43 4E 23 00 01 00 00 00 80 00 01 00 81"
+        " 46 52 45 46 00 01 00 00 00 80 00 01 00 81")
+    maps = assoc.parse_bundle(data)
+    assert maps[b"ICN#"] == {0: 128, 1: 129}
+    assert maps[b"FREF"] == {0: 128, 1: 129}
 
 
 def test_parse_bundle_too_short_is_empty():
@@ -158,6 +182,33 @@ def test_associated_icon_rows_without_the_type_is_none():
     doc = next(f for f in list_folder(v) if f.name == "Letter")
     doc.type = b"ZZZZ"               # a type the app does not declare
     assert assoc.associated_icon_rows(doc) is None
+
+
+def test_a_second_icon_type_resolves_through_the_compiled_bundle():
+    # A stack typed file gets its app's second icon, through a bundle
+    # laid out the way Apple's compilers write it (counts minus one).
+    image, mask = b"\xff" * 128, b"\xff" * 128
+    resources = [
+        Resource(b"ICN#", 128, image + mask),
+        Resource(b"ICN#", 129, image + mask),
+        Resource(b"FREF", 128, _fref(b"APPL", 0)),
+        Resource(b"FREF", 129, _fref(b"STAK", 1)),
+        Resource(b"BNDL", 128, _bndl_minus_one([
+            (b"ICN#", [(0, 128), (1, 129)]),
+            (b"FREF", [(0, 128), (1, 129)])])),
+    ]
+    v = machfs.Volume()
+    v.name = "Stacks"
+    app = machfs.File()
+    app.type, app.creator = b"APPL", b"WILD"
+    app.rsrc = bytearray(build_fork(resources))
+    v["HyperCard"] = app
+    doc = machfs.File()
+    doc.type, doc.creator, doc.data = b"STAK", b"WILD", b"stack"
+    v["Home"] = doc
+    stack = next(f for f in list_folder(v) if f.name == "Home")
+    assert assoc.associated_app(stack).name == "HyperCard"
+    assert assoc.associated_icon_rows(stack) == tuple(["#" * 16] * 16)
 
 
 def test_folders_and_programmes_are_not_associated():

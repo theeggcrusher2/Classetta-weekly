@@ -52,31 +52,48 @@ except LookupError:
         return data.decode("latin-1")
 
 
+def _split_bundle(data: bytes, minus_one: bool) -> dict[bytes, dict[int, int]] | None:
+    """One reading of a 'BNDL'.  Apple's compilers store each count as
+    the number of entries minus one, though the Inside Macintosh prose
+    describes the Rez source that writes them; the reading is returned
+    only when it consumes the resource exactly, else None."""
+    arrays = _u16(data, 6) + (1 if minus_one else 0)
+    off = 8
+    out: dict[bytes, dict[int, int]] = {}
+    for _ in range(arrays):
+        if off + 6 > len(data):
+            return None
+        rtype = data[off:off + 4]
+        if not rtype.isascii() or not all(32 <= c < 127 for c in rtype):
+            return None
+        pairs = _u16(data, off + 4) + (1 if minus_one else 0)
+        off += 6
+        if off + 4 * pairs > len(data):
+            return None
+        mapping: dict[int, int] = {}
+        for _ in range(pairs):
+            mapping[_i16(data, off)] = _i16(data, off + 2)
+            off += 4
+        out[rtype] = mapping
+    return out if off == len(data) else None
+
+
 def parse_bundle(data: bytes) -> dict[bytes, dict[int, int]]:
     """A 'BNDL' resource as {resource type: {local id: resource id}}.
 
     Signature (4), signature resource id (2), array count (2), then per
     array: the resource type (4), a pair count (2), and that many
-    (local id, resource id) pairs.
+    (local id, resource id) pairs.  The counts as Apple's compilers
+    write them are one less than the entries, so both readings are
+    tried and the one that consumes the resource exactly wins.
     """
     out: dict[bytes, dict[int, int]] = {}
     if len(data) < 8:
         return out
-    arrays = _u16(data, 6)
-    off = 8
-    for _ in range(arrays):
-        if off + 6 > len(data):
-            break
-        rtype = data[off:off + 4]
-        count = _u16(data, off + 4)
-        off += 6
-        if off + 4 * count > len(data):
-            break
-        mapping: dict[int, int] = {}
-        for _ in range(count):
-            mapping[_i16(data, off)] = _i16(data, off + 2)
-            off += 4
-        out[rtype] = mapping
+    for minus_one in (True, False):
+        maps = _split_bundle(data, minus_one)
+        if maps is not None:
+            return maps
     return out
 
 
