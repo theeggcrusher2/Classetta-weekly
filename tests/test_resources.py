@@ -165,7 +165,8 @@ def test_an_applications_own_wdef_and_mdef_come_first(qapp):
     wdp = rec.window_def_proc
     assert wdp & 0xFFFFFF == res.GetResource("WDEF", 128)
     assert res.HomeResFile(wdp & 0xFFFFFF) == res.CurResFile()
-    assert wdp >> 24 == k.noGrowDocProc and rec.proc_id == 128 * 16 + k.noGrowDocProc
+    assert wdp >> 24 == k.noGrowDocProc
+    assert rec.proc_id == 128 * 16 + k.noGrowDocProc
     assert system.sys_map.find(b"WDEF", 128) is None          # no stand-in needed
     menu_h = Toolbox(None, proc).GetMenu(129).handle
     mdef = system.mem.r32(system.heap_of(menu_h).deref(menu_h) + MENU_PROC)

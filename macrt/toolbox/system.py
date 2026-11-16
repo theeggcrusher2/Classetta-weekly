@@ -435,7 +435,8 @@ class System:
         # unit table and drivers' device control entries, which a Mac makes
         # there at startup: macrt.m68k.glue_devices has it.
         self.device_room = self.sys_heap.new_ptr(DEVICE_ROOM)
-        self.ports: dict[int, GrafPort] = {}            # canonical views, by address
+        self.ports: dict[int, GrafPort] = {}            # all Python view objects, by address
+        self.controls: dict[int, object] = {}           # all controls, by handle
         # Drawing that's landed outside a port's portRect, which macrt
         # doesn't clip to, when something's watching for it (a survey's
         # outside_port_rect): QuickDraw._outside_port_rect's.  None if not.
@@ -675,6 +676,8 @@ class System:
         with self.lock:
             for addr in [a for a in self.ports if part.start <= a < part.end]:
                 del self.ports[addr]
+            for h in [a for a in self.controls if part.start <= a < part.end]:
+                del self.controls[h]
             # A Gestalt function left in the application's heap would be
             # called after it's gone; on a Mac that crashes, here it's forgotten.
             for sel in [s for s, a in self.gestalt_procs.items() if part.start <= a < part.end]:
@@ -814,6 +817,23 @@ class System:
 
     def port_at(self, addr: int) -> GrafPort | None:
         return self.ports.get(addr & self.addr_mask)
+
+    # =====================================================================
+    # Controls: Python Control objects, stored against handles on the Mac
+    # to keep a persistent object for each handle so that future uses of
+    # it can still have the variant code set on 32 bit machines where
+    # it's not stored in the high byte of the address.
+    # =====================================================================
+    def register_control(self, c) -> None:
+        with self.lock:
+            self.controls[c.handle & self.addr_mask] = c
+
+    def unregister_control(self, c) -> None:
+        with self.lock:
+            self.controls.pop(c.handle & self.addr_mask, None)
+
+    def control_at(self, h: int):
+        return self.controls.get(h & self.addr_mask)
 
     def port_with_pixmap(self, pm: int) -> GrafPort | None:
         """The cGrafPort whose portPixMap is the PixMap at pm, if one's is."""

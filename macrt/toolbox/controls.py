@@ -79,9 +79,14 @@ class Control:
     action = _Field(32, LONG)
     ref_con = _Field(36, LONGINT)
 
-    def __init__(self, mem: RAM, handle: int):
+    # separate storage for variant on 32 bit systems
+    # otherwise packed above address bytes on 24 bit
+    _variant = 0
+
+    def __init__(self, mem: RAM, handle: int, variant: int = 0):
         self.mem = mem
         self.handle = handle
+        self._variant = variant
 
     def __eq__(self, other) -> bool:
         return isinstance(other, Control) and other.handle == self.handle
@@ -102,7 +107,12 @@ class Control:
 
     @property
     def variation(self) -> int:
-        return (self.def_proc >> 24) & 0xF
+        if self.mem.system.mmu_32_bit:
+            # 32 bit: return from internal storage
+            return self._variant
+        else:
+            # 24 bit: or retrieve from the address in the visible struct in RAM
+            return (self.def_proc >> 24) & 0xF
 
     @property
     def visible(self) -> bool:
