@@ -77,7 +77,7 @@ Subtasks:
       (`disktracker/filer_adapter.py`): the recorded suffix (if 1.1
       verifies it) → the disk's volume name matched against known mount
       points → ask the user. *Blocked by 1.1.*
-- [ ] **1.3** The unresolved prompt: when the resolved path does not
+- [x] **1.3** The unresolved prompt: when the resolved path does not
       exist or does not open, offer to insert the disk or pick the
       original image (a file picker). Cancelling does nothing; the index
       stays untouched. Independent of 1.1; can run alongside.
@@ -136,11 +136,11 @@ Open questions, to settle before 2.3 — stop and ask:
 
 Subtasks:
 
-- [ ] **2.1** `macrt/cue.py`: a parser for the cue sheet, tested against
+- [x] **2.1** `macrt/cue.py`: a parser for the cue sheet, tested against
       hand-written cue bytes (FILE/TRACK/INDEX lines, one FILE per track,
       and the single-FILE-many-TRACKs shape). Reports sheet structure;
       performs no disk I/O.
-- [ ] **2.2** The BIN reader, modelled on `macrt/mdf.py`: the data
+- [x] **2.2** The BIN reader, modelled on `macrt/mdf.py`: the data
       track's 2048-byte user sectors, Mode 1 and Mode 2 Form 1; refuse
       DVD structure, Mode 2 Form 2 / raw sectors, and multiple data
       tracks by name, the way `.mdf` refuses its cases today.
@@ -259,10 +259,10 @@ Decide this before 3.1 or 4.3 starts.
 
 Subtasks:
 
-- [ ] **4.1** Delete the dead `macrt/macfile.py::_read_hfs_plus`
+- [x] **4.1** Delete the dead `macrt/macfile.py::_read_hfs_plus`
       (line 989). `_read_hfs` (line 857) stays. Independent of everything
       else in this task; can run alongside tasks 1–3.
-- [ ] **4.2** Write one adapter in `disktracker/index.py`,
+- [x] **4.2** Write one adapter in `disktracker/index.py`,
       `_volume_tree(vol: machfs.Volume) -> (name, crdate, mddate, root)`:
       walk `vol`'s `Folder`s and `File`s; a folder's dict keeps `kind`,
       `name`, `crdate`, `mddate`, `children`; a file's dict adds `type`,
@@ -378,7 +378,7 @@ otherwise.
 
 Subtasks:
 
-- [ ] **5.1** *Report only.* The colour generic art source: what the
+- [x] **5.1** *Report only.* The colour generic art source: what the
       options cost (licensing, draw-time mapping, generated art), which
       icons it covers (generic disk, folder, archive, document, catalog),
       and a recommendation. No code. Blocks 5.2–5.4.
