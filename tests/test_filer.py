@@ -256,13 +256,33 @@ def _lock_left(win):
 
 def _dblclick(win, name, settle):
     """A real double-click: click, then click again on the same spot."""
-    c = win.tree.visualItemRect(_item(win, name)).center()
+    _dblclick_row(win, _item(win, name), settle)
+
+
+def _dblclick_row(win, item, settle):
+    """The same double-click on a row found any way — inside a folder
+    of members, where _item cannot reach."""
+    c = win.tree.visualItemRect(item).center()
     vp = win.tree.viewport()
     QTest.mousePress(vp, LB, NO_MODS, c)
     QTest.mouseRelease(vp, LB, NO_MODS, c)
     settle(30)
     QTest.mouseDClick(vp, LB, NO_MODS, c)
     settle(150)
+
+
+def _sub_item(win, folder: str, name: str):
+    """The row named name under the top-level folder row folder, the
+    folder expanded first so its children are laid out."""
+    parent = _item(win, folder)
+    parent.setExpanded(True)
+    return next(parent.child(i) for i in range(parent.childCount())
+                if parent.child(i).text(0) == name)
+
+
+def _child_rows(item):
+    return [(item.child(i).text(0), item.child(i).text(2))
+            for i in range(item.childCount())]
 
 
 def _front_the_filer(h, win):
@@ -3004,3 +3024,137 @@ def test_a_version_resource_in_an_archive_member_shows_when_get_info_reads_it(
     assert lines[1] == "Third pass, inside an archive"
     assert "Version: Third pass" in lines
     assert not member.forks_pending
+
+
+# -- archive contents as nested folders (task 31) -----------------------
+
+def _tree_zip(tmp_path) -> None:
+    """Tree.zip: a plain member, and members under folders two deep."""
+    import zipfile
+    with zipfile.ZipFile(tmp_path / "Tree.zip", "w") as z:
+        z.writestr("Top", b"top")
+        z.writestr("Docs/Letter", b"letter")
+        z.writestr("Docs/Deep/Note", b"note")
+
+
+def _archive_window(h, win, archive: str):
+    """The Filer window that opens when archive is double-clicked in
+    win, with win itself left open."""
+    _dblclick(win, archive, h.settle)
+    h.settle()
+    opened = [w for w in h.d.filer_windows if w is not win]
+    assert len(opened) == 1
+    return opened[0]
+
+
+def test_an_archive_with_paths_lists_folders_instead_of_flat_paths(tmp_path,
+                                                                   harness):
+    _tree_zip(tmp_path)
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    arch = _archive_window(h, win, "Tree.zip")
+    # folders first at the top, then the plain member: no unix paths
+    assert [(name, kind) for name, kind in _rows(arch)] == \
+        [("Docs", "folder"), ("Top", "document")]
+    assert all("/" not in name for name, _ in _rows(arch))
+    docs = _item(arch, "Docs")
+    docs.setExpanded(True)
+    assert [(name, kind) for name, kind in _child_rows(docs)] == \
+        [("Deep", "folder"), ("Letter", "document")]
+    deep = next(docs.child(i) for i in range(docs.childCount())
+                if docs.child(i).text(0) == "Deep")
+    deep.setExpanded(True)
+    assert [name for name, _ in _child_rows(deep)] == ["Note"]
+    # each row carries the member itself, under its whole raw name
+    letter = docs.child(next(i for i in range(docs.childCount())
+                             if docs.child(i).text(0) == "Letter"))
+    assert letter.data(0, Qt.ItemDataRole.UserRole).name == "Docs/Letter"
+    assert arch.entries["Docs/Letter"].name == "Docs/Letter"
+    assert not h.d._alerts
+
+
+def test_double_clicking_a_folder_of_members_shows_what_is_beneath(tmp_path,
+                                                                   harness):
+    _tree_zip(tmp_path)
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    arch = _archive_window(h, win, "Tree.zip")
+    docs = _item(arch, "Docs")
+    assert not docs.isExpanded()
+    _dblclick_row(arch, docs, h.settle)
+    assert docs.isExpanded()
+    # one toggle, not two: the second activation of the click is deduped
+    assert [name for name, _ in _child_rows(docs)] == ["Deep", "Letter"]
+    assert not h.d._alerts
+
+
+def test_a_container_inside_a_folder_of_members_drills(tmp_path, harness):
+    import zipfile
+    packed = _packit([("Inside", b"payload", b"", b"TEXT", b"TEST")])
+    with zipfile.ZipFile(tmp_path / "Tree.zip", "w") as z:
+        z.writestr("Sub/Packed.pit", packed)
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    arch = _archive_window(h, win, "Tree.zip")
+    folder = _item(arch, "Sub")
+    _dblclick_row(arch, folder, h.settle)          # expands
+    assert folder.isExpanded()
+    _dblclick_row(arch, folder.child(0), h.settle)  # ... then drills
+    h.settle()
+    inner = [w for w in h.d.filer_windows if w is not win and w is not arch]
+    assert len(inner) == 1
+    assert _rows(inner[0]) == [("Inside", "document")]
+    assert not h.d._alerts
+    assert win.isVisible() and arch.isVisible() and inner[0].isVisible()
+
+
+def test_get_info_reads_a_member_inside_a_folder(tmp_path, harness):
+    import zipfile
+    with zipfile.ZipFile(tmp_path / "Tree.zip", "w") as z:
+        z.writestr("Docs/Letter", b"letter")
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    arch = _archive_window(h, win, "Tree.zip")
+    arch.tree.setCurrentItem(_sub_item(arch, "Docs", "Letter"))
+    h.settle()
+    arch.get_info()
+    h.settle()
+    assert h.d.info_windows[-1]._lines[0] == "Name: Letter"
+    h.d.info_windows[-1].close()
+    h.settle()
+
+
+def test_a_member_that_would_escape_shows_inside_and_extracts_inside(
+        tmp_path, harness, monkeypatch):
+    import zipfile
+    with zipfile.ZipFile(tmp_path / "Escape.zip", "w") as z:
+        z.writestr("../evil.txt", b"evil")
+        z.writestr("/abs.txt", b"absolute")
+        z.writestr("good/a.txt", b"kept")
+    args = parse_args([str(tmp_path / "Escape.zip"), "--filer"])
+    _, _, filers, error = open_targets(args)
+    assert error is None
+    h = harness(disks=[])
+    arch = h.d.open_filer(filers[0])
+    h.settle()
+    # the sanitiser's names draw; ".." never appears as a folder
+    assert [name for name, _ in _rows(arch)] == ["good", "abs.txt", "evil.txt"]
+    assert all("/" not in name for name, _ in _rows(arch))
+    # the members keep their raw names under it
+    assert arch.entries["../evil.txt"].name == "../evil.txt"
+    assert arch.entries["/abs.txt"].name == "/abs.txt"
+    dest = tmp_path / "out"
+    dest.mkdir()
+    _dir_dialog(monkeypatch, dest)
+    h.d.filer_menu_choice(FILE_MENU_ID, 10)         # File > Extract…
+    h.settle()
+    assert (dest / "evil.txt").read_bytes() == b"evil"
+    assert (dest / "abs.txt").read_bytes() == b"absolute"
+    assert (dest / "good" / "a.txt").read_bytes() == b"kept"
+    # nothing was written outside the destination: the escape stayed refused
+    assert sorted(p.name for p in tmp_path.iterdir()) == \
+        ["Escape.zip", "out"]

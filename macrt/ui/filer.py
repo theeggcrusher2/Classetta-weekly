@@ -406,6 +406,70 @@ class _ListHeader(QHeaderView):
         painter.restore()
 
 
+def _segments(name: str) -> list[str] | None:
+    """The folders in an archive member's name, read the way
+    macextract's sanitiser reads them — backslashes and colons as
+    separators, empty, '.' and '..' segments dropped, trailing dots
+    stripped — so a name that would escape the archive draws inside
+    the window as extraction writes it inside the destination.  An
+    empty list means nothing usable is left: refused, as extraction
+    refuses it.  None when name holds no '/': a plain member is listed
+    exactly as it always was."""
+    if "/" not in name:
+        return None
+    parts = []
+    for segment in name.replace("\\", "/").replace(":", "/").split("/"):
+        segment = segment.strip().rstrip(".")
+        if segment in ("", ".", ".."):
+            continue
+        parts.append(segment.replace("\0", ""))
+    return parts
+
+
+# What a row of a folder of members carries instead of a file: a place
+# in the tree, not something the Filer can open.
+_FOLDER_ROW = object()
+
+
+def _nested(files: list[MacFile]) -> dict:
+    """The files grouped into the folders their names hold, for the
+    listing to draw as a tree: folders first under each key, a file
+    sharing a name with a folder met inside it, so neither row is
+    lost, and a duplicate member drawn last as the entries map keeps
+    it."""
+    root: dict = {}
+    for f in files:
+        parts = _segments(f.name)
+        if parts is None:
+            parts = [f.name]
+        if not parts:
+            continue                      # no usable name: refused, as extraction refuses it
+        node = root
+        for part in parts[:-1]:
+            child = node.get(part)
+            if not isinstance(child, dict):
+                child = {}
+                _merge(node, part, child)
+            node = child
+        _merge(node, parts[-1], f)
+    return root
+
+
+def _merge(node: dict, key: str, value) -> None:
+    """File value at node's key.  A folder meeting a file of the same
+    name keeps the file inside it; two members of one name draw the
+    last, as the entries map keeps the last."""
+    existing = node.get(key)
+    if existing is None or (isinstance(existing, MacFile)
+                            and isinstance(value, MacFile)):
+        node[key] = value
+    elif isinstance(value, dict):
+        value.setdefault(key, existing)
+        node[key] = value
+    else:
+        existing.setdefault(key, value)
+
+
 class FilerWindow(_Hosted):
     """One folder's window: its contents listed, ready to open.  Its
     title bar wears an icon of the container it lists — the disk image
@@ -485,17 +549,48 @@ class FilerWindow(_Hosted):
             files = []
         self.entries = {f.name: f for f in files}
         self.tree.clear()
-        for f in files:
-            folder = f.type == FOLDER
-            try:
-                data, rsrc = f.sizes()
-                size = "--" if folder else f"{data + rsrc:,}"
-            except Exception:
-                size = "--"
-            item = QTreeWidgetItem([f.name, size, _kind(f)])
-            item.setIcon(0, item_icon_qicon(f, depth=_depth(self.display))
-                         or icon(_icon_for(f)))
-            self.tree.addTopLevelItem(item)
+        # Only an archive's members have paths in their names: an HFS
+        # file may legally hold a '/', and it is one file there, not a
+        # folder.
+        if isinstance(self.volume, ArchiveFolder):
+            root = _nested(files)
+        else:
+            root = {f.name: f for f in files}
+        self._add_rows(root, None)
+
+    def _row(self, f: MacFile, name: str) -> QTreeWidgetItem:
+        """A list row for f, shown under name: the last segment of its
+        path once a folder of members holds it, f.name at the top."""
+        folder = f.type == FOLDER
+        try:
+            data, rsrc = f.sizes()
+            size = "--" if folder else f"{data + rsrc:,}"
+        except Exception:
+            size = "--"
+        item = QTreeWidgetItem([name, size, _kind(f)])
+        item.setIcon(0, item_icon_qicon(f, depth=_depth(self.display))
+                     or icon(_icon_for(f)))
+        item.setData(0, Qt.ItemDataRole.UserRole, f)
+        return item
+
+    def _add_rows(self, node: dict, parent: QTreeWidgetItem | None) -> None:
+        """One level of the listing: folders of members first, then
+        files, each folder holding the rows beneath it so a path in a
+        member's name draws as a tree rather than a flat unix path."""
+        for key in sorted(node, key=lambda k: (not isinstance(node[k], dict), k.lower())):
+            folder = isinstance(node[key], dict)
+            if folder:
+                item = QTreeWidgetItem([key, "--", "folder"])
+                item.setIcon(0, icon("folder"))
+                item.setData(0, Qt.ItemDataRole.UserRole, _FOLDER_ROW)
+            else:
+                item = self._row(node[key], key)
+            if parent is None:
+                self.tree.addTopLevelItem(item)
+            else:
+                parent.addChild(item)
+            if folder:
+                self._add_rows(node[key], item)
 
     # -- frame ------------------------------------------------------------
     def frame(self) -> chrome.Frame:
@@ -629,7 +724,13 @@ class FilerWindow(_Hosted):
         items = self.tree.selectedItems()
         if not items:
             return None
-        return self.entries.get(items[0].text(0))
+        row = items[0]
+        picked = row.data(0, Qt.ItemDataRole.UserRole)
+        if isinstance(picked, MacFile):
+            return picked
+        if picked is _FOLDER_ROW:         # a folder of members lists no file
+            return None
+        return self.entries.get(row.text(0))
 
     def selected_actions(self) -> set[str]:
         """The things the menus can do with the selection: an empty set
@@ -707,12 +808,13 @@ class FilerWindow(_Hosted):
         item = self.selected_item()
         if item is None:
             return
+        shown = self.tree.selectedItems()[0].text(0)
         # A member whose forks are still in its archive decodes here,
         # behind a busy window, so its version resource can be shown.
         item = self._materialised(item)
         if item is None:
             return
-        win = GetInfoWindow(self.display, item)
+        win = GetInfoWindow(self.display, item, name=shown)
         self.display.info_windows.append(win)
         self.display.front_aux_window = win
         # Center the info window over the Filer window.
@@ -829,6 +931,14 @@ class FilerWindow(_Hosted):
         if name == self._last_name and now - self._opened_at < 0.4:
             return                      # a double-click arrives as two activations
         self._last_name, self._opened_at = name, now
+        picked = item.data(0, Qt.ItemDataRole.UserRole)
+        if isinstance(picked, MacFile):
+            self._open_item(picked)
+            return
+        if picked is _FOLDER_ROW:
+            # a folder of members shows what is beneath it; Qt's own
+            # expands-on-double-click does it, so nothing to do here
+            return
         f = self.entries.get(name)
         if f is None:
             return
@@ -1252,9 +1362,13 @@ class AboutWindow(_Hosted):
 class GetInfoWindow(AboutWindow):
     """A Get Info window for a Filer item, modeled on System 6 Get Info boxes."""
 
-    def __init__(self, display: Display, item: MacFile, parent: QWidget | None = None):
+    def __init__(self, display: Display, item: MacFile, parent: QWidget | None = None,
+                 name: str | None = None):
+        # name is the row's own text: a folder of members shows its
+        # member by the last segment of its path, as the list does.
+        shown = name or item.name
         id1, id2 = version_messages(item) if item.type != FOLDER else (None, None)
-        lines = [f"Name: {item.name}"]
+        lines = [f"Name: {shown}"]
         if id2:
             # The Finder puts version resource 2's message beneath the
             # file's name (Inside Macintosh, Finder Interface).
@@ -1297,7 +1411,7 @@ class GetInfoWindow(AboutWindow):
         if depth > 2:
             q = item_icon_qicon(item, depth=depth)
             title_pixmap = q.pixmap(16, 16) if q is not None else None
-        super().__init__(display, f"{item.name} Info", lines,
+        super().__init__(display, f"{shown} Info", lines,
                          title_icon=item_icon(item) or _generic_icon(item),
                          # room for the two version lines when there are any
                          content_size=(320, 236 + 18 * ((1 if id1 else 0)

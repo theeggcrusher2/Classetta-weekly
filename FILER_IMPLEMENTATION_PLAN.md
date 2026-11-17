@@ -275,7 +275,7 @@ Preserve existing behavior unless a task explicitly changes it. If the codebase 
   - Works for files reached any way: on a volume, inside a disk image, inside an archive.
   - Test with generated fixtures only.
 
-- [ ] **31. Show archive contents as nested folders, not flat files with unix filepaths**
+- [x] **31. Show archive contents as nested folders, not flat files with unix filepaths**
   - Archive member names that contain "/" appear as folders containing the members beneath them, so the Filer window shows a tree, not one flat list of full unix paths.
   - Drill-down, selection, extraction and the sanitiser keep working through the nesting; names that escape the archive ("..", leading "/") stay refused.
   - Single-file and single-folder archives look the same as they do today.
