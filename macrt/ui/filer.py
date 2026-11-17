@@ -461,6 +461,8 @@ class FilerWindow(_Hosted):
             self._title_icon = FOLDER_ICON
             self.setWindowTitle(path[-1] if path else str(volume.path.name) or "Host Folder")
         elif isinstance(volume, ArchiveFolder):
+            # the archive's own icon stays, even one folder of its members
+            # deep: what's in view is still that archive, and the icon says so
             self._title_icon = ARCHIVE_ICON
             self.setWindowTitle(self.path[-1] if self.path else volume.name)
         elif isinstance(volume, ContainerFolder):

@@ -3193,6 +3193,7 @@ def test_double_clicking_a_folder_of_members_opens_its_own_window(tmp_path,
     docs_win = _archive_window(h, arch, "Docs")
     assert docs_win is not arch
     assert docs_win.windowTitle() == "Docs"
+    assert docs_win._title_icon is ARCHIVE_ICON   # still the archive's icon
     _dblclick_row(arch, docs, h.settle)              # already open: brings it forward
     assert [w for w in h.d.filer_windows
             if w.volume is arch.volume and w.path == ("Docs",)] == [docs_win]
