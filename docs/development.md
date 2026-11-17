@@ -194,3 +194,17 @@ after the change and compare the two (see [Surveying many
 applications](survey.md)). A title's entry in [Titles tried so
 far](titles.md) says how far it got the last time it was run, and what
 to give it on the command line.
+
+
+## Follow-up tasks
+
+Work that is found but not done yet is tracked in
+[`FOLLOWUP_TASKS.md`](../FOLLOWUP_TASKS.md), not in commit messages or
+issues. Each task there is broken into subtasks that are small enough to
+hand to a background agent with no more context than the subtask and the
+repository: a file reference, an acceptance check and explicit
+dependencies, nothing implied. Independent subtasks run concurrently;
+only a subtask blocked on another waits. Subtasks are ticked off as they
+land, open questions stop the work rather than being decided silently,
+and the file is removed when it runs dry — the same lifecycle the Filer
+implementation plan had.
