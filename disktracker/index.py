@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
+import machfs
+
 from .disktracker import HEADER_SIZE, Item, _decode_mac_roman
 from .writer import write_dtc
 
@@ -329,6 +331,51 @@ def _read_hfsplus(data: bytes, at: int):
     if root is None:
         raise ValueError("the HFS Plus volume's catalog has no root folder")
     return volume_name or 'untitled', crdate, mddate, root
+
+
+# ---------------------------------------------------------------------------
+# A machfs Volume as a tree of dicts (the shape the emitter reads)
+# ---------------------------------------------------------------------------
+def _volume_tree(vol: machfs.Volume):
+    """vol's name, its dates, and its root folder as a tree of dicts, the
+    same shape the dict readers above produce and _emit consumes: a
+    folder's dict keeps kind, name, crdate, mddate, children; a file's
+    dict adds type, creator, size and keeps an (empty) children list.
+
+    size is the sum of the file's forks as f.sizes() reports it — both
+    canonical readers build files as macrt.macfile.OnDisk, whose sizes()
+    reports the data and resource lengths without reading the forks.
+
+    Nothing is skipped here: the canonical readers (macrt.macfile._read_hfs,
+    macrt.hfsplus.read_hfsplus) already pop the Desktop files and drop
+    invisible entries (and, for HFS+, the HFS+ Private Data directory), so
+    whatever they let through is what the catalog gets.  HFS offers no
+    INVISIBLE fdFlags; whatever macrt's _read_hfs pops is what the
+    tracker gets.
+
+    Note: HFS+ dates arrive LOCAL, not raw GMT as the tracker's own
+    reader produced — macrt.hfsplus.read_hfsplus applies _gmt_to_local
+    (and to vol.mddate; vol.crdate it leaves raw), so callers see local
+    dates now.  This is the deliberate 4.5 move, not an accident."""
+    def node_dict(name, node):
+        if isinstance(node, machfs.Folder):
+            return {'kind': 'folder', 'name': name,
+                    'crdate': getattr(node, 'crdate', 0),
+                    'mddate': getattr(node, 'mddate', 0),
+                    'children': [node_dict(n, c) for n, c in node.items()]}
+        return {'kind': 'file', 'name': name,
+                'type': bytes(getattr(node, 'type', b'????')),
+                'creator': bytes(getattr(node, 'creator', b'????')),
+                'size': sum(node.sizes()),
+                'crdate': getattr(node, 'crdate', 0),
+                'mddate': getattr(node, 'mddate', 0),
+                'children': []}
+
+    root = {'kind': 'folder', 'name': vol.name,
+            'crdate': getattr(vol, 'crdate', 0),
+            'mddate': getattr(vol, 'mddate', 0),
+            'children': [node_dict(n, c) for n, c in vol.items()]}
+    return vol.name, getattr(vol, 'crdate', 0), getattr(vol, 'mddate', 0), root
 
 
 # ---------------------------------------------------------------------------
