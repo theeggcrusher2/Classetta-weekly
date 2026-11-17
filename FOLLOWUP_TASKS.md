@@ -65,7 +65,7 @@ repository.
 
 Subtasks:
 
-- [ ] **1.1** *Report only.* Verify what DT2/DT1 catalogs record about a
+- [x] **1.1** *Report only.* Verify what DT2/DT1 catalogs record about a
       disk's origin, privately. The parser keeps a disk record's
       `suffix` (see `_find_first_item` in `disktracker/disktracker.py`: "mount
       path, source location, network info") but macrt's own `index_images`
@@ -408,6 +408,31 @@ Subtasks:
       pixmap is handed to chrome, or the rows draw one); depth 1
       unchanged; About opens on every model in `MODELS`.
       *Blocked by 5.2, 5.3, 5.4, 5.5.*
+
+## 6. lazy.py parses the disk-record suffix with a hardcoded 308 bytes
+
+Background, found by task 1.1's survey of real catalogs: the disk-record
+suffix is not a fixed size. Image-sourced DT2 disk records carry
+724–1755-byte suffixes (the tagged alias blob includes a second
+"source image" segment), while physical-media disks carry ~308-byte
+ones. `disktracker/lazy.py` hardcodes `suffix=data[after:after + 308]`
+and advances its offset walk by 308 in two places (the lazy offset walk
+near its `_build` code, and `load_item` for index 0), so for
+image-sourced catalogs the walk silently mis-lands and items parse
+garbage. The Filer's path is unaffected — `filer_adapter.py` uses
+`parse_dtc` in `disktracker/disktracker.py`, which finds the first
+item with `_find_first_item` and handles variable suffixes.
+
+Subtasks:
+
+- [ ] **6.1** Make `lazy.py`'s disk-record walk use the same
+      `_find_first_item` logic as `parse_dtc` (import it or factor a
+      shared helper), so the suffix length varies per record.
+- [ ] **6.2** Test: hand-written catalog bytes with a disk record whose
+      suffix is larger than 308 bytes (an image-sourced record), built
+      inline in the test; assert the suffix round-trips intact and the
+      items after it parse. Also assert the physical-media size (308)
+      still parses.
 
 ---
 
