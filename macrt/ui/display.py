@@ -1085,6 +1085,12 @@ class Display(QObject):
         elif menu_id == FILE_MENU_ID and item == 11:
             self.toggle_record_sound()
         elif menu_id == FILE_MENU_ID and item == 13:
+            aux = self.front_aux_window
+            if aux is not None:
+                # the window the Close is for is the one on top: an
+                # auxiliary window, not the Filer behind it
+                aux.close()
+                return
             front = self.front_filer
             if front is not None:
                 front.close()

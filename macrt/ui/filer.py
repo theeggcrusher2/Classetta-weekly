@@ -1926,7 +1926,7 @@ class FilerMenus:
         displayable = front is not None and "display_contents" in front.selected_actions()
         savable = front is not None and front.savable()
         extractable = front is not None and front.extractable()
-        closeable = front is not None
+        closeable = front is not None or self.display.front_aux_window is not None
         file_menu = self.menus[FILE_MENU_ID]
         if file_menu.items:
             file_menu.items[0].enabled = openable

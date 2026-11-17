@@ -675,6 +675,28 @@ def test_opening_display_contents_makes_it_the_auxiliary_front_window(harness):
     assert h.d.front_aux_window is h.d.viewer_windows[0]
 
 
+def test_file_close_closes_the_front_auxiliary_window(harness):
+    """File > Close with a Display Contents window on top closes the
+    viewer, not the Filer behind it — what Control-W does."""
+    h = harness(disks=[_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    win.tree.setCurrentItem(_item(win, "Letter"))
+    h.settle()
+    win.display_contents()
+    h.settle()
+    viewer = h.d.viewer_windows[0]
+    assert viewer.isVisible()
+    menus = h.d.filer_menus.bar_menus()
+    file_menu = next(m for m in menus if m.id == FILE_MENU_ID)
+    assert file_menu.items[12].enabled          # Close/W
+    h.d.filer_menu_choice(FILE_MENU_ID, 13)
+    h.settle()
+    assert viewer not in h.d.viewer_windows
+    assert h.d.front_aux_window is None
+    assert win in h.d.filer_windows             # the Filer stays up
+
+
 def test_opening_about_makes_it_the_auxiliary_front_window(harness):
     h = harness(disks=[_volume()])
     win = h.d.open_filer(h.d.config.disks[0])
