@@ -54,10 +54,14 @@ and a file in one of them will not browse as a volume.
 
 **CD images**
 
-- **BIN/CUE**: not implemented. A disc with one Mode 1/Mode 2 Form 1 data
-  track (plus any number of audio tracks, which hold nothing to browse)
-  opens through the `.mdf`/`.mds` pair instead, and a single-track data
-  disc through a raw `.toast`.
+- **BIN/CUE**: the `.cue` sheet is never read; the `.bin` half opens
+  through the raw-CD path when it keeps 2352-byte sectors whole (one
+  data track starting at 00:02:00, as a data-first mixed-mode disc is —
+  its audio tracks are never played), or as a plain 2048-byte data
+  image (HFS/ISO). Nothing about the sheet is parsed or validated: a
+  one-file-per-track layout, interleaved subchannel at 2448 bytes a
+  sector (`.mdf` supports it), Mode 2 Form 2, multiple data tracks and
+  DVDs are all unsupported — and none are refused by name.
 - **Rock Ridge extensions and UDF**: not parsed. ISO 9660 itself is read:
   a disc with no Mac volume opens with the files its directories hold
   (via the `disktracker.index` ISO reader, the same one the Disk Tracker

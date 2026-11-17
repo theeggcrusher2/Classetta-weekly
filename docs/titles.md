@@ -597,8 +597,8 @@ its last two menus have icons for titles. Without a desktop database,
 
 `BBeast.bin`, whose `BBeast.cue` lists a data track and an audio track,
 holds only an ISO 9660 volume, of Windows programs (`VIEWER.EXE`,
-`SETUP.EXE`) and the book's pictures and sounds. macrt says "it's an ISO
-9660 disc, with no HFS, HFS Plus or MFS volume on it for macrt to read".
+`SETUP.EXE`) and the book's pictures and sounds. The disc holds only an
+ISO 9660 volume; macrt opens it and finds no applications to run on it.
 
 ### The Bee, Ziggy Gets Out, Phonics Workout, Symbols, Word Parts
 
@@ -2441,8 +2441,8 @@ offer Quit.
 ### Gus Goes to Cyberopolis
 
 `Gus Goes to Cyberopolis (1994)(Modern Media Ventures).iso` is an ISO
-9660 disc with no HFS volume, and macrt, which reads HFS, HFS Plus and
-MFS volumes, says so.
+9660 disc with no Mac volume; macrt opens its files and finds nothing
+to run on it.
 
 ### Gus Goes to Cybertown
 
@@ -2675,8 +2675,7 @@ answers.
 `The Incredible Machine 3.0.iso`, whose files are Windows programs
 (`SETUP.EXE` and the `TIMWIN` folder's), and `Sherlock Holmes on Disc
 (1991)(Creative Multimedia)[Mac-PC].iso` hold only an ISO 9660 volume.
-macrt says "it's an ISO 9660 disc, with no HFS, HFS Plus or MFS volume
-on it for macrt to read".
+macrt opens them and finds no applications to run on them.
 
 ### Indiana Jones and the Last Crusade
 
@@ -3243,9 +3242,8 @@ Plays, with `--host screen`: Cmd-P starts it.
 
 ### MacMegaGames, Troggle Trouble Math, Treasure Cove!
 
-`MEGA_GAMES.iso` holds only an ISO 9660 volume, and macrt says "it's an
-ISO 9660 disc, with no HFS, HFS Plus or MFS volume on it for macrt to
-read". `Troggle Trouble Math (1994)(MECC)[Mac-PC].iso` and `Treasure
+`MEGA_GAMES.iso` holds only an ISO 9660 volume; macrt opens it and
+finds no applications to run on it. `Troggle Trouble Math (1994)(MECC)[Mac-PC].iso` and `Treasure
 Cove! v2.0 (1997)(TLC)[PC-Mac].iso` hold their programs in installers,
 which weren't run; on Treasure Cove!, run on a Mac II at 8 bits on a
 640x480 screen as `--model ii --depth 8 --size 640x480 --app "Register
@@ -5489,8 +5487,7 @@ a palace of arches and stairs with a sign, Gods Palace No Vacancy.
 
 `The Ultimate Optical Illusion ScreenSaver (1999) [Lagoon Games].iso`
 and `Shakespeare (1991)(Creative Multimedia).iso` hold only an ISO 9660
-volume, and macrt says "it's an ISO 9660 disc, with no HFS, HFS Plus or
-MFS volume on it for macrt to read".
+volume; macrt opens them and finds no applications to run on them.
 
 ### Ultimate Spin Doctor
 

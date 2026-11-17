@@ -45,11 +45,16 @@ Open questions, to be investigated before designing further:
 
 BIN/CUE is how a great deal of the CD-ROM software in circulation was
 imaged — one sheet, a data track, and (for CDs that had them) audio
-tracks. Neither half is implemented; `docs/disk-images.md` lists the pair
-as unsupported, and a disc whose single data track is HFS opens today
-only by converting the image to raw (`.toast`) or through `.mdf` with an
-`.mds` sheet rewritten by hand. Audio tracks are never played or read,
-the same as for every other format here.
+tracks. Today the sheet is never read: a `.bin` keeping 2352-byte
+sectors whole opens through the raw-CD path whatever its name
+(`docs/titles.md` documents several, data track first at 00:02:00), and
+a plain 2048-byte data image opens as HFS or ISO 9660 through the
+existing fallback. The sheet buys nothing — no track split, no audio
+awareness, no validation of what a track's mode is, and a
+one-file-per-track layout (separate files per audio track) is
+unsupported too. Interleaved subchannel at 2448 bytes a sector is read
+for `.mdf`/`.mds` pairs but not for `.bin`. Audio tracks are never
+played, the same as for every other format here.
 
 What it looks like when done:
 

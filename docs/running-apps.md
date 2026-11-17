@@ -239,7 +239,8 @@ $ python -m macrt "vect_250 folder/Vector 2.5"
 ### Disk images
 
 Many collections come as disk images: floppies, CD-ROMs and hard disks.
-macrt reads HFS, HFS Plus and MFS volumes directly, so there's nothing to
+macrt reads HFS, HFS Plus and MFS volumes directly — and an ISO 9660
+disc with no Mac volume too — so there's nothing to
 extract:
 
 ```sh
@@ -302,7 +303,9 @@ name, is in [Disk image formats](disk-images.md).
 #### CD-ROM images
 
 An image whose name ends in `.iso`, `.cdr` or `.toast` is mounted as a
-CD-ROM, whatever its size. Its driver has a device control entry in the
+CD-ROM, whatever its size; an image of a disc's whole 2352-byte sectors
+mounts as one too, whatever its name. A disc with no Mac volume but an
+ISO 9660 one also opens, with its files browsable but nothing to launch. Its driver has a device control entry in the
 unit table, named `.AppleCD`, the Apple CD-ROM driver's name in Technical
 Note DV 22, "CD-ROM Driver Calls", so a program that checks its disc's
 driver by name finds it, as Lode Runner: The Legend Returns does. The
