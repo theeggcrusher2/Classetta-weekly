@@ -264,7 +264,7 @@ Preserve existing behavior unless a task explicitly changes it. If the codebase 
   - Add one format at a time or in small tested batches.
   - Track nesting and report failures without losing access to the parent Filer window.
 
-- [ ] **29. Launch applications executable multiple levels deep**
+- [x] **29. Launch applications executable multiple levels deep**
   - Launch an application reached through nested encodings, archives, disk images, or filesystems.
   - Test progressively deeper nesting, including a case with multiple container types.
   - Ensure failures identify the level or item that could not be opened.

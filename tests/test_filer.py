@@ -2759,3 +2759,105 @@ def test_an_image_inside_an_image_drills_down(tmp_path, harness):
     assert sorted(n for n, _ in deep_wins[0].volume.items()) == ["Letter"]
     assert not h.d._alerts
     assert win.isVisible() and mid_wins[0].isVisible()
+
+
+# -- launching at depth (task 29) --------------------------------------
+
+def _macbinary_holding_zip(tmp_path, members: dict) -> None:
+    """Outer.bin in tmp_path: a MacBinary whose data fork is a zip
+    holding each name's bytes, so a drill goes encoding → archive."""
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for name, body in members.items():
+            z.writestr(name, body)
+    (tmp_path / "Outer.bin").write_bytes(
+        macbinary("Nest.zip", buf.getvalue(), FORK))
+
+
+def test_an_application_inside_an_archive_launches(harness, tmp_path,
+                                                  monkeypatch):
+    (tmp_path / "Nest.pit").write_bytes(
+        _packit([("Hello", b"code", FORK, b"APPL", b"????")]))
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    launched = []
+    monkeypatch.setattr(h.d, "launch",
+                        lambda name, main, **kw: launched.append((name, kw)))
+    _dblclick(win, "Nest.pit", h.settle)          # the archive's window
+    h.settle()
+    archive_win = [w for w in h.d.filer_windows if w is not win]
+    assert len(archive_win) == 1
+    _dblclick(archive_win[0], "Hello", h.settle)
+    h.settle()
+    assert len(launched) == 1
+    assert launched[0][0] == "Hello"
+    assert launched[0][1]["app"].name == "Hello"
+    assert not h.d._alerts
+    assert win.isVisible() and archive_win[0].isVisible()
+
+
+def test_an_application_three_container_levels_deep_launches(harness, tmp_path,
+                                                            monkeypatch):
+    """A MacBinary encoding a zip encoding a disk image holding the
+    application: an encoding, an archive and a volume deep, then launch."""
+    inner = machfs.Volume()
+    inner.name = "Inner"
+    app = machfs.File()
+    app.type, app.data, app.rsrc = b"APPL", b"code", FORK
+    inner["Hello"] = app
+    _macbinary_holding_zip(tmp_path, {"Disk.dsk": inner.write(size=800 * 1024)})
+    args = parse_args([str(tmp_path / "Outer.bin"), "--filer"])
+    _, _, filers, error = open_targets(args)
+    assert error is None
+    h = harness(disks=[])
+    launched = []
+    monkeypatch.setattr(h.d, "launch",
+                        lambda name, main, **kw: launched.append((name, kw)))
+    win1 = h.d.open_filer(filers[0])              # the encoding's window
+    h.settle()
+    _dblclick(win1, "Nest.zip", h.settle)          # ... to the archive
+    h.settle()
+    win2 = [w for w in h.d.filer_windows if w is not win1]
+    assert len(win2) == 1
+    assert isinstance(win2[0].volume, ArchiveFolder)
+    _dblclick(win2[0], "Disk.dsk", h.settle)       # ... to the volume
+    h.settle()
+    win3 = [w for w in h.d.filer_windows
+            if w is not win1 and w is not win2[0]]
+    assert len(win3) == 1
+    assert isinstance(win3[0].volume, machfs.Volume)
+    assert win3[0].volume.name == "Inner"
+    _dblclick(win3[0], "Hello", h.settle)          # ... and launch
+    h.settle()
+    assert len(launched) == 1
+    assert launched[0][0] == "Hello"
+    assert launched[0][1]["app"].name == "Hello"
+    assert not h.d._alerts
+    assert all(w.isVisible() for w in (win1, win2[0], win3[0]))
+
+
+def test_a_failure_three_levels_deep_names_the_item_that_failed(harness,
+                                                                tmp_path):
+    _macbinary_holding_zip(tmp_path,
+                           {"Broken.vhd": b"conectix" + b"\x00" * 400})
+    args = parse_args([str(tmp_path / "Outer.bin"), "--filer"])
+    _, _, filers, error = open_targets(args)
+    assert error is None
+    h = harness(disks=[])
+    win1 = h.d.open_filer(filers[0])
+    h.settle()
+    _dblclick(win1, "Nest.zip", h.settle)
+    h.settle()
+    win2 = [w for w in h.d.filer_windows if w is not win1]
+    assert len(win2) == 1
+    _dblclick(win2[0], "Broken.vhd", h.settle)
+    h.settle()
+    # the alert says which item, three levels down, not just that
+    # something failed
+    assert h.d._alerts and "Broken.vhd" in h.d._alerts[0].text()
+    assert [w for w in h.d.filer_windows
+            if w is not win1 and w is not win2[0]] == []
+    assert win1.isVisible() and win2[0].isVisible()

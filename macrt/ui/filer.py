@@ -847,7 +847,7 @@ class FilerWindow(_Hosted):
                             "decode now, and the Filer stays usable.",
                             work)
         except Exception as e:
-            self._say(str(e))
+            self._named(f, e)
             return None
 
     def _open(self, f: MacFile, view: bool | None = None,
@@ -861,7 +861,7 @@ class FilerWindow(_Hosted):
         try:
             nested = container_contents(f.data, f.name, f.folder) if f.data else None
         except ValueError as e:
-            self._say(str(e))
+            self._named(f, e)
             return
         if nested is not None:
             self.display.open_filer(ContainerFolder(nested, f.name), (), self.options)
@@ -877,7 +877,7 @@ class FilerWindow(_Hosted):
                                   "now, and the Filer stays usable while it runs.",
                                   lambda: image_volume(f))
             except (OSError, ValueError) as e:
-                self._say(str(e))
+                self._named(f, e)
                 return
             if volume is None:
                 return                    # stopped waiting; the read runs on
@@ -895,7 +895,7 @@ class FilerWindow(_Hosted):
                               "now, and the Filer stays usable while it runs.",
                               lambda: (archive_entries(f.data, f.name) if f.data else None,))
         except ValueError as e:
-            self._say(str(e))
+            self._named(f, e)
             return
         if listed is None:
             return                    # stopped waiting; the listing runs on
@@ -1027,6 +1027,13 @@ class FilerWindow(_Hosted):
 
     def _say(self, message: str) -> None:
         self.display.show_alert(QMessageBox.Icon.Warning, "Could Not Open", message)
+
+    def _named(self, f: MacFile, e: Exception) -> None:
+        """e's message as an alert, with the item's own name when the
+        message doesn't carry it: levels apart, the name says which
+        item could not be opened."""
+        message = str(e)
+        self._say(message if f.name in message else f"{f.name}: {message}")
 
 
 def _opened_with(app: MacFile, doc: MacFile) -> MacFile:

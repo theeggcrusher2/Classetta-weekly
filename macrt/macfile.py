@@ -1552,7 +1552,7 @@ def open_disks(paths, names=(), *, browse: bool = False) -> tuple[list[MacFile],
     With browse and no names, nothing is taken from the images: they are
     the caller's to show, in Filer windows, and only the files that
     aren't images are applications here."""
-    opened = [(Path(p), *_volume_or_file(p)) for p in paths]
+    opened = [(Path(p), *_volume_or_file(p, browse=browse)) for p in paths]
     images = [(path, volume) for path, volume, _ in opened if volume is not None]
     if names and not images:
         raise ValueError("--app picks an application on a disk image, and there's none here")
@@ -1717,7 +1717,8 @@ def archive_name_on(d: bytes) -> str | None:
     return None
 
 
-def _volume_or_file(path: str | os.PathLike) -> tuple[machfs.Volume | None, MacFile | None]:
+def _volume_or_file(path: str | os.PathLike, *,
+                    browse: bool = False) -> tuple[machfs.Volume | None, MacFile | None]:
     path = Path(path)
     if path.suffix.lower() in ('.dtc', '.dt1'):
         try:
@@ -1756,7 +1757,11 @@ def _volume_or_file(path: str | os.PathLike) -> tuple[machfs.Volume | None, MacF
                                 or path.suffix.lower() in (".mds", ".mdf")):
         raise ValueError(f"{path.name}: {problem}")     # an image, but one that can't be read
     kind = archive_kind(f)
-    if kind in ("StuffIt", "zip"):
+    # An archive an encoding's payload turned out to hold is browsable
+    # in Filer view: the drill reaches it the way any archive opens.
+    # Without browsing, there is nothing to do with an archive but say
+    # to unpack it.
+    if kind in ("StuffIt", "zip") and not (browse and f.name != path.name):
         raise ValueError(f"{path.name} is a {kind} archive: unpack it first, for example "
                          f"with The Unarchiver (unar {path.name})")
     # Archive formats macextract recognises pass through: the Filer can
