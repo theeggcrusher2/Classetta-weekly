@@ -466,6 +466,29 @@ class Display(QObject):
         self._alerts.append(box)
         box.show()
 
+    def ask_choice(self, title: str, text: str,
+                   choices: list[tuple[str, Callable[[], None]]],
+                   detail: str = "") -> QMessageBox:
+        """A host question with one button per choice, shown as show_alert
+        shows an alert and recorded beside them; the button pressed calls
+        its callable, and every other way of dismissing it (Cancel, the
+        close box, Escape) keeps the Cancel semantics: none of the
+        callables run, so nothing happens."""
+        if self._shut_down:
+            return None
+        box = QMessageBox(QMessageBox.Icon.Question, title, text,
+                          QMessageBox.StandardButton.Cancel, self.host_window)
+        if detail:
+            box.setDetailedText(detail)
+        box.setWindowModality(Qt.WindowModality.NonModal)
+        box.finished.connect(lambda _: self._alert_closed(box))
+        for label, answered in choices:
+            button = box.addButton(label, QMessageBox.ButtonRole.AcceptRole)
+            button.clicked.connect(lambda _=None, a=answered: a())
+        self._alerts.append(box)
+        box.show()
+        return box
+
     def ask_question(self, title: str, text: str, answered: Callable[[bool], None],
                      detail: str = "") -> QMessageBox:
         """A host question with Yes and No, shown as show_alert shows an

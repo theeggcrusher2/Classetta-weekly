@@ -23,7 +23,7 @@ import time
 from concurrent.futures import Future
 from dataclasses import dataclass, replace
 from functools import lru_cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import machfs
 from PyQt6.QtCore import QEvent, QSize, Qt
@@ -811,6 +811,62 @@ class FilerWindow(_Hosted):
                 self.display.open_filer(self.volume, self.path + (f.name,), self.options)
             return
         self._open(f, view, trace)
+
+    def _resolve_recorded(self, f: MacFile) -> bool:
+        """Stub for the resolution order (subtask 1.2): the recorded
+        suffix, then the disk's volume name against known mount points.
+        Neither exists yet, so no recorded item resolves and this
+        reports the failure through the prompt — which is the call site
+        reachable when resolution fails.  Returns True when f was
+        opened; 1.2 replaces the body and passes the real resolution
+        through, and 1.4 replaces _open_picked_image with the mount."""
+        self._recorded_unavailable(f)
+        return False
+
+    def _recorded_unavailable(self, f: MacFile,
+                              on_insert: Callable[[], None] | None = None,
+                              on_picked: Callable[[str], None] | None = None) -> None:
+        """The prompt shown when the media a Disk Tracker index recorded
+        is not where the index says it is, or does not open: insert the
+        disk, or choose the original image file.  Cancelling does
+        nothing — the catalog is a read-only record and stays
+        untouched.
+
+        Shared by both call sites: 1.2's resolver calls it when
+        resolution fails (with its re-resolution as on_insert), and
+        1.4's picked-image path calls it when a picked image does not
+        verify (with the picker as on_picked).  The defaults are the
+        stubs until those land."""
+        disk = getattr(f, "disk", None)
+        if not disk and self.path:
+            disk = self.path[0]
+        disk = disk or "the disk"
+        on_insert = on_insert or (lambda: self._resolve_recorded(f))
+        on_picked = on_picked or (lambda path: self._open_picked_image(f, path))
+        self.display.ask_choice(
+            "Disk Not Available",
+            f"“{f.name}” is recorded on “{disk}”. The disk is not available — "
+            "insert it, or choose the disk image file.",
+            choices=[("Insert Disk", on_insert),
+                     ("Choose Image…", lambda: self._pick_recorded_image(f, disk, on_picked))],
+            detail="A Disk Tracker catalog records what was on the disk; "
+                   "it does not hold a copy of it.")
+
+    def _pick_recorded_image(self, f: MacFile, disk: str,
+                             on_picked: Callable[[str], None]) -> None:
+        """The file picker for the original image: `on_picked` gets the
+        chosen path.  Cancelling the picker does nothing."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, f"Choose the image recorded as “{disk}”")
+        if not path:
+            return                      # cancelled: nothing changes
+        on_picked(path)
+
+    def _open_picked_image(self, f: MacFile, image_path: str) -> None:
+        """Stub for mounting the picked image (subtask 1.4): verify it
+        against the record, mount it, and open the item the
+        double-click was on.  Deliberately a no-op until 1.4 lands; the
+        catalog is not written to either way."""
 
     def get_info(self) -> None:
         """Open a Get Info window for the currently selected item."""
