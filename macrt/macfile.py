@@ -390,7 +390,12 @@ ALIAS_FLAG = 0x8000                  # the Finder's isAlias flag
 
 
 def _alias_record(f: MacFile):
-    """The alias record in f's resource fork, if it's one there."""
+    """The alias record in f's resource fork, if it's one there.  A
+    member whose forks are still inside its archive has none: reading
+    them would decode the member, and an alias never needs to cross
+    that boundary."""
+    if isinstance(f, LazyArchiveFile) and f.forks_pending:
+        return None
     rsrc = getattr(f, "rsrc", b"")
     if not rsrc:
         return None
@@ -411,7 +416,16 @@ def _alias_record(f: MacFile):
 def is_alias(f: MacFile) -> bool:
     """Whether f is an alias file: an 'alis' resource, and the Finder's
     isAlias flag or the file's own shape — type alis, or an empty data
-    fork — when a copy of it lost the flag."""
+    fork — when a copy of it lost the flag.
+
+    For a member whose forks are still inside its archive, no fork is
+    read: identification uses the declared flags and type alone.  An
+    alias never needs to point out of its archive, so a pending member
+    is identified as one only from its own declared metadata; the record
+    itself is decoded lazily when the member is opened, behind a busy
+    window."""
+    if isinstance(f, LazyArchiveFile) and f.forks_pending:
+        return bool(f.flags & ALIAS_FLAG) or f.type == b"alis"
     if _alias_record(f) is None:
         return False
     return bool(f.flags & ALIAS_FLAG) or f.type == b"alis" or not f.data

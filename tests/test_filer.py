@@ -1997,6 +1997,8 @@ def test_listing_an_archive_does_not_decode_its_members(harness, tmp_path):
     assert _rows(inner) == [("Inner One", "document")]
     member = inner.volume.entries[0]
     assert member.forks_pending          # the Kind column asked without decoding
+    assert not is_alias(member)          # identification still works: declared metadata only
+    assert member.forks_pending          # still pending after the test: no fork was read for it
 
 
 def test_display_contents_of_a_large_file_shows_its_head(harness, tmp_path):
