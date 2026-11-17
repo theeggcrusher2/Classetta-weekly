@@ -3609,3 +3609,25 @@ def test_a_dt1_catalog_opens_read_only_through_the_filer(harness, tmp_path):
 def _dt_volume(path):
     from disktracker.filer_adapter import DiskTrackerVolume
     return DiskTrackerVolume(path)
+
+
+def test_extract_with_an_archive_selected_in_a_disk_window(harness, tmp_path, monkeypatch):
+    """Extract… works on the selected archive in any listing, not just on
+    the archive window being browsed: a host folder with an app and an
+    archive in it writes the archive out to where the user picks."""
+    (tmp_path / "Outer.pit").write_bytes(_packit(
+        [("Inner One", b"data one", b"", b"TEXT", b"TTxt"),
+         ("Inner App", b"data two", FORK, b"APPL", b"TEST")]))
+    h = harness(disks=[_volume()])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    win.tree.setCurrentItem(_item(win, "Outer.pit"))
+    h.settle()
+    dest = tmp_path / "out"
+    dest.mkdir()
+    _dir_dialog(monkeypatch, dest)
+    h.d.filer_menu_choice(FILE_MENU_ID, 10)             # File > Extract…
+    h.settle()
+    assert (dest / "Inner One").read_bytes() == b"data one"
+    assert (dest / "Inner App").read_bytes() == b"data two"
+    assert (dest / "._Inner App").exists()              # AppleDouble beside the fork pair
