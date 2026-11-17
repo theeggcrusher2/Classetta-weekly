@@ -109,7 +109,7 @@ def _try_font(preferences: list[tuple[str, int]], fallback: tuple[str, int],
 
 
 SYSTEM_FONTS = [("Chicago", 12), ("ChicagoFLF", 12), ("Charcoal", 12)]
-APP_FONTS = [("Geneva", 12), ("Chicago", 12)]
+APP_FONTS = [("Geneva", 12), ("Chicago", 12), ("ChicagoFLF", 12)]
 FALLBACK_FONT = ("Helvetica", 13)
 
 

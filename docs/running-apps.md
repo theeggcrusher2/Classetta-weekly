@@ -68,11 +68,12 @@ and Windows.
 ### Fonts
 
 The chrome looks right with Chicago (system font) and Geneva (application
-font). These aren't bundled. Put `.ttf`/`.otf` files in `macrt/ui/fonts/` and
-they load at startup. *ChicagoFLF* is a freely licensed Chicago clone. With a
-Mac font present, text is drawn without antialiasing for the crisp 1-bit look.
-Without one, macrt falls back to Helvetica at 13px with antialiasing on, because
-outline fonts look broken without it. `theme.TEXT_ANTIALIAS = True/False`
+font). *ChicagoFLF*, a freely licensed Chicago clone, ships in
+`macrt/ui/fonts/`; drop more Chicago/Geneva lookalikes there as `.ttf`/`.otf`
+and they load at startup. With a Mac font present, text is drawn without
+antialiasing for the crisp 1-bit look. Without one, macrt falls back to
+Helvetica at 13px with antialiasing on, because outline fonts look broken
+without it. `theme.TEXT_ANTIALIAS = True/False`
 forces either. An application's own fonts are drawn from their bitmaps
 (see [Text and fonts](architecture.md#text-and-fonts)).
 
