@@ -514,8 +514,9 @@ of the Filer.
 Archives the Filer recognises — MacBinary, BinHex and AppleSingle, and
 every format its `macextract.py` dependency knows (PackIt, AppleLink,
 MIME, uuencode and its kin) — open in a Filer window like a folder: the
-archive's files listed, each openable as usual, and one window per
-nested archive. New formats are recognised as they are added to
+archive's files listed, each openable as usual, one window per folder
+inside the archive as on a disk image, and one window per nested
+archive. New formats are recognised as they are added to
 macextract.py; there is nothing to configure and no per-format code to
 write. A damaged archive says so when you try to open it; nothing else
 happens to it.

@@ -45,7 +45,9 @@ import machfs.main
 from machfs.btree import unpack_extent_record
 
 from . import chd, dmg, dart, mdf, moof, qcow2, vhd, vmdk
-from .resfork import InvalidForkError, is_fork, open_fork, vers_messages
+from .util import member_segments
+from .resfork import (
+    InvalidForkError, is_fork, open_fork, vers_messages)
 
 APPLE_SINGLE = 0x00051600
 APPLE_DOUBLE = 0x00051607
@@ -1242,8 +1244,21 @@ def list_folder(volume: machfs.Volume | HostFolder | ContainerFolder | ArchiveFo
                 return []
             folder = HostFolder(sub, folder.root)
         return folder.files()
-    if isinstance(volume, (ContainerFolder, ArchiveFolder)):
-        return volume.files()            # flat: the decoded file / the archive's entries
+    if isinstance(volume, ContainerFolder):
+        return volume.files()            # flat: the decoded file
+    if isinstance(volume, ArchiveFolder):
+        files = volume.files()           # flat: the archive's entries
+        if path:
+            out = []
+            for f in files:
+                parts = member_segments(f.name)
+                if parts[:len(path)] != list(path) or len(parts) == len(path):
+                    continue
+                f = copy.copy(f)
+                f.name = "/".join(parts[len(path):])
+                out.append(f)
+            return out
+        return files
     folder = VolumeFolder(volume, path)
     node = folder._node(folder.path)
     out = []

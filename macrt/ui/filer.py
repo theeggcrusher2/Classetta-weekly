@@ -401,33 +401,31 @@ class _ListHeader(QHeaderView):
         painter.restore()
 
 
-# What a row of a folder of members carries instead of a file: a place
-# in the tree, not something the Filer can open.
-_FOLDER_ROW = object()
+# A row of a folder of members carries its path from the archive's
+# root in place of a file, as a tuple in UserRole; a tuple row is not
+# something the Filer can open as a file, and double-clicking it
+# opens the folder's window.
 
 
-def _nested(files: list[MacFile]) -> dict:
-    """The files grouped into the folders their names hold, for the
-    listing to draw as a tree: folders first under each key, a file
-    sharing a name with a folder met inside it, so neither row is
-    lost, and a duplicate member drawn last as the entries map keeps
-    it."""
+def _immediate(files: list[MacFile]) -> dict:
+    """The members of one folder as its listing draws them: the files
+    that are its own, and the folders its member names hold as rows of
+    their own.  member_segments reads the member name the way
+    macextract's sanitiser reads it, so what is drawn matches the
+    extraction destination structure."""
     root: dict = {}
     for f in files:
-        # member_segments reads the member name the way macextract's
-        # sanitiser reads it, so what is drawn matches the extraction
-        # destination structure.
         parts = member_segments(f.name)
         if not parts:
             continue                      # no usable name: refused, as extraction refuses it
-        node = root
-        for part in parts[:-1]:
-            child = node.get(part)
-            if not isinstance(child, dict):
-                child = {}
-                _merge(node, part, child)
-            node = child
-        _merge(node, parts[-1], f)
+        if len(parts) == 1:
+            _merge(root, parts[0], f)    # a folder met by its file keeps both
+            continue
+        child = root.get(parts[0])
+        if child is None:
+            root[parts[0]] = {}
+        elif isinstance(child, MacFile):
+            root[parts[0]] = {parts[0]: child}
     return root
 
 
@@ -462,7 +460,10 @@ class FilerWindow(_Hosted):
         if isinstance(volume, HostFolder):
             self._title_icon = FOLDER_ICON
             self.setWindowTitle(path[-1] if path else str(volume.path.name) or "Host Folder")
-        elif isinstance(volume, (ContainerFolder, ArchiveFolder)):
+        elif isinstance(volume, ArchiveFolder):
+            self._title_icon = ARCHIVE_ICON
+            self.setWindowTitle(self.path[-1] if self.path else volume.name)
+        elif isinstance(volume, ContainerFolder):
             self._title_icon = ARCHIVE_ICON
             self.setWindowTitle(volume.name)
         else:
@@ -529,7 +530,7 @@ class FilerWindow(_Hosted):
         # file may legally hold a '/', and it is one file there, not a
         # folder.
         if isinstance(self.volume, ArchiveFolder):
-            root = _nested(files)
+            root = _immediate(files)
         else:
             root = {f.name: f for f in files}
         self._add_rows(root, None)
@@ -549,16 +550,17 @@ class FilerWindow(_Hosted):
         item.setData(0, Qt.ItemDataRole.UserRole, f)
         return item
 
-    def _add_rows(self, node: dict, parent: QTreeWidgetItem | None) -> None:
+    def _add_rows(self, node: dict, parent: QTreeWidgetItem | None,
+                  path: tuple[str, ...] = ()) -> None:
         """One level of the listing: folders of members first, then
-        files, each folder holding the rows beneath it so a path in a
-        member's name draws as a tree rather than a flat unix path."""
+        files.  A folder of members draws no rows of its own beneath
+        it: it opens as a window, as a folder of a disk image's does."""
         for key in sorted(node, key=lambda k: (not isinstance(node[k], dict), k.lower())):
             folder = isinstance(node[key], dict)
             if folder:
                 item = QTreeWidgetItem([key, "--", "folder"])
                 item.setIcon(0, icon("folder"))
-                item.setData(0, Qt.ItemDataRole.UserRole, _FOLDER_ROW)
+                item.setData(0, Qt.ItemDataRole.UserRole, path + (key,))
             else:
                 item = self._row(node[key], key)
             if parent is None:
@@ -566,7 +568,7 @@ class FilerWindow(_Hosted):
             else:
                 parent.addChild(item)
             if folder:
-                self._add_rows(node[key], item)
+                self._add_rows(node[key], item, path + (key,))
 
     # -- frame ------------------------------------------------------------
     def frame(self) -> chrome.Frame:
@@ -703,7 +705,7 @@ class FilerWindow(_Hosted):
         picked = row.data(0, Qt.ItemDataRole.UserRole)
         if isinstance(picked, MacFile):
             return picked
-        return None if picked is _FOLDER_ROW else self.entries.get(row.text(0))
+        return None if isinstance(picked, tuple) else self.entries.get(row.text(0))
 
     def selected_item(self) -> MacFile | None:
         items = self.tree.selectedItems()
@@ -714,7 +716,15 @@ class FilerWindow(_Hosted):
     def selected_actions(self) -> set[str]:
         """The things the menus can do with the selection: an empty set
         while nothing is selected."""
-        item = self.selected_item()
+        items = self.tree.selectedItems()
+        if not items:
+            return set()
+        folder = items[0].data(0, Qt.ItemDataRole.UserRole)
+        if isinstance(folder, tuple):
+            # a folder of members opens as its own window; there is
+            # nothing to Get Info or display-contents on just yet
+            return {"open"}
+        item = self._row_file(items[0])
         if item is None:
             return set()
         actions = {"open", "info"}
@@ -729,7 +739,14 @@ class FilerWindow(_Hosted):
 
     def open_selected(self) -> None:
         """Open the currently selected item, as double-clicking it would."""
-        item = self.selected_item()
+        items = self.tree.selectedItems()
+        if not items:
+            return
+        folder = items[0].data(0, Qt.ItemDataRole.UserRole)
+        if isinstance(folder, tuple):
+            self.display.open_filer(self.volume, self.path + folder, self.options)
+            return
+        item = self._row_file(items[0])
         if item is not None:
             self._open_item(item)
 
@@ -910,9 +927,11 @@ class FilerWindow(_Hosted):
         if name == self._last_name and now - self._opened_at < 0.4:
             return                      # a double-click arrives as two activations
         self._last_name, self._opened_at = name, now
-        if item.data(0, Qt.ItemDataRole.UserRole) is _FOLDER_ROW:
-            # a folder of members shows what is beneath it; Qt's own
-            # expands-on-double-click does it, so nothing to do here
+        folder = item.data(0, Qt.ItemDataRole.UserRole)
+        if isinstance(folder, tuple):
+            # a folder of members opens as its own window, as a folder of
+            # a disk image's or the host's does, not as rows in place
+            self.display.open_filer(self.volume, self.path + folder, self.options)
             return
         f = self._row_file(item)
         if f is None:

@@ -271,20 +271,6 @@ def _dblclick_row(win, item, settle):
     settle(150)
 
 
-def _sub_item(win, folder: str, name: str):
-    """The row named name under the top-level folder row folder, the
-    folder expanded first so its children are laid out."""
-    parent = _item(win, folder)
-    parent.setExpanded(True)
-    return next(parent.child(i) for i in range(parent.childCount())
-                if parent.child(i).text(0) == name)
-
-
-def _child_rows(item):
-    return [(item.child(i).text(0), item.child(i).text(2))
-            for i in range(item.childCount())]
-
-
 def _front_the_filer(h, win):
     """Click in a Filer window's list, so its own menus come back to the bar."""
     c = win.tree.visualItemRect(_item(win, "Games")).center()
@@ -3038,13 +3024,20 @@ def _tree_zip(tmp_path) -> None:
 
 
 def _archive_window(h, win, archive: str):
-    """The Filer window that opens when archive is double-clicked in
-    win, with win itself left open."""
+    """The Filer window a double-click on archive in win opens — a new
+    one, or the one already open on that folder, which the Filer brings
+    forward instead, as for a folder of a disk image's."""
+    before = set(map(id, h.d.filer_windows))
     _dblclick(win, archive, h.settle)
     h.settle()
-    opened = [w for w in h.d.filer_windows if w is not win]
-    assert len(opened) == 1
-    return opened[0]
+    new = [w for w in h.d.filer_windows if id(w) not in before]
+    if new:
+        assert len(new) == 1
+        return new[0]
+    same = [w for w in h.d.filer_windows
+            if w is not win and w.volume is win.volume]
+    assert same, "the double-click opened no window"
+    return same[-1]
 
 
 def test_an_archive_with_paths_lists_folders_instead_of_flat_paths(tmp_path,
@@ -3058,23 +3051,25 @@ def test_an_archive_with_paths_lists_folders_instead_of_flat_paths(tmp_path,
     assert [(name, kind) for name, kind in _rows(arch)] == \
         [("Docs", "folder"), ("Top", "document")]
     assert all("/" not in name for name, _ in _rows(arch))
-    docs = _item(arch, "Docs")
-    docs.setExpanded(True)
-    assert [(name, kind) for name, kind in _child_rows(docs)] == \
-        [("Deep", "folder"), ("Letter", "document")]
-    deep = next(docs.child(i) for i in range(docs.childCount())
-                if docs.child(i).text(0) == "Deep")
-    deep.setExpanded(True)
-    assert [name for name, _ in _child_rows(deep)] == ["Note"]
     # each row carries the member itself, under its whole raw name
-    letter = docs.child(next(i for i in range(docs.childCount())
-                             if docs.child(i).text(0) == "Letter"))
-    assert letter.data(0, Qt.ItemDataRole.UserRole).name == "Docs/Letter"
-    assert arch.entries["Docs/Letter"].name == "Docs/Letter"
+    assert _item(arch, "Top").data(0, Qt.ItemDataRole.UserRole).name == "Top"
+    assert arch.entries["Top"].name == "Top"
+    # a folder of members opens as a window of its own, over the path
+    docs = _item(arch, "Docs")
+    docs_win = _archive_window(h, arch, "Docs")
+    assert [(name, kind) for name, kind in _rows(docs_win)] == \
+        [("Deep", "folder"), ("Letter", "document")]
+    assert docs_win.volume is arch.volume and docs_win.path == ("Docs",)
+    deep_win = _archive_window(h, docs_win, "Deep")
+    assert [name for name, _ in _rows(deep_win)] == ["Note"]
+    assert deep_win.path == ("Docs", "Deep")
+    note = _item(deep_win, "Note")
+    assert note.data(0, Qt.ItemDataRole.UserRole).name == "Note"
+    assert deep_win.entries["Note"].name == "Note"
     assert not h.d._alerts
 
 
-def test_double_clicking_a_folder_of_members_shows_what_is_beneath(tmp_path,
+def test_double_clicking_a_folder_of_members_opens_its_own_window(tmp_path,
                                                                    harness):
     _tree_zip(tmp_path)
     h = harness(disks=[])
@@ -3082,11 +3077,13 @@ def test_double_clicking_a_folder_of_members_shows_what_is_beneath(tmp_path,
     h.settle()
     arch = _archive_window(h, win, "Tree.zip")
     docs = _item(arch, "Docs")
-    assert not docs.isExpanded()
-    _dblclick_row(arch, docs, h.settle)
-    assert docs.isExpanded()
-    # one toggle, not two: the second activation of the click is deduped
-    assert [name for name, _ in _child_rows(docs)] == ["Deep", "Letter"]
+    docs_win = _archive_window(h, arch, "Docs")
+    assert docs_win is not arch
+    _dblclick_row(arch, docs, h.settle)              # already open: brings it forward
+    assert [w for w in h.d.filer_windows
+            if w.volume is arch.volume and w.path == ("Docs",)] == [docs_win]
+    assert [(name, kind) for name, kind in _rows(docs_win)] == \
+        [("Deep", "folder"), ("Letter", "document")]
     assert not h.d._alerts
 
 
@@ -3099,12 +3096,13 @@ def test_a_container_inside_a_folder_of_members_drills(tmp_path, harness):
     win = h.d.open_filer(HostFolder(tmp_path))
     h.settle()
     arch = _archive_window(h, win, "Tree.zip")
-    folder = _item(arch, "Sub")
-    _dblclick_row(arch, folder, h.settle)          # expands
-    assert folder.isExpanded()
-    _dblclick_row(arch, folder.child(0), h.settle)  # ... then drills
+    sub = _archive_window(h, arch, "Sub")          # the folder's own window
+    assert sub.path == ("Sub",)
+    assert _rows(sub) == [("Packed.pit", "document")]
+    _dblclick_row(sub, _item(sub, "Packed.pit"), h.settle)  # ... then drills
     h.settle()
-    inner = [w for w in h.d.filer_windows if w is not win and w is not arch]
+    inner = [w for w in h.d.filer_windows if w is not win and w is not arch
+             and w is not sub]
     assert len(inner) == 1
     assert _rows(inner[0]) == [("Inside", "document")]
     assert not h.d._alerts
@@ -3119,9 +3117,10 @@ def test_get_info_reads_a_member_inside_a_folder(tmp_path, harness):
     win = h.d.open_filer(HostFolder(tmp_path))
     h.settle()
     arch = _archive_window(h, win, "Tree.zip")
-    arch.tree.setCurrentItem(_sub_item(arch, "Docs", "Letter"))
+    docs_win = _archive_window(h, arch, "Docs")
+    docs_win.tree.setCurrentItem(_item(docs_win, "Letter"))
     h.settle()
-    arch.get_info()
+    docs_win.get_info()
     h.settle()
     assert h.d.info_windows[-1]._lines[0] == "Name: Letter"
     h.d.info_windows[-1].close()
