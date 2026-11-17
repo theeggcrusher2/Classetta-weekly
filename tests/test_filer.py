@@ -2128,6 +2128,41 @@ def test_extract_menu_extracts_the_browsed_archive(harness, tmp_path, monkeypatc
     assert (dest / "._Inner One").exists()          # Finder info alone pairs too
 
 
+def test_extract_in_a_folder_of_members_extracts_the_parent_archive(
+        harness, tmp_path, monkeypatch):
+    import zipfile
+    with zipfile.ZipFile(tmp_path / "Tree.zip", "w") as z:
+        z.writestr("Docs/Letter", b"letter")
+        z.writestr("Docs/Note", b"note")
+        z.writestr("Outside", b"outside")
+    args = parse_args([str(tmp_path / "Tree.zip"), "--filer"])
+    _, _, filers, error = open_targets(args)
+    assert error is None
+    h = harness(disks=[])
+    arch = h.d.open_filer(filers[0])
+    h.settle()
+    docs = _archive_window(h, arch, "Docs")
+    dest = tmp_path / "out"
+    dest.mkdir()
+    caption = []
+
+    class _DirDialog:
+        @staticmethod
+        def getExistingDirectory(*_args, **_kwargs):
+            caption.append(_args[1] if len(_args) > 1 else "")
+            return str(dest)
+
+    monkeypatch.setattr("macrt.ui.filer.QFileDialog", _DirDialog)
+    h.d.filer_menu_choice(FILE_MENU_ID, 10)              # File > Extract…
+    h.settle()
+    # the dialog says it takes all of the archive, not just the folder in view
+    assert caption and "all of Tree.zip" in caption[0]
+    assert "whole archive" in caption[0]
+    assert (dest / "Docs" / "Letter").read_bytes() == b"letter"
+    assert (dest / "Docs" / "Note").read_bytes() == b"note"
+    assert (dest / "Outside").read_bytes() == b"outside"  # the parent archive, not the folder
+
+
 def test_extract_menu_item_enabled_state(harness, tmp_path):
     h = harness(disks=[_volume()])
     win = h.d.open_filer(h.d.config.disks[0])

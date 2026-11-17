@@ -854,6 +854,13 @@ class FilerWindow(_Hosted):
         into a folder the user picks."""
         if isinstance(self.volume, ArchiveFolder):
             raw, stem = self.volume.raw, self.volume.name
+            if self.path:
+                # the window browses a folder of the archive, but the
+                # archive is the unit Extract works on; say so
+                title = (f"Extract all of {stem} (the whole archive, "
+                         f"not just the folder in view) to…")
+            else:
+                title = f"Extract {stem} to…"
         else:
             item = self.selected_item()
             if item is None or item.type == FOLDER or archive_kind(item) != "archive":
@@ -862,7 +869,8 @@ class FilerWindow(_Hosted):
             if item is None:
                 return
             raw, stem = item.data, item.name
-        dest = QFileDialog.getExistingDirectory(self, f"Extract {stem} to…")
+            title = f"Extract {stem} to…"
+        dest = QFileDialog.getExistingDirectory(self, title)
         if not dest:
             return
         try:
