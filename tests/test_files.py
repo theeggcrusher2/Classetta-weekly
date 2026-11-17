@@ -21,6 +21,7 @@ from builders import (
 from macrt import moof
 from macrt.macfile import (
     ArchiveFolder, HostFolder, MacFile, MemoryFolder, VolumeFolder, archive_file,
+    list_folder,
     is_control_panel,
     is_disk_image, load_file, load_volume, open_application, open_applications,
     open_disks, volume_files,
@@ -1260,3 +1261,49 @@ def test_a_raw_hfs_image_lists_from_the_catalog_only(tmp_path):
     hello = files["hello.txt"]
     assert hello._node._read == {}
     assert hello.data[:11] != b"raw-payload"
+
+# -- archive folders, one level at a time ------------------------------------
+
+
+def _zip_members(tmp_path):
+    """An ArchiveFolder over a zip with a member at the top, a member
+    inside a folder and a member two folders deep."""
+    import zipfile
+    with zipfile.ZipFile(tmp_path / "T.zip", "w") as z:
+        z.writestr("Top", b"top")
+        z.writestr("Docs/Letter", b"letter")
+        z.writestr("Docs/Deep/Note", b"note")
+    return archive_file(tmp_path / "T.zip")
+
+
+def test_list_folder_of_an_archive_lists_its_whole_membership(tmp_path):
+    folder = _zip_members(tmp_path)
+    assert {f.name for f in list_folder(folder)} == {"Top", "Docs/Letter", "Docs/Deep/Note"}
+
+
+def test_list_folder_of_an_archive_path_lists_that_level_with_the_prefix_stripped(tmp_path):
+    folder = _zip_members(tmp_path)
+    assert {f.name for f in list_folder(folder, ("Docs",))} == {"Letter", "Deep/Note"}
+    assert {f.name for f in list_folder(folder, ("Docs", "Deep"))} == {"Note"}
+
+
+def test_list_folder_of_an_archive_path_keeps_the_members_forks(tmp_path):
+    folder = _zip_members(tmp_path)
+    letter = next(f for f in list_folder(folder, ("Docs",)) if f.name == "Letter")
+    assert letter.data == b"letter"
+    note = next(f for f in list_folder(folder, ("Docs", "Deep")) if f.name == "Note")
+    assert note.data == b"note"
+
+
+def test_list_folder_of_an_archive_path_leaves_the_archives_entries_alone(tmp_path):
+    folder = _zip_members(tmp_path)
+    stripped = list_folder(folder, ("Docs",))
+    assert {f.name for f in folder.files()} == {"Top", "Docs/Letter", "Docs/Deep/Note"}
+    assert all(f not in folder.files() for f in stripped)
+
+
+def test_list_folder_of_an_archive_path_that_holds_nothing_lists_nothing(tmp_path):
+    folder = _zip_members(tmp_path)
+    assert list_folder(folder, ("Nope",)) == []
+    assert list_folder(folder, ("Docs", "Nope")) == []
+    assert list_folder(folder, ("Docs", "Letter")) == []

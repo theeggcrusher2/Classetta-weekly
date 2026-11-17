@@ -498,7 +498,10 @@ by Kind), and Special
 (Clean Up Window, Empty Trash, Erase Disk, Set Startup, Restart,
 Shutdown). File ▸ Get Info
 (key I) shows an item's size, type, creator, and its creation and
-modification dates. File ▸ Save Catalog (key S) writes what the
+modification dates. File ▸ Close (key W) closes the frontmost
+window: a Get Info, Display Contents or About window while one is
+up, else the Filer window, as Control-W does. File ▸ Save Catalog
+(key S) writes what the
 window browses — the whole volume, host folder or encoded container —
 to a Disk Tracker 2 catalog (`.dtc`) of its own; the command is off in
 the read-only windows Disk Tracker catalogs open in. File ▸ Extract

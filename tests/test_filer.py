@@ -697,6 +697,35 @@ def test_file_close_closes_the_front_auxiliary_window(harness):
     assert win in h.d.filer_windows             # the Filer stays up
 
 
+def test_file_close_closes_the_front_about_window(harness):
+    h = harness(disks=[_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    about = h.d.show_about_classetta()
+    h.settle()
+    h.d.filer_menu_choice(FILE_MENU_ID, 13)
+    h.settle()
+    assert about not in h.d.about_windows
+    assert h.d.front_aux_window is None
+    assert win in h.d.filer_windows             # the Filer stays up
+
+
+def test_file_close_closes_the_front_get_info_window(harness):
+    h = harness(disks=[_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    win.tree.setCurrentItem(_item(win, "Widget"))
+    h.settle()
+    win.get_info()
+    h.settle()
+    info = h.d.info_windows[0]
+    h.d.filer_menu_choice(FILE_MENU_ID, 13)
+    h.settle()
+    assert info not in h.d.info_windows
+    assert h.d.front_aux_window is None
+    assert win in h.d.filer_windows             # the Filer stays up
+
+
 def test_opening_about_makes_it_the_auxiliary_front_window(harness):
     h = harness(disks=[_volume()])
     win = h.d.open_filer(h.d.config.disks[0])
@@ -3085,9 +3114,36 @@ def test_an_archive_with_paths_lists_folders_instead_of_flat_paths(tmp_path,
     deep_win = _archive_window(h, docs_win, "Deep")
     assert [name for name, _ in _rows(deep_win)] == ["Note"]
     assert deep_win.path == ("Docs", "Deep")
+    assert deep_win.windowTitle() == "Deep"
     note = _item(deep_win, "Note")
     assert note.data(0, Qt.ItemDataRole.UserRole).name == "Note"
     assert deep_win.entries["Note"].name == "Note"
+    assert not h.d._alerts
+
+
+def test_a_file_and_a_folder_of_one_name_both_list_in_an_archive(tmp_path,
+                                                                  harness):
+    """A member "Docs" and members under "Docs/" in one archive: the
+    folder row draws the file beneath it, so neither row is lost."""
+    import zipfile
+    with zipfile.ZipFile(tmp_path / "Tree.zip", "w") as z:
+        z.writestr("Docs", b"whole")
+        z.writestr("Docs/Letter", b"letter")
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    arch = _archive_window(h, win, "Tree.zip")
+    assert _rows(arch) == [("Docs", "folder")]
+    docs = _item(arch, "Docs")
+    assert docs.data(0, Qt.ItemDataRole.UserRole) == ("Docs",)
+    assert docs.childCount() == 1
+    whole = docs.child(0)
+    assert whole.text(0) == "Docs" and whole.text(2) == "document"
+    f = whole.data(0, Qt.ItemDataRole.UserRole)
+    assert isinstance(f, MacFile) and f.name == "Docs" and f.data == b"whole"
+    docs_win = _archive_window(h, arch, "Docs")
+    assert _rows(docs_win) == [("Letter", "document")]
+    assert docs_win.path == ("Docs",)
     assert not h.d._alerts
 
 
@@ -3101,6 +3157,7 @@ def test_double_clicking_a_folder_of_members_opens_its_own_window(tmp_path,
     docs = _item(arch, "Docs")
     docs_win = _archive_window(h, arch, "Docs")
     assert docs_win is not arch
+    assert docs_win.windowTitle() == "Docs"
     _dblclick_row(arch, docs, h.settle)              # already open: brings it forward
     assert [w for w in h.d.filer_windows
             if w.volume is arch.volume and w.path == ("Docs",)] == [docs_win]
