@@ -555,8 +555,9 @@ class FilerWindow(_Hosted):
     def _add_rows(self, node: dict, parent: QTreeWidgetItem | None,
                   path: tuple[str, ...] = ()) -> None:
         """One level of the listing: folders of members first, then
-        files.  A folder of members draws no rows of its own beneath
-        it: it opens as a window, as a folder of a disk image's does."""
+        files.  A folder of members expands in place to show what's
+        inside, and double-clicking it opens its own window, as a
+        folder of a disk image's does."""
         for key in sorted(node, key=lambda k: (not isinstance(node[k], dict), k.lower())):
             folder = isinstance(node[key], dict)
             if folder:
@@ -729,6 +730,11 @@ class FilerWindow(_Hosted):
         item = self._row_file(items[0])
         if item is None:
             return set()
+        from disktracker.filer_adapter import DiskTrackerVolume
+        if isinstance(self.volume, DiskTrackerVolume):
+            # an index records what was on the disk, not the disk: a folder
+            # of records still browses, but nothing else opens yet
+            return {"open", "info"} if item.type == FOLDER else {"info"}
         actions = {"open", "info"}
         try:
             dlen, rlen = item.sizes()
@@ -778,6 +784,11 @@ class FilerWindow(_Hosted):
     def _open_item(self, f: MacFile, view: bool | None = None,
                    trace: bool | None = None) -> None:
         """Open f, following alias files to what they point at first."""
+        from disktracker.filer_adapter import DiskTrackerVolume
+        if isinstance(self.volume, DiskTrackerVolume) and f.type != FOLDER:
+            self._say(f"“{f.name}” is recorded in the index, not stored in it — "
+                      "nothing in a Disk Tracker catalog opens yet.")
+            return
         for _ in range(8):
             if not is_alias(f):
                 break
@@ -825,6 +836,9 @@ class FilerWindow(_Hosted):
 
     def display_contents(self) -> None:
         """Open a Resource/Content Viewer window for the selected file."""
+        from disktracker.filer_adapter import DiskTrackerVolume
+        if isinstance(self.volume, DiskTrackerVolume):
+            return                # disabled in the menu and a no-op here
         item = self.selected_item()
         if item is None:
             return

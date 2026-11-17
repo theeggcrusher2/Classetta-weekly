@@ -1458,6 +1458,66 @@ def test_file_save_catalog_disabled_for_disk_tracker_views(harness, tmp_path):
     assert _file_menu_save_enabled(h) is False
 
 
+def test_a_disk_tracker_catalog_is_read_only(harness, tmp_path, monkeypatch):
+    """The index records what was on the disk, not the disk: folders still
+    browse, but a file's row offers Get Info only — Open, View, Trace and
+    Display Contents are off, and a double-click says why."""
+    from disktracker import build_dtc
+    from disktracker.filer_adapter import DiskTrackerVolume
+    alpha = machfs.Volume()
+    alpha.name = "Alpha CD"
+    app = machfs.File()
+    app.type, app.creator = b"APPL", b"TEST"
+    app.rsrc = bytearray(FORK)
+    app.crdate = app.mddate = 4000000000
+    alpha["Game"] = app
+    img = tmp_path / "Alpha CD.hfs"
+    img.write_bytes(alpha.write(1024 * 1024))
+    cat = tmp_path / "catalog"
+    cat.write_bytes(build_dtc([str(img)]))
+
+    h = harness(disks=[])
+    win = h.d.open_filer(DiskTrackerVolume(cat))
+    h.settle()
+
+    def menu_enabled(index):
+        for menu, _cell in h.d.global_bar.cells():
+            if menu.title == "File":
+                return menu.items[index].enabled
+        raise AssertionError("the menu bar is showing no File menu")
+
+    row = _item(win, "Alpha CD")              # the disk folder row
+    win.tree.setCurrentItem(row)
+    h.settle()
+    assert menu_enabled(0) is True             # Open browses the folder
+
+    _dblclick(win, "Alpha CD", h.settle)
+    h.settle()
+    folder = next((w for w in h.d.filer_windows
+                   if w is not win and w.volume is win.volume), None)
+    assert folder is not None                  # the folder still opens
+    folder.tree.setCurrentItem(_item(folder, "Game"))
+    h.settle()
+    assert menu_enabled(0) is False            # no Open for the recorded app
+    assert menu_enabled(2) is True             # Get Info is what it does have
+    assert menu_enabled(3) is False            # Display Contents off
+    assert menu_enabled(4) is False            # View off
+    assert menu_enabled(5) is False            # Trace Traps off
+
+    launched = []
+    monkeypatch.setattr(h.d, "launch", lambda *a, **kw: launched.append((a, kw)))
+    _dblclick(folder, "Game", h.settle)
+    assert launched == []                       # nothing launches
+    assert any("recorded in the index" in a.text() for a in h.d._alerts)
+
+    # Get Info still opens for the recorded file, showing the index's record
+    lines = _get_info_lines(h, folder, "Game")
+    text = "\n".join(lines)
+    assert "Type: APPL" in text
+    assert "Creator: TEST" in text
+    assert "Created:" in text
+
+
 def test_file_save_catalog_cancelled_dialog_writes_nothing(harness, tmp_path, monkeypatch):
     h = harness(disks=[_volume()])
     win = h.d.open_filer(h.d.config.disks[0])
@@ -3272,3 +3332,280 @@ def test_a_member_that_would_escape_shows_inside_and_extracts_inside(
     # nothing was written outside the destination: the escape stayed refused
     assert sorted(p.name for p in tmp_path.iterdir()) == \
         ["Escape.zip", "out"]
+
+
+def test_get_info_shows_forks_type_creator_flags_and_dates(harness):
+    v = machfs.Volume()
+    v.name = "Browse"
+    item = machfs.File()
+    item.type, item.creator = b"APPL", b"TEST"
+    item.data = b"hello"
+    item.rsrc = bytearray(FORK)
+    item.flags = 0x0400
+    item.crdate, item.mddate = 400000000, 400000100
+    v["Widget"] = item
+    h = harness(disks=[v])
+    win = h.d.open_filer(v)
+    h.settle()
+    text = "\n".join(_get_info_lines(h, win, "Widget"))
+    assert "Data fork: 5 bytes" in text
+    assert "Resource fork:" in text
+    assert "Type: APPL" in text
+    assert "Creator: TEST" in text
+    assert "Flags: 0x0400" in text
+    assert "Created:" in text
+    assert "Modified:" in text
+
+
+def test_get_info_shows_an_items_own_icon(harness):
+    # an application with its own ICN# draws the full-size icon in the
+    # box, not the generic one (the item carries the custom-icon flag)
+    v = machfs.Volume()
+    v.name = "Browse"
+    item = machfs.File()
+    item.data, item.flags = b"Text.", 0x0400
+    item.rsrc = bytearray(build_fork([Resource(b"ICN#", 128, bytes([0xFF]) * 256)]))
+    v["Marked"] = item
+    h = harness(disks=[v])
+    win = h.d.open_filer(v)
+    h.settle()
+    win.tree.setCurrentItem(_item(win, "Marked"))
+    h.settle()
+    win.get_info()
+    h.settle()
+    info = h.d.info_windows[-1]
+    assert info._own_icon is not None
+    info.close()
+    h.settle()
+
+
+def test_file_open_through_the_menu_says_why_a_file_wont_launch(harness):
+    v = machfs.Volume()
+    v.name = "Browse"
+    doc = machfs.File()
+    doc.type, doc.creator, doc.data = b"TEXT", b"NOXX", b"Hello."
+    v["Letter"] = doc
+    h = harness(disks=[v])
+    win = h.d.open_filer(v)
+    h.settle()
+    win.tree.setCurrentItem(_item(win, "Letter"))
+    h.settle()
+    h.d.filer_menu_choice(FILE_MENU_ID, 1)          # File > Open
+    h.settle()
+    assert any("no application" in a.text() for a in h.d._alerts)
+
+
+def test_an_alias_without_an_original_says_so(harness):
+    from macrt.toolbox import aliases as al
+    from macrt.toolbox import files as fm
+    v = machfs.Volume()
+    v.name = "Browse"
+    record = al.Alias(volume="Browse", parid=fm.ROOT, name="Gone",
+                      type=b"APPL", creator=b"TEST")
+    link = machfs.File()
+    link.type, link.creator = b"alis", b"MACS"
+    link.flags = 0x8000
+    link.rsrc = bytearray(build_fork([Resource(b"alis", 0, data=record.pack())]))
+    v["Link"] = link
+    h = harness(disks=[v])
+    win = h.d.open_filer(v)
+    h.settle()
+    _dblclick(win, "Link", h.settle)
+    h.settle()
+    assert any("can't be found" in a.text() for a in h.d._alerts)
+
+
+def test_file_open_acts_on_the_front_filer_window(harness, monkeypatch):
+    alpha = machfs.Volume()
+    alpha.name = "Alpha"
+    first = machfs.File()
+    first.type, first.creator, first.rsrc = b"APPL", b"TEST", bytearray(FORK)
+    alpha["Alpha App"] = first
+    beta = machfs.Volume()
+    beta.name = "Beta"
+    second = machfs.File()
+    second.type, second.creator, second.rsrc = b"APPL", b"TEST", bytearray(FORK)
+    beta["Beta App"] = second
+    h = harness(disks=[alpha, beta])
+    win_a = h.d.open_filer(h.d.config.disks[0])
+    win_b = h.d.open_filer(h.d.config.disks[1])
+    h.settle()
+    launched = []
+    monkeypatch.setattr(h.d, "launch",
+                        lambda name, main, **kw: launched.append(name))
+
+    h.d.filer_front(win_b)
+    h.settle()
+    win_b.tree.setCurrentItem(_item(win_b, "Beta App"))
+    h.settle()
+    h.d.filer_menu_choice(FILE_MENU_ID, 1)          # File > Open
+    h.settle()
+    assert launched == ["Beta App"]                 # not the other window's
+
+    h.d.filer_front(win_a)
+    h.settle()
+    win_a.tree.setCurrentItem(_item(win_a, "Alpha App"))
+    h.settle()
+    h.d.filer_menu_choice(FILE_MENU_ID, 1)
+    h.settle()
+    assert launched == ["Beta App", "Alpha App"]
+
+
+def test_save_catalog_reports_an_export_failure(harness, tmp_path, monkeypatch):
+    h = harness(disks=[_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    out = tmp_path / "Out.dtc"
+    _save_dialog(monkeypatch, out)
+    import macrt.save_dtc as sd
+    monkeypatch.setattr(sd, "build_catalog",
+                        lambda volume: (_ for _ in ()).throw(OSError("disk full")))
+    win.save_catalog()
+    h.settle()
+    assert not out.exists()
+    assert any("disk full" in a.text() for a in h.d._alerts)
+
+
+def test_filer_icons_are_drawn_at_one_bit_depth(harness, tmp_path):
+    v = machfs.Volume()
+    v.name = "Browse"
+    app = machfs.File()
+    app.type, app.creator, app.rsrc = b"APPL", b"TEST", bytearray(FORK)
+    v["Widget"] = app
+    h = harness(disks=[v], depth=1)
+    win = h.d.open_filer(v)
+    h.settle()
+    assert not _item(win, "Widget").icon(0).isNull()
+
+
+def test_open_container_rejects_a_file_with_no_volume_header(tmp_path):
+    from macrt.macfile import open_container
+    p = tmp_path / "not-a-volume.bin"
+    p.write_bytes(b"just some bytes")
+    with pytest.raises(ValueError, match="not a recognized volume container"):
+        open_container(p)
+
+
+def test_a_password_protected_archive_is_refused_by_name(harness, tmp_path, monkeypatch):
+    import hashlib
+    import struct
+    import zipfile
+    from macextract._rc4 import rc4
+    from macextract.formats.pf import _crc32_raw
+
+    name = b"Secret"
+    payload = b"payload!!"
+    key = hashlib.md5(b"letmein").digest()[:5]
+    rec = (b"CSIT" + bytes([len(name)]) + name + bytes(255 - len(name))
+           + b"TEXT" + b"ttxt" + bytes(8) + bytes(16)
+           + struct.pack(">4I", len(payload), 0, 0, 0))
+    blob = (struct.pack(">4s5HI", b"CSIT", 2, 1, 1, 5, 0, 0)
+            + rc4(rec, key) + rc4(payload, key)
+            + struct.pack(">4sII", b"CSIT", _crc32_raw(payload), 0))
+    (tmp_path / "Secret.pf").write_bytes(blob)
+
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    win.tree.setCurrentItem(_item(win, "Secret.pf"))
+    h.settle()
+    dest = tmp_path / "out"
+    dest.mkdir()
+    _dir_dialog(monkeypatch, dest)
+    win.extract()
+    h.settle()
+    assert any("password" in a.text() for a in h.d._alerts)
+    assert list(dest.iterdir()) == []
+
+
+def test_extracting_a_crc_damaged_member_names_it(harness, tmp_path, monkeypatch):
+    import zipfile
+    p = tmp_path / "Damaged.zip"
+    with zipfile.ZipFile(p, "w", compression=zipfile.ZIP_STORED) as z:
+        z.writestr("Inner", b"a member with enough bytes to go looking for")
+    raw = bytearray(p.read_bytes())
+    at = raw.find(b"a member with")
+    assert at != -1
+    raw[at] ^= 0xFF                              # corrupt the stored bytes
+    p.write_bytes(bytes(raw))
+
+    args = parse_args([str(p), "--filer"])
+    _, _, filers, error = open_targets(args)
+    assert error is None
+    h = harness(disks=[])
+    win = h.d.open_filer(filers[0])
+    h.settle()
+    dest = tmp_path / "out"
+    dest.mkdir()
+    _dir_dialog(monkeypatch, dest)
+    win.extract()
+    h.settle()
+    assert any("Inner" in a.text() for a in h.d._alerts)
+
+
+def _dt_v1_catalog(disk_name, items):
+    """A Disk Tracker 1.x catalog (see disktracker/tests/test_dtc.py):
+    a disk record and its items, as a real DT1 file holds them."""
+    h = bytearray(0x37e)
+    h[0:8] = b'disktrak'
+    struct.pack_into('>I', h, 0x0C, 1)
+    vol = bytearray(76)
+    struct.pack_into('>H', vol, 0, 0xa000)
+    vol[2:6] = b'\xff\xff\xff\xff'
+    struct.pack_into('>II', vol, 0x12, 2700000000, 2710000000)
+    struct.pack_into('>H', vol, 0x1a, 0)
+    struct.pack_into('>I', vol, 0x1c, len(items))
+    struct.pack_into('>I', vol, 0x20, len(items))
+    nb = disk_name.encode('mac_roman')
+    vol[0x24] = len(nb)
+    vol[0x25:0x25 + len(nb)] = nb
+    body = bytearray(h) + bytes(vol)
+    for it in items:
+        fb = bytearray(36)
+        fb[2:6], fb[6:10] = it.get('type', b'TEXT'), it.get('creator', b'ttxt')
+        struct.pack_into('>I', fb, 10, it.get('size', 100))
+        struct.pack_into('>II', fb, 18, 1000000, 2000000)
+        struct.pack_into('>HII', fb, 26, it.get('depth', 1),
+                         it.get('items', 0), it.get('descendants', 0))
+        inb = it['name'].encode('mac_roman')
+        fb.append(len(inb))
+        body += bytes(fb) + inb
+    return bytes(body)
+
+
+def test_a_dt1_catalog_opens_read_only_through_the_filer(harness, tmp_path):
+    cat = tmp_path / "OldCatalog.dt1"
+    cat.write_bytes(_dt_v1_catalog("Old Disk", [
+        {"name": "An App", "type": b"APPL", "creator": b"TEST",
+         "size": 4321, "depth": 1},
+    ]))
+
+    h = harness(disks=[])
+    win = h.d.open_filer(_dt_volume(cat))
+    h.settle()
+
+    def menu_enabled(index):
+        for menu, _cell in h.d.global_bar.cells():
+            if menu.title == "File":
+                return menu.items[index].enabled
+        raise AssertionError("the menu bar is showing no File menu")
+
+    row = _item(win, "Old Disk")
+    win.tree.setCurrentItem(row)
+    h.settle()
+    assert menu_enabled(0) is True             # the folder still browses
+
+    _dblclick(win, "Old Disk", h.settle)
+    h.settle()
+    folder = next((w for w in h.d.filer_windows
+                   if w is not win and w.volume is win.volume), None)
+    assert folder is not None
+    folder.tree.setCurrentItem(_item(folder, "An App"))
+    h.settle()
+    assert menu_enabled(0) is False            # recorded, not a disk
+    assert menu_enabled(2) is True             # Get Info is what it does have
+
+
+def _dt_volume(path):
+    from disktracker.filer_adapter import DiskTrackerVolume
+    return DiskTrackerVolume(path)
