@@ -12,7 +12,8 @@ from PyQt6.QtTest import QTest
 
 from conftest import LB, NO_MODS, Recorder
 from macrt.demo import finish, open_targets, parse_args
-from macrt.macfile import (ArchiveFolder, ContainerFolder, HostFolder, MacFile, image_kind,
+from macrt.macfile import (ArchiveFolder, ContainerFolder, HostFolder, LazyArchiveFile,
+                           MacFile, image_kind,
                            is_alias, load_volume, open_disks)
 from macrt.resfork import build_fork, Resource, resPurgeable
 from macrt.toolbox import constants as k
@@ -20,7 +21,7 @@ from macrt.ui import theme
 from macrt.ui.filer import (ARCHIVE_ICON, FILE_MENU_ID, SPECIAL_MENU_ID, FilerOptions,
                              GetInfoWindow, _container_icon)
 from macrt.ui.stdfile import DISK_ICON, DOCUMENT_ICON, FOLDER_ICON
-from builders import binhex
+from builders import binhex, vers
 from test_files import FORK, apple_single, macbinary
 
 
@@ -2861,3 +2862,145 @@ def test_a_failure_three_levels_deep_names_the_item_that_failed(harness,
     assert [w for w in h.d.filer_windows
             if w is not win1 and w is not win2[0]] == []
     assert win1.isVisible() and win2[0].isVisible()
+
+
+# -- version resources in Get Info (task 30) --------------------------
+
+def _versioned_volume() -> machfs.Volume:
+    """A volume whose files carry 'vers' resources in every shape the
+    Get Info window meets: both IDs, one, none, and two broken."""
+    v = machfs.Volume()
+    v.name = "Browse"
+    both = machfs.File()
+    both.type, both.creator = b"APPL", b"TEST"
+    both.rsrc = bytearray(build_fork([
+        Resource(b"vers", 1, vers("1.0", "1.0, a test app")),
+        Resource(b"vers", 2, vers("1.0", "Second edition, for System 7"))]))
+    v["Versioned"] = both
+    one = machfs.File()
+    one.type, one.creator = b"APPL", b"TEST"
+    one.rsrc = bytearray(build_fork([Resource(b"vers", 1, vers("2.1", "Build 7"))]))
+    v["Single"] = one
+    plain = machfs.File()
+    plain.type, plain.creator = b"TEXT", b"TEST"
+    plain.data = b"Hello."
+    v["Plain"] = plain
+    cut = machfs.File()
+    cut.type, cut.creator = b"APPL", b"TEST"
+    cut.rsrc = bytearray(build_fork([Resource(b"vers", 1, b"\x01\x00")]))
+    v["Cut Short"] = cut
+    junk = machfs.File()
+    junk.type, junk.creator = b"APPL", b"TEST"
+    junk.rsrc = bytearray(b"not a resource fork")
+    v["Junk"] = junk
+    return v
+
+
+def _get_info_lines(h, win, name) -> list[str]:
+    """Get Info opened for name, its lines, and the window closed
+    again so the next call starts clean."""
+    win.tree.setCurrentItem(_item(win, name))
+    h.settle()
+    win.get_info()
+    h.settle()
+    info = h.d.info_windows[-1]
+    lines = list(info._lines)
+    info.close()
+    h.settle()
+    return lines
+
+
+def test_get_info_shows_both_version_messages(harness):
+    h = harness(disks=[_versioned_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    lines = _get_info_lines(h, win, "Versioned")
+    assert lines[0] == "Name: Versioned"
+    # version resource 2's message sits directly under the file's name
+    assert lines[1] == "Second edition, for System 7"
+    assert lines[2].startswith("Kind:")
+    # version resource 1's message is the window's version field
+    assert "Version: 1.0, a test app" in lines
+
+
+def test_get_info_shows_only_the_version_field_for_one_version_resource(harness):
+    h = harness(disks=[_versioned_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    lines = _get_info_lines(h, win, "Single")
+    assert lines[1].startswith("Kind:")          # no message under the name
+    assert "Version: Build 7" in lines
+
+
+def test_a_file_without_a_version_resource_gets_the_same_window(harness):
+    h = harness(disks=[_versioned_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    lines = _get_info_lines(h, win, "Plain")
+    assert not any(line.startswith("Version:") for line in lines)
+    assert lines[1].startswith("Kind:")
+    # and the window is the size it has always been
+    win.tree.setCurrentItem(_item(win, "Plain"))
+    h.settle()
+    win.get_info()
+    h.settle()
+    assert h.d.info_windows[-1]._content_size == (320, 236)
+    h.d.info_windows[-1].close()
+    h.settle()
+
+
+def test_a_malformed_version_resource_never_crashes_get_info(harness):
+    h = harness(disks=[_versioned_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    for name in ("Cut Short", "Junk"):
+        lines = _get_info_lines(h, win, name)
+        assert lines[0] == f"Name: {name}"
+        assert not any(line.startswith("Version:") for line in lines)
+        assert lines[1].startswith("Kind:")
+    assert not h.d._alerts
+
+
+def test_a_version_resource_in_a_disk_image_file_shows_in_get_info(tmp_path,
+                                                                   harness):
+    inner = _versioned_volume()
+    (tmp_path / "Outer.dsk").write_bytes(inner.write(size=800 * 1024))
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    _dblclick(win, "Outer.dsk", h.settle)
+    h.settle()
+    image_wins = [w for w in h.d.filer_windows if w is not win]
+    assert len(image_wins) == 1
+    lines = _get_info_lines(h, image_wins[0], "Versioned")
+    assert lines[1] == "Second edition, for System 7"
+    assert "Version: 1.0, a test app" in lines
+
+
+def test_a_version_resource_in_an_archive_member_shows_when_get_info_reads_it(
+        harness, tmp_path):
+    fork = build_fork([
+        Resource(b"vers", 1, vers("3.2", "Third pass")),
+        Resource(b"vers", 2, vers("3.2", "Third pass, inside an archive"))])
+    (tmp_path / "Packed.pit").write_bytes(
+        _packit([("Versioned", b"code", fork, b"TEXT", b"TEST")]))
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    _dblclick(win, "Packed.pit", h.settle)
+    h.settle()
+    archive_win = [w for w in h.d.filer_windows if w is not win]
+    assert len(archive_win) == 1
+    member = archive_win[0].entries["Versioned"]
+    assert isinstance(member, LazyArchiveFile) and member.forks_pending
+    # a window built without decoding: no version lines, fork untouched
+    pending = GetInfoWindow(h.d, member)
+    assert pending._lines[0] == "Name: Versioned"
+    assert not any(line.startswith("Version:") for line in pending._lines)
+    assert member.forks_pending
+    pending.close()
+    # through the menu: Get Info decodes the member first, so both show
+    lines = _get_info_lines(h, archive_win[0], "Versioned")
+    assert lines[1] == "Third pass, inside an archive"
+    assert "Version: Third pass" in lines
+    assert not member.forks_pending

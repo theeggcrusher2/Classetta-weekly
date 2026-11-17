@@ -269,7 +269,7 @@ Preserve existing behavior unless a task explicitly changes it. If the codebase 
   - Test progressively deeper nesting, including a case with multiple container types.
   - Ensure failures identify the level or item that could not be opened.
 
-- [ ] **30. Show version resources in Get Info windows**
+- [x] **30. Show version resources in Get Info windows**
   - When a file's resource fork carries `vers` resources, show the short version string (ID 1) and the long version string (ID 2) in its Get Info window, as the Finder's Get Info does.
   - Files without `vers` resources show neither field; the window is unchanged, and missing or malformed resources never crash it.
   - Works for files reached any way: on a volume, inside a disk image, inside an archive.

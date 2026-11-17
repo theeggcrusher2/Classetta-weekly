@@ -41,7 +41,8 @@ from ..macfile import (ArchiveFolder, ContainerFolder, HostFolder, LazyArchiveFi
                        archive_name, container_contents, creator_application,
                        extract_archive, image_kind,
                        is_alias, is_control_panel, launch_target, list_folder,
-                       load_volume, open_container, image_volume)
+                       load_volume, open_container, image_volume,
+                       version_messages)
 from ..process import size_resource
 from ..m68k.segload import has_code, why_no_code
 from ..resfork import InvalidForkError, is_fork, read_fork
@@ -706,6 +707,11 @@ class FilerWindow(_Hosted):
         item = self.selected_item()
         if item is None:
             return
+        # A member whose forks are still in its archive decodes here,
+        # behind a busy window, so its version resource can be shown.
+        item = self._materialised(item)
+        if item is None:
+            return
         win = GetInfoWindow(self.display, item)
         self.display.info_windows.append(win)
         self.display.front_aux_window = win
@@ -1247,8 +1253,15 @@ class GetInfoWindow(AboutWindow):
     """A Get Info window for a Filer item, modeled on System 6 Get Info boxes."""
 
     def __init__(self, display: Display, item: MacFile, parent: QWidget | None = None):
+        id1, id2 = version_messages(item) if item.type != FOLDER else (None, None)
         lines = [f"Name: {item.name}"]
+        if id2:
+            # The Finder puts version resource 2's message beneath the
+            # file's name (Inside Macintosh, Finder Interface).
+            lines.append(id2)
         lines.append(f"Kind: {_kind(item) if item.type != FOLDER else 'Folder'}")
+        if id1:
+            lines.append(f"Version: {id1}")
         if is_alias(item):
             original = alias_original(item, getattr(getattr(display, "system", None),
                                                     "files", None))
@@ -1286,7 +1299,10 @@ class GetInfoWindow(AboutWindow):
             title_pixmap = q.pixmap(16, 16) if q is not None else None
         super().__init__(display, f"{item.name} Info", lines,
                          title_icon=item_icon(item) or _generic_icon(item),
-                         content_size=(320, 236), parent=parent,
+                         # room for the two version lines when there are any
+                         content_size=(320, 236 + 18 * ((1 if id1 else 0)
+                                                        + (1 if id2 else 0))),
+                         parent=parent,
                          title_pixmap=title_pixmap)
         self.item = item
         # The item's own icon at its full size, for the box; None keeps

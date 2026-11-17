@@ -41,7 +41,7 @@ import machfs.main
 from machfs.btree import unpack_extent_record
 
 from . import chd, dmg, dart, mdf, moof, qcow2, vhd, vmdk
-from .resfork import InvalidForkError, is_fork, open_fork
+from .resfork import InvalidForkError, is_fork, open_fork, read_fork
 
 APPLE_SINGLE = 0x00051600
 APPLE_DOUBLE = 0x00051607
@@ -520,6 +520,56 @@ def _host_path(volume, node):
         return store.path(node)
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Version resources
+# ---------------------------------------------------------------------------
+
+def _pstr(body: bytes, at: int) -> str | None:
+    """The Pascal string at at in body, None when it starts past the
+    body's end or runs off it."""
+    if at < 0 or at >= len(body):
+        return None
+    n = body[at]
+    if at + 1 + n > len(body):
+        return None
+    return body[at + 1:at + 1 + n].decode("mac_roman")
+
+
+def _vers_message(body: bytes) -> str | None:
+    """What a 'vers' record says: its long message, or its short version
+    string when there is no long one; None for a record too short or
+    empty to hold either."""
+    if len(body) < 7:                    # six header bytes, then the short pascal string
+        return None
+    return _pstr(body, 7 + body[6]) or _pstr(body, 6) or None
+
+
+def version_messages(f: MacFile | None) -> tuple[str | None, str | None]:
+    """f's version messages as (ID 1, ID 2), what the Finder's Get Info
+    shows: ID 1's in the version field, ID 2's beneath the file's name.
+
+    None for a record that isn't there or can't be read: a fork that
+    won't open, a truncated record or garbage never raises.  A member
+    whose forks are still inside its archive is left undecoded — the
+    Filer materialises it behind a busy window before asking."""
+    if f is None:
+        return None, None
+    if isinstance(f, LazyArchiveFile) and f.forks_pending:
+        return None, None
+    rsrc = getattr(f, "rsrc", b"")
+    if not rsrc:
+        return None, None
+    try:
+        resources = read_fork(bytes(rsrc))
+    except Exception:
+        return None, None
+    messages: dict[int, str | None] = {}
+    for rid in (1, 2):
+        r = next((r for r in resources if r.type == b"vers" and r.id == rid), None)
+        messages[rid] = _vers_message(r.data) if r is not None else None
+    return messages[1], messages[2]
 
 
 # ---------------------------------------------------------------------------
