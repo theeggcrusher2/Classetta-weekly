@@ -137,44 +137,104 @@ Open questions, to settle before implementing:
 - UDF versions: how far up the ECMA-167 ladder the reader goes before
   refusing by name; whether packed-sector DVDs are in scope.
 
-## 4. Reuse macrt.hfsplus for the Disk Tracker's duplicated walk
+## 4. Reuse macrt's HFS and HFS Plus readers in the Disk Tracker
 
-`disktracker/index.py` carries its own copy of the HFS+ catalog walk —
-`_read_hfsplus` (line 274) and its `_hfsplus_*` helpers (lines 146–273) —
-duplicating what `macrt/hfsplus.py` `read_hfsplus` (line 147) does. The
-HFS walk (`_read_hfs`, line 52) duplicates `macrt/macfile.py` `_read_hfs`
-(line 857) the same way. `macrt/macfile.py` itself still carries a dead
-`_read_hfs_plus` (line 989); nothing calls it since lines 1179–1180
-switched to `macrt.hfsplus.read_hfsplus`. The canonical readers are the
-ones the running emulator uses; the tracker's copies exist because it
-needs name, dates, type/creator, size and invisibility, and no forks.
+`disktracker/index.py` carries its own copy of two catalog walks. The
+canonical readers are the ones the running emulator uses; the tracker's
+copies exist because it needs name, dates, type/creator, size and
+invisibility, and no forks.
 
-What it looks like when done:
+Duplication map, as of this writing:
 
-- The tracker reads images through the canonical readers and translates
-  what they return into the dict tree `_emit` consumes (the volume's
-  depth-1 children, depth set, pre-order); nothing about the catalog
-  changes — same tree shape, same dates, same invisibility rule.
-- The dead `_read_hfs_plus` in `macrt/macfile.py` is removed.
-- The invisible-entry filtering matches the Filer's view exactly: the
-  tracker's catalog shows no invisible entries, just as the Filer shows
-  none.
-- `_read_iso` stays as the shared ISO reader — the Filer's fallback in
-  `load_volume` imports it from here today; task 3 may move it into
-  macrt so macrt stops importing upward from disktracker.
-- `disktracker/tests/test_index.py` stays green; no new fixtures needed
-  beyond generated ones.
+- HFS: `disktracker/index.py::_read_hfs` (line 52) ≈
+  `macrt/macfile.py::_read_hfs` (line 857) — byte-for-byte modulo two
+  helpers (`_extent_pairs` vs machfs's `unpack_extent_record`,
+  `_decode_mac_roman` vs `bytes.decode("mac_roman")`) and the Desktop
+  files. macrt's copy pops `Desktop`/`Desktop DB`/`Desktop DF`; the
+  tracker's does not, so DT catalogs today index the Finder's Desktop
+  files and the Filer doesn't show them.
+- HFS Plus: `disktracker/index.py::_read_hfsplus` (line 274) and its
+  `_hfsplus_node`, `_hfsplus_leaf_records`, `_hfsplus_spans`,
+  `_hfsplus_fork_data`, `_hfsplus_overflow`, `_hfsplus_text`,
+  `_hfsplus_record` (lines 146–273) ≈ `macrt/hfsplus.py::read_hfsplus`
+  (line 147), which `macrt/macfile.py::load_volume` calls (lines 1179
+  and 1180). The tracker's drops invisible entries (fdFlags bit 0x4000);
+  the canonical reader drops invisible entries, the HFS+ Private Data
+  catalog directory and the Desktop files — so the tracker's view and
+  the Filer's view differ by the Desktop files today.
+- `macrt/macfile.py::_read_hfs_plus` (line 989) is dead — nothing calls
+  it; `_read_hfs` (line 857) stays.
+
+Steps:
+
+1. Delete the dead `macrt/macfile.py::_read_hfs_plus`.
+2. Write one adapter in `disktracker/index.py`,
+   `_volume_tree(vol: machfs.Volume) -> (name, crdate, mddate, root)`:
+   walk `vol`'s `Folder`s and `File`s; a folder's dict keeps `kind`,
+   `name`, `crdate`, `mddate`, `children`; a file's dict adds `type`,
+   `creator`, and `size = sum(f.sizes())` (both readers build files as
+   `macrt.macfile.OnDisk`, whose `sizes()` reports data and resource
+   lengths without reading the forks). Skip nothing — the canonical
+   readers already filtered invisible and Desktop entries. HFS offers
+   no `INVISIBLE` fdFlags; whatever macrt's `_read_hfs` pops is what the
+   tracker gets.
+3. Rewrite `_read_fs` to:
+   - HFS: `macrt.macfile._read_hfs(data)` — it scans for the MDB itself.
+     If it raises, try HFS Plus (today's order: a hybrid disc's Mac view
+     is its HFS one). The embedded HFS+-in-an-HFS-wrapper case is
+     unchanged from today (the HFS copy inside the wrapper is indexed,
+     not the embedded volume) unless deliberately addressed.
+   - HFS Plus: keep `_find_hfsplus(data)` (the 512-step scan for
+     `H+`/`HX` whose fields hold up) to locate the volume, and read it
+     with `read_hfsplus(data[start:])`; its `vol.name`, `vol.crdate`,
+     `vol.mddate` are set.
+   - ISO 9660: `_read_iso` stays, untouched — `load_volume` imports it
+     from here; task 3 may move it into macrt so macrt stops importing
+     upward from disktracker.
+4. Delete the tracker's copies (`_read_hfs`, `_read_hfsplus`,
+   `_hfsplus_*`, `_extent_pairs`, `_records`, `_node`, `_leaf_records`)
+   and `_find_hfs` if unused after step 3. `index.py`'s "Standard
+   library only" header note ("MFS volumes are recognized and refused")
+   goes with them: DT will import `machfs` and `macrt.hfsplus` —
+   `machfs` is already a hard dependency of the emulator, both live in
+   this project — so rewrite the header to say what DT now depends on.
+5. Dates: `read_hfsplus` applies `_gmt_to_local`, so created/modified
+   in HFS+-sourced catalogs move from raw GMT (today) to local time —
+   the same values the Filer's Get Info shows, and what a real Mac
+   displays. Accept this; note it in the changelog-style comment where
+   the adapter lives.
+6. Invariant, asserted in `disktracker/tests/test_index.py` on the
+   generated fixtures:
+   - catalog contains no invisible entries and no `Desktop`, `Desktop DB`
+     or `Desktop DF` (HFS and HFS+ images both);
+   - a file's `size` is the sum of its forks, without reading them;
+   - names match the Filer's view (HFS+: `_mac_name`'s result).
+
+Acceptance:
+
+- `disktracker/index.py` contains no copy of either catalog walk;
+  `macrt/macfile.py` contains no `_read_hfs_plus`.
+- `disktracker/tests/test_index.py` passes with the assertions above;
+  the HFS+ fixture's expected dates change by the GMT offset of the
+  test machine's timezone (tests normalize, or CI runs at UTC).
+- A catalog built from a generated HFS+ image and the same image
+  browsed in the Filer list the same items.
+- No behavior change for ISO catalogs; the generated-ISO fixture
+  unchanged.
 
 Open questions:
 
-- Where the dict translation lives: disktracker as a local adapter, or a
-  shared helper in macrt both sides use. Task 3 will want the same shape
-  for ISO/UDF, which argues for macrt; the tracker arguing for keeping
-  macrt at "a Volume is a Volume" argues against.
-- Whether the HFS copy moves the same way — the HFS duplication is
-  byte-for-byte modulo two helpers, so reusing `macrt/macfile.py`
-  `_read_hfs` drops it for free; a generated HFS fixture is needed either
-  way.
+- Whether to move `_read_iso` into macrt as part of this (its Filer
+  fallback would then import downward) or leave it for task 3 — decide
+  tasks 3 and 4 together.
+- Whether opening every image through `macrt.macfile.load_volume`
+  instead of the signature scans is worth doing here: it would also fix
+  the embedded HFS+-in-HFS wrapper case, make DT index UDIF/DART/MOOF
+  images it can't open today, and need a new wrapper-case test. Out of
+  scope unless the wrapper case matters enough to want it.
+- Date values in `.dtc` files change for HFS+ images (raw GMT → local).
+  If any caller of `build_dtc` depends on raw GMT, this has to be an
+  adapter-side decision, not an accident.
 
 ## 5. Colour icons in the window titles, the About Classetta app list, and the large machine logo
 

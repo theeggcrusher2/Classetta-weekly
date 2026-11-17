@@ -291,16 +291,22 @@ can read them in its own way.
   hint.
 * **Disk images.** `load_volume` opens HFS disk images, raw, DiskCopy
   4.2, behind an Apple partition map or of a CD's whole 2352-byte
-  sectors, into machfs's form, walking their catalog and extents trees
-  with machfs's B*-tree reader but leaving each file's forks on the disk
-  until they're read (a CD's image, or any of 16 MB or more, is mapped
-  rather than read in, but for the data of a raw CD image's sectors). It
-  reads MFS (400K) disks into the same form: their one flat directory,
-  each fork followed through the block map. HFS Plus volumes, on their
-  own, in an HFS wrapper or in an `Apple_HFS` or `Apple_HFSX` partition,
-  are read into it too (`_read_hfs_plus`, from Technote 1150), with their
+  sectors, into machfs's form. macrt walks the catalog and extents trees
+  itself (`machfs.btree.unpack_extent_record` reads the extent records;
+  the leaf records are reached down each leaf's forward link, with a
+  guard against a damaged tree linking round), and each file's forks
+  stay on the disk until they're read (a CD's image, or any of 16 MB or
+  more, is mapped rather than read in; a raw CD image's 2048 bytes of
+  data per 2352-byte sector is all that is read). It reads MFS (400K)
+  disks into the same form: their one flat directory, each fork followed
+  through the block map. HFS Plus volumes, on their own, in an HFS
+  wrapper or in an `Apple_HFS` or `Apple_HFSX` partition, are read into
+  it too (`macrt.hfsplus.read_hfsplus`, from Technote 1150), with their
   dates made local, hard links made the files they link to, and names
-  HFS can't hold cut short and given their catalog node ID. A MOOF image
+  HFS can't hold cut short and given their catalog node ID. A disc with
+  no Mac volume but an ISO 9660 one opens as a mount holding the files
+  its directories list — as ISO 9660 (latin-1 names, `;1` stripped),
+  through the same ISO reader the Disk Tracker uses, not Rock Ridge. A MOOF image
   of a floppy's tracks is decoded to its sectors first (`macrt.moof`):
   the GCR bytes found in each track's bits, and each sector's three bytes
   to four of them, unmixed from the checksum that runs through them. The
