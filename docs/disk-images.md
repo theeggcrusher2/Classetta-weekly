@@ -8,7 +8,7 @@ will and will not open.
 
 | Format | Reader | Notes |
 | --- | --- | --- |
-| Raw HFS/MFS/HFS+ volume, Apple partition map, CD-ROM | `macrt.macfile` | Detected from the volume header or partition map; a raw CD image (`.iso`, `.cdr`, `.toast`, or 2352-byte Mode-1 sectors) mounts as a CD-ROM with its HFS/HFS+ contents. |
+| Raw HFS/MFS/HFS+ volume, Apple partition map, CD-ROM | `macrt.macfile` | Detected from the volume header or partition map; a raw CD image (`.iso`, `.cdr`, `.toast`, or 2352-byte Mode-1 sectors) mounts as a CD-ROM: its HFS/HFS+ contents, or — for a disc with no Mac volume — its ISO 9660 files, read through the `disktracker.index` ISO reader (ISO names, not Rock Ridge's). |
 | DiskCopy 4.2 (`.dsk`) | `macrt.macfile` | The 84-byte header is stripped. |
 | MOOF/NDIF track images | `macrt.moof` | Tags and tracks are read as stored. |
 | CHD (`.chd`) | `macrt.chd` | Versions 3, 4 and 5; compression none, zlib and LZMA. |
@@ -58,11 +58,13 @@ and a file in one of them will not browse as a volume.
   track (plus any number of audio tracks, which hold nothing to browse)
   opens through the `.mdf`/`.mds` pair instead, and a single-track data
   disc through a raw `.toast`.
-- **ISO 9660 (with or without Rock Ridge) and UDF filesystems**: not
-  parsed. A CD-ROM's HFS/HFS+ partition (or Apple partition map) is read;
-  an ISO-9660- or UDF-native disc mounts as a CD-ROM, but its files are
-  not browsable. This is by design: HFS and HFS Plus are what composed
-  Mac CDs were mastered as.
+- **Rock Ridge extensions and UDF**: not parsed. ISO 9660 itself is read:
+  a disc with no Mac volume opens with the files its directories hold
+  (via the `disktracker.index` ISO reader, the same one the Disk Tracker
+  uses), but as ISO 9660 — names in latin-1 with `;1` stripped, no
+  Rock Ridge NM entries, so a disc mastered with them shows its ISO
+  names. UDF (ECMA-167), which common DVDs with no Mac volume carry, is
+  not read at all; such a disc mounts with nothing to browse.
 - **Multi-track CD images with audio tracks**: not played or read. The
   driver answers the audio calls with `paramErr`, and a disc's audio
   tracks are never exposed to the running program.

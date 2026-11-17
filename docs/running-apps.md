@@ -145,7 +145,7 @@ it works it out from the contents:
 | Executor | `App` next to `%App` | Executor's host folder |
 | a resource fork on its own | `App.rsrc`, or any file that is one | `DeRez`/`Rez` tooling, resource editors |
 | a macOS file | `App` itself, through `App/..namedfork/rsrc` | a Mac running macOS |
-| an HFS, HFS Plus or MFS disk image | `Disk.dsk`, `.img`, `.image`, `.hfs`, `.iso`, `.cdr`, `.toast` | raw and DiskCopy 4.2 floppy images (800K and 1.4MB HFS, 400K MFS), with each sector's 12 tag bytes or without them, HFS and HFS Plus CD images, partitioned hard disk images. A CD's image, or any other of 16 MB or more, is mapped rather than read in, and a file's forks are read from it only when they're wanted, so only what's used of it is in memory. A raw CD image, which keeps each of the disc's 2352-byte sectors whole, is read in as the 2048 bytes of data in each. |
+| an HFS, HFS Plus or MFS disk image | `Disk.dsk`, `.img`, `.image`, `.hfs`, `.iso`, `.cdr`, `.toast` | raw and DiskCopy 4.2 floppy images (800K and 1.4MB HFS, 400K MFS), with each sector's 12 tag bytes or without them, HFS and HFS Plus CD images, partitioned hard disk images. A disc with no Mac volume but an ISO 9660 one also opens, with its files browsable but nothing to launch. A CD's image, or any other of 16 MB or more, is mapped rather than read in, and a file's forks are read from it only when they're wanted, so only what's used of it is in memory. A raw CD image, which keeps each of the disc's 2352-byte sectors whole, is read in as the 2048 bytes of data in each. |
 | a MOOF floppy image | `Disk.moof` | Applesauce, imaging a 400K or 800K floppy's tracks bit by bit |
 
 For AppleDouble and the emulator folders, give macrt the data-fork file
