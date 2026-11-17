@@ -259,7 +259,7 @@ Preserve existing behavior unless a task explicitly changes it. If the codebase 
   - 'Fast' RLE and stored chunks are read; the tags are stripped and the plain 512-byte sector stream goes through the existing volume path (400K MFS, 800K and 1440K HFS mount).
   - Done: `macrt.dart` decodes 'fast' RLE (word counts, a negative count repeating the following word) and stored (`0xffff`) chunks; the Kind column says "DART disk image" and a double-click opens the volume instead of launching the DiskMaker application. The 'best' LZHUF compression and the Lisa, Apple II (ProDOS) and MS-DOS disk types are recognised and refused by name. tests/test_dart.py plus a Filer double-click test; docs/disk-images.md updated. The nine guided-tour images on the ADC Developer CD (Volume 01) decode and mount as volumes (MFS for the 400K one, HFS elsewhere).
 
-- [ ] **28. Extend drill-down to newly supported formats**
+- [x] **28. Extend drill-down to newly supported formats**
   - Allow newly supported archives and disk images to participate in nested browsing.
   - Add one format at a time or in small tested batches.
   - Track nesting and report failures without losing access to the parent Filer window.

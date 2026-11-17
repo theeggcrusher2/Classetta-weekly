@@ -2580,3 +2580,182 @@ def test_a_vhd_disk_image_in_the_filer_opens_as_a_volume(tmp_path, harness):
     assert opened[0].volume.name == "VHD Disk"
     assert sorted(n for n, _ in opened[0].volume.items()) == ["readme.txt"]
     assert not h.d._alerts
+
+
+# -- drill-down through the newly supported formats (task 28) ------
+
+def _drill_into_an_archived_image(tmp_path, harness, member: str, body: bytes,
+                                  volume: str, files: list[str]):
+    """A zip holding body as member opens from the host folder, the member
+    drills into its volume, and both parent windows stay open.  The
+    harness used, for a caller with more to do with it."""
+    import zipfile
+    with zipfile.ZipFile(tmp_path / "Nest.zip", "w") as z:
+        z.writestr(member, body)
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    _dblclick(win, "Nest.zip", h.settle)
+    h.settle()
+    archive_win = [w for w in h.d.filer_windows if w is not win]
+    assert len(archive_win) == 1
+    _dblclick(archive_win[0], member, h.settle)
+    h.settle()
+    opened = [w for w in h.d.filer_windows
+              if w is not win and w is not archive_win[0]]
+    assert len(opened) == 1
+    assert isinstance(opened[0].volume, machfs.Volume)
+    assert opened[0].volume.name == volume
+    assert sorted(n for n, _ in opened[0].volume.items()) == files
+    assert not h.d._alerts
+    # the archive window and the window it was opened from are not lost
+    assert win.isVisible() and archive_win[0].isVisible()
+    return h
+
+
+def test_a_raw_hfs_image_inside_an_archive_opens_as_a_volume(tmp_path, harness):
+    inner = machfs.Volume()
+    inner.name = "Inner"
+    doc = machfs.File()
+    doc.type, doc.creator, doc.data = b"TEXT", b"TEST", b"Hello."
+    inner["Letter"] = doc
+    _drill_into_an_archived_image(tmp_path, harness, "Outer.dsk",
+                                  inner.write(size=800 * 1024),
+                                  "Inner", ["Letter"])
+
+
+def test_a_dart_image_inside_an_archive_opens_as_a_volume(tmp_path, harness):
+    from test_dart import _dart, _volume_raw
+    _drill_into_an_archived_image(tmp_path, harness, "Tour of the Macintosh",
+                                  _dart(_volume_raw()),
+                                  "Apple Disk", ["readme.txt"])
+
+
+def test_a_vhd_image_inside_an_archive_opens_as_a_volume(tmp_path, harness):
+    from test_vhd import _fixed_vhd, _volume_raw
+    _drill_into_an_archived_image(tmp_path, harness, "Outer.vhd",
+                                  _fixed_vhd(_volume_raw()),
+                                  "VHD Disk", ["readme.txt"])
+
+
+def test_a_qcow2_image_inside_an_archive_opens_as_a_volume(tmp_path, harness):
+    from test_qcow2 import CLUSTER, _qcow2_file
+    inner = machfs.Volume()
+    inner.name = "Inner"
+    doc = machfs.File()
+    doc.type, doc.creator, doc.data = b"TEXT", b"TEST", b"Hello."
+    inner["Letter"] = doc
+    raw = inner.write(size=800 * 1024)
+    _drill_into_an_archived_image(
+        tmp_path, harness, "Outer.qcow2",
+        _qcow2_file([raw[i:i + CLUSTER] for i in range(0, len(raw), CLUSTER)]),
+        "Inner", ["Letter"])
+
+
+def test_a_chd_image_inside_an_archive_opens_as_a_volume(tmp_path, harness):
+    inner = machfs.Volume()
+    inner.name = "Inner"
+    doc = machfs.File()
+    doc.type, doc.creator, doc.data = b"TEXT", b"TEST", b"Hello."
+    inner["Letter"] = doc
+    raw = inner.write(size=800 * 1024)
+    hunks = [raw[i:i + 16384] for i in range(0, len(raw), 16384)]
+    _drill_into_an_archived_image(tmp_path, harness, "Outer.chd",
+                                  _chd_file(hunks), "Inner", ["Letter"])
+
+
+def test_a_vmdk_image_inside_an_archive_opens_as_a_volume(tmp_path, harness):
+    from test_vmdk import _grains, _v4, _volume_raw
+    _drill_into_an_archived_image(tmp_path, harness, "Outer.vmdk",
+                                  _v4(_grains(_volume_raw()), 2048),
+                                  "VMDK Disk", ["readme.txt"])
+
+
+def test_a_udif_image_inside_an_archive_opens_as_a_volume(tmp_path, harness):
+    from test_dmg import _udif, _volume_raw
+    _drill_into_an_archived_image(tmp_path, harness, "Oracle.dmg",
+                                  _udif(_volume_raw()),
+                                  "Apple Disk", ["readme.txt"])
+
+
+def test_a_damaged_image_inside_an_archive_says_so_and_keeps_its_parents(
+        tmp_path, harness):
+    import zipfile
+    with zipfile.ZipFile(tmp_path / "Nest.zip", "w") as z:
+        # the .vhd extension says what it is; the body under the cookie is
+        # where the damage shows
+        z.writestr("Broken.vhd", b"conectix" + b"\x00" * 400)
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    _dblclick(win, "Nest.zip", h.settle)
+    h.settle()
+    archive_win = [w for w in h.d.filer_windows if w is not win]
+    assert len(archive_win) == 1
+    _dblclick(archive_win[0], "Broken.vhd", h.settle)
+    h.settle()
+    assert h.d._alerts and "damaged" in h.d._alerts[0].text()
+    # no volume window opened, and both parents are still up
+    assert [w for w in h.d.filer_windows
+            if w is not win and w is not archive_win[0]] == []
+    assert win.isVisible() and archive_win[0].isVisible()
+
+
+def test_an_archive_inside_an_archive_drills_into_its_listing(tmp_path, harness):
+    import io
+    import zipfile
+    inner = io.BytesIO()
+    with zipfile.ZipFile(inner, "w") as z:
+        z.writestr("Note.txt", b"hello")
+    with zipfile.ZipFile(tmp_path / "Nest.zip", "w") as z:
+        z.writestr("Inner.zip", inner.getvalue())
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    _dblclick(win, "Nest.zip", h.settle)
+    h.settle()
+    outer_win = [w for w in h.d.filer_windows if w is not win]
+    assert len(outer_win) == 1
+    _dblclick(outer_win[0], "Inner.zip", h.settle)
+    h.settle()
+    inner_wins = [w for w in h.d.filer_windows
+                  if w is not win and w is not outer_win[0]]
+    assert len(inner_wins) == 1
+    assert isinstance(inner_wins[0].volume, ArchiveFolder)
+    assert [f.name for f in inner_wins[0].volume.files()] == ["Note.txt"]
+    assert not h.d._alerts
+    assert win.isVisible() and outer_win[0].isVisible()
+
+
+def test_an_image_inside_an_image_drills_down(tmp_path, harness):
+    """Two volumes deep: the host folder's image opens a volume window,
+    whose own image opens the next one."""
+    inner = machfs.Volume()
+    inner.name = "Inner"
+    doc = machfs.File()
+    doc.type, doc.creator, doc.data = b"TEXT", b"TEST", b"Hello."
+    inner["Letter"] = doc
+    outer = machfs.Volume()
+    outer.name = "Outer"
+    held = machfs.File()
+    held.data = inner.write(size=800 * 1024)
+    outer["Inner.dsk"] = held
+    (tmp_path / "Outer.dsk").write_bytes(outer.write(size=2 * 1024 * 1024))
+    h = harness(disks=[])
+    win = h.d.open_filer(HostFolder(tmp_path))
+    h.settle()
+    _dblclick(win, "Outer.dsk", h.settle)
+    h.settle()
+    mid_wins = [w for w in h.d.filer_windows if w is not win]
+    assert len(mid_wins) == 1
+    assert mid_wins[0].volume.name == "Outer"
+    _dblclick(mid_wins[0], "Inner.dsk", h.settle)
+    h.settle()
+    deep_wins = [w for w in h.d.filer_windows
+                 if w is not win and w is not mid_wins[0]]
+    assert len(deep_wins) == 1
+    assert isinstance(deep_wins[0].volume, machfs.Volume)
+    assert deep_wins[0].volume.name == "Inner"
+    assert sorted(n for n, _ in deep_wins[0].volume.items()) == ["Letter"]
+    assert not h.d._alerts
+    assert win.isVisible() and mid_wins[0].isVisible()
