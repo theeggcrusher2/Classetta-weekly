@@ -41,7 +41,7 @@ import machfs.main
 from machfs.btree import unpack_extent_record
 
 from . import chd, dmg, dart, mdf, moof, qcow2, vhd, vmdk
-from .resfork import InvalidForkError, is_fork, open_fork, read_fork
+from .resfork import InvalidForkError, is_fork, open_fork, vers_messages
 
 APPLE_SINGLE = 0x00051600
 APPLE_DOUBLE = 0x00051607
@@ -389,12 +389,19 @@ def _from_machfs(volume: machfs.Volume, folder: VolumeFolder, name: str,
 ALIAS_FLAG = 0x8000                  # the Finder's isAlias flag
 
 
+def needs_materialise(f: MacFile | None) -> bool:
+    """True while f is an archive member whose forks are still undecoded
+    inside its archive — the listing must not read them, and callers
+    materialise lazily behind a busy window instead."""
+    return isinstance(f, LazyArchiveFile) and f.forks_pending
+
+
 def _alias_record(f: MacFile):
     """The alias record in f's resource fork, if it's one there.  A
     member whose forks are still inside its archive has none: reading
     them would decode the member, and an alias never needs to cross
     that boundary."""
-    if isinstance(f, LazyArchiveFile) and f.forks_pending:
+    if needs_materialise(f):
         return None
     rsrc = getattr(f, "rsrc", b"")
     if not rsrc:
@@ -424,7 +431,7 @@ def is_alias(f: MacFile) -> bool:
     is identified as one only from its own declared metadata; the record
     itself is decoded lazily when the member is opened, behind a busy
     window."""
-    if isinstance(f, LazyArchiveFile) and f.forks_pending:
+    if needs_materialise(f):
         return bool(f.flags & ALIAS_FLAG) or f.type == b"alis"
     if _alias_record(f) is None:
         return False
@@ -526,26 +533,6 @@ def _host_path(volume, node):
 # Version resources
 # ---------------------------------------------------------------------------
 
-def _pstr(body: bytes, at: int) -> str | None:
-    """The Pascal string at at in body, None when it starts past the
-    body's end or runs off it."""
-    if at < 0 or at >= len(body):
-        return None
-    n = body[at]
-    if at + 1 + n > len(body):
-        return None
-    return body[at + 1:at + 1 + n].decode("mac_roman")
-
-
-def _vers_message(body: bytes) -> str | None:
-    """What a 'vers' record says: its long message, or its short version
-    string when there is no long one; None for a record too short or
-    empty to hold either."""
-    if len(body) < 7:                    # six header bytes, then the short pascal string
-        return None
-    return _pstr(body, 7 + body[6]) or _pstr(body, 6) or None
-
-
 def version_messages(f: MacFile | None) -> tuple[str | None, str | None]:
     """f's version messages as (ID 1, ID 2), what the Finder's Get Info
     shows: ID 1's in the version field, ID 2's beneath the file's name.
@@ -556,20 +543,12 @@ def version_messages(f: MacFile | None) -> tuple[str | None, str | None]:
     Filer materialises it behind a busy window before asking."""
     if f is None:
         return None, None
-    if isinstance(f, LazyArchiveFile) and f.forks_pending:
+    if needs_materialise(f):
         return None, None
     rsrc = getattr(f, "rsrc", b"")
     if not rsrc:
         return None, None
-    try:
-        resources = read_fork(bytes(rsrc))
-    except Exception:
-        return None, None
-    messages: dict[int, str | None] = {}
-    for rid in (1, 2):
-        r = next((r for r in resources if r.type == b"vers" and r.id == rid), None)
-        messages[rid] = _vers_message(r.data) if r is not None else None
-    return messages[1], messages[2]
+    return vers_messages(rsrc)
 
 
 # ---------------------------------------------------------------------------
@@ -1285,7 +1264,7 @@ def archive_kind(f: MacFile) -> str | None:
     this of the selected file on every paint, so reading the body there
     would freeze the Filer on a large archive.  An archive member whose
     forks are still inside the archive is not decoded to be asked."""
-    if isinstance(f, LazyArchiveFile) and f.forks_pending:
+    if needs_materialise(f):
         return None
     d = _fork_sample(f)
     if d[:4] == b"SIT!" and d[10:14] == b"rLau" or d[:16] == b"StuffIt (c)1997-":
@@ -1335,7 +1314,7 @@ _ARCHIVE_KINDS = {
 def archive_name(f: MacFile) -> str | None:
     """The name of the archive f is, if it's one macextract knows: the
     Kind column's word for it, without opening it."""
-    if isinstance(f, LazyArchiveFile) and f.forks_pending:
+    if needs_materialise(f):
         # The head is still compressed inside the archive: sampling it
         # would decode the member, which drawing a listing must not do.
         return None
@@ -1360,7 +1339,7 @@ def image_kind(f: MacFile) -> str | None:
         # A fixed VHD's footer is at the file's end, beyond the head sample,
         # so the extension is the only hint a listing has for one.
         return "VHD disk image"
-    if isinstance(f, LazyArchiveFile) and f.forks_pending:
+    if needs_materialise(f):
         # The bytes are still inside the archive: only the name says
         # anything, and reading the body here would decode the member.
         return None

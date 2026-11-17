@@ -42,7 +42,8 @@ from ..macfile import (ArchiveFolder, ContainerFolder, HostFolder, LazyArchiveFi
                        extract_archive, image_kind,
                        is_alias, is_control_panel, launch_target, list_folder,
                        load_volume, open_container, image_volume,
-                       version_messages)
+                       version_messages, needs_materialise)
+from ..util import member_segments
 from ..process import size_resource
 from ..m68k.segload import has_code, why_no_code
 from ..resfork import InvalidForkError, is_fork, read_fork
@@ -146,7 +147,7 @@ def _kind(f: MacFile) -> str:
         return "folder"
     if f.is_application:
         return "application"
-    if not _fork_pending(f) and is_alias(f):
+    if not needs_materialise(f) and is_alias(f):
         return "alias"
     known = archive_name(f) or image_kind(f)
     if known:
@@ -267,12 +268,6 @@ def _custom_icon(node: machfs.Volume | machfs.Folder | machfs.File,
     return None
 
 
-def _fork_pending(f: MacFile) -> bool:
-    """True while an archive member's forks are still undecoded — the
-    icon paths then show a generic icon, and drawing a listing never
-    decodes an archive member's resources."""
-    return isinstance(f, LazyArchiveFile) and f.forks_pending
-
 
 def item_icon(f: MacFile, *, large: bool = False) -> list[str] | None:
     """The icon the item's own resources give it — an application's or a
@@ -290,7 +285,7 @@ def item_icon(f: MacFile, *, large: bool = False) -> list[str] | None:
             return _custom_icon(node[f.name], large=large)
         except KeyError:
             return None
-    if _fork_pending(f):
+    if needs_materialise(f):
         return None
     if f.is_application or f.flags & HAS_CUSTOM_ICON:
         return _icon_from(bytes(f.rsrc), large)
@@ -406,26 +401,6 @@ class _ListHeader(QHeaderView):
         painter.restore()
 
 
-def _segments(name: str) -> list[str] | None:
-    """The folders in an archive member's name, read the way
-    macextract's sanitiser reads them — backslashes and colons as
-    separators, empty, '.' and '..' segments dropped, trailing dots
-    stripped — so a name that would escape the archive draws inside
-    the window as extraction writes it inside the destination.  An
-    empty list means nothing usable is left: refused, as extraction
-    refuses it.  None when name holds no '/': a plain member is listed
-    exactly as it always was."""
-    if "/" not in name:
-        return None
-    parts = []
-    for segment in name.replace("\\", "/").replace(":", "/").split("/"):
-        segment = segment.strip().rstrip(".")
-        if segment in ("", ".", ".."):
-            continue
-        parts.append(segment.replace("\0", ""))
-    return parts
-
-
 # What a row of a folder of members carries instead of a file: a place
 # in the tree, not something the Filer can open.
 _FOLDER_ROW = object()
@@ -439,9 +414,10 @@ def _nested(files: list[MacFile]) -> dict:
     it."""
     root: dict = {}
     for f in files:
-        parts = _segments(f.name)
-        if parts is None:
-            parts = [f.name]
+        # member_segments reads the member name the way macextract's
+        # sanitiser reads it, so what is drawn matches the extraction
+        # destination structure.
+        parts = member_segments(f.name)
         if not parts:
             continue                      # no usable name: refused, as extraction refuses it
         node = root
@@ -720,17 +696,20 @@ class FilerWindow(_Hosted):
         return False
 
     # -- what the menus act on ---------------------------------------------
+    def _row_file(self, row: QTreeWidgetItem) -> MacFile | None:
+        """The file a row lists, or None when the row is a folder of
+        members or an unknown name: the row carries its own file when
+        it has one, else the entry map keeps it."""
+        picked = row.data(0, Qt.ItemDataRole.UserRole)
+        if isinstance(picked, MacFile):
+            return picked
+        return None if picked is _FOLDER_ROW else self.entries.get(row.text(0))
+
     def selected_item(self) -> MacFile | None:
         items = self.tree.selectedItems()
         if not items:
             return None
-        row = items[0]
-        picked = row.data(0, Qt.ItemDataRole.UserRole)
-        if isinstance(picked, MacFile):
-            return picked
-        if picked is _FOLDER_ROW:         # a folder of members lists no file
-            return None
-        return self.entries.get(row.text(0))
+        return self._row_file(items[0])
 
     def selected_actions(self) -> set[str]:
         """The things the menus can do with the selection: an empty set
@@ -931,15 +910,11 @@ class FilerWindow(_Hosted):
         if name == self._last_name and now - self._opened_at < 0.4:
             return                      # a double-click arrives as two activations
         self._last_name, self._opened_at = name, now
-        picked = item.data(0, Qt.ItemDataRole.UserRole)
-        if isinstance(picked, MacFile):
-            self._open_item(picked)
-            return
-        if picked is _FOLDER_ROW:
+        if item.data(0, Qt.ItemDataRole.UserRole) is _FOLDER_ROW:
             # a folder of members shows what is beneath it; Qt's own
             # expands-on-double-click does it, so nothing to do here
             return
-        f = self.entries.get(name)
+        f = self._row_file(item)
         if f is None:
             return
         self._open_item(f)
@@ -1205,7 +1180,7 @@ def item_icon_qicon(f: MacFile, *, large: bool = False, depth: int = 1) -> QIcon
     """f's icon as a QIcon: its colour family at depth > 2 when its
     resources have one the depth can show, else the 1-bit icon (inverted
     when selected); None for an item with no icon of its own."""
-    if _fork_pending(f):
+    if needs_materialise(f):
         return None
     if depth <= 2 or f.type == FOLDER:
         rows = item_icon(f, large=large)
