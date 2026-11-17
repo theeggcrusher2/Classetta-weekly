@@ -23,17 +23,7 @@ from typing import TYPE_CHECKING
 from PyQt6.QtCore import QRectF
 from PyQt6.QtGui import QPainterPath
 
-from ..memory import (
-    ADDRESS_MASK,
-    BYTE,
-    INTEGER,
-    LONG,
-    LONGINT,
-    RAM,
-    RECT,
-    Codec,
-    from_mac,
-)
+from ..memory import BYTE, INTEGER, LONG, LONGINT, RAM, RECT, Codec, from_mac
 from . import constants as k
 from .qdraw import (
     CHICAGO_SYMBOLS,
@@ -89,9 +79,14 @@ class Control:
     action = _Field(32, LONG)
     ref_con = _Field(36, LONGINT)
 
-    def __init__(self, mem: RAM, handle: int):
+    # separate storage for variant on 32 bit systems
+    # otherwise packed above address bytes on 24 bit
+    _variant = 0
+
+    def __init__(self, mem: RAM, handle: int, variant: int = 0):
         self.mem = mem
         self.handle = handle
+        self._variant = variant
 
     def __eq__(self, other) -> bool:
         return isinstance(other, Control) and other.handle == self.handle
@@ -104,7 +99,7 @@ class Control:
 
     @property
     def addr(self) -> int:
-        return self.mem.r32(self.handle) & ADDRESS_MASK
+        return self.mem.r32(self.handle) & self.mem.system.addr_mask
 
     @property
     def title(self) -> str:
@@ -112,7 +107,12 @@ class Control:
 
     @property
     def variation(self) -> int:
-        return (self.def_proc >> 24) & 0xF
+        if self.mem.system.mmu_32_bit:
+            # 32 bit: return from internal storage
+            return self._variant
+        else:
+            # 24 bit: or retrieve from the address in the visible struct in RAM
+            return (self.def_proc >> 24) & 0xF
 
     @property
     def visible(self) -> bool:
@@ -358,14 +358,15 @@ def _draw_button(p: Painter, c: Control) -> None:
 def _draw_check(p: Painter, c: Control, kind: int, whole: bool = True) -> None:
     """A check box or radio button: drawn whole, its rect erased and its
     box and title drawn in it (Operation Tsunami's radio buttons fill a
-    frame white); otherwise its box alone, so that what's drawn over the
-    rest of its rect stays (ScreenChooser's dialog's text says what its
-    untitled check boxes are for)."""
+    frame white); otherwise, or when it has no title, its box alone, so
+    that what's drawn over the rest of its rect stays (ScreenChooser's
+    dialog's text says what its untitled check boxes are for, and Missions
+    of the Reliant's pictures, drawn before them, its radio buttons)."""
     r = c.rect
     mid = r.top + r.height // 2
     box = Rect(mid - CHECK_BOX // 2, r.left + 2, mid + CHECK_BOX // 2, r.left + 2 + CHECK_BOX)
     shape = rect_path if kind == k.checkBoxProc else oval_path
-    p.erase(rect_path(r if whole else box))
+    p.erase(rect_path(r if whole and c.title else box))
     pressed = c.active and c.hilite == k.inCheckBox
     p.frame(rect_path if kind == k.checkBoxProc else oval_path, box, 2 if pressed else 1)
     if c.value:

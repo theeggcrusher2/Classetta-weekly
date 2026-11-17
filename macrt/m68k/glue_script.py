@@ -10,7 +10,7 @@ from __future__ import annotations
 import datetime
 import struct
 
-from ..memory import ADDRESS_MASK, from_mac
+from ..memory import from_mac
 from ..toolbox import intl
 from ..toolbox import lowmem
 from ..toolbox import numformat as nf
@@ -287,7 +287,7 @@ def PixelToChar(t, p, length, slop, x, leading_p, remaining_p, run, numer, denom
     offset, leading, remaining = sm.pixel_to_char(_text(t, p, length), slop / 65536,
                                                   x / 65536, _width(t, numer, denom))
     t.mem.w8(leading_p, 1 if leading else 0)
-    if remaining_p & ADDRESS_MASK:
+    if remaining_p & t.mem.system.addr_mask:
         t.w32(remaining_p, _fixed(remaining))
     return offset
 

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ..memory import ADDRESS_MASK, BOOLEAN, BYTE, INTEGER, LONG, LONGINT, POINT, RECT, Field
+from ..memory import BOOLEAN, BYTE, INTEGER, LONG, LONGINT, POINT, RECT, Field
 from .types import Point, Rect
 
 if TYPE_CHECKING:
@@ -58,7 +58,7 @@ class ListRec:
     def __init__(self, system: System, handle: int):
         self.system = system
         self.mem = system.mem
-        self.handle = handle & ADDRESS_MASK
+        self.handle = handle & system.addr_mask
 
     def __eq__(self, other) -> bool:
         return isinstance(other, ListRec) and other.handle == self.handle
@@ -71,7 +71,7 @@ class ListRec:
 
     @property
     def addr(self) -> int:
-        return self.mem.r32(self.handle) & ADDRESS_MASK
+        return self.mem.r32(self.handle) & self.mem.system.addr_mask
 
     # =====================================================================
     # Cells.  An index is a cell's place in cellArray.
@@ -122,7 +122,7 @@ class ListRec:
         start, end = self.span(i)
         if end <= start:
             return b""
-        return self.mem.read((self.mem.r32(self.cells & ADDRESS_MASK) & ADDRESS_MASK) + start,
+        return self.mem.read((self.mem.r32(self.cells & self.mem.system.addr_mask) & self.mem.system.addr_mask) + start,
                              end - start)
 
     def is_selected(self, i: int) -> bool:
@@ -143,7 +143,7 @@ class ListRec:
         delta = len(data) - (end - start)
         if total + delta > MAX_DATA:
             return False
-        h = self.cells & ADDRESS_MASK
+        h = self.cells & self.mem.system.addr_mask
         heap = self.system.heap_of(h)
         tail = self.mem.read(heap.deref(h) + end, total - end) if total > end else b""
         if delta > 0 and not heap.set_handle_size(h, total + delta):
@@ -167,7 +167,7 @@ class ListRec:
         than there was, only more offsets.  False, with nothing changed,
         if there's no room for them."""
         data = b"".join(d for d, _ in cells)
-        lh, ch = self.handle, self.cells & ADDRESS_MASK
+        lh, ch = self.handle, self.cells & self.mem.system.addr_mask
         l_heap, c_heap = self.system.heap_of(lh), self.system.heap_of(ch)
         old_l, new_l = l_heap.handle_size(lh), CELL_ARRAY + 2 * (len(cells) + 1)
         old_c, new_c = c_heap.handle_size(ch), len(data)

@@ -184,6 +184,27 @@ def test_the_search_path_passes_over_a_system_folder_that_isnt_there(qapp):
     refused(fm.fnfErr, files.lookup_file, 0, 0, "System", True)
 
 
+def test_the_finder_beside_a_real_system_file_is_in_the_system_folder(qapp):
+    """As on the disk the System file came from, so that a program finds it
+    by name from its own folder: FinderColors reads and changes the colours
+    of the Finder's Color menu in it."""
+    v = machfs.Volume()
+    v.name = "Disk"
+    v["System Folder"] = machfs.Folder()
+    system, finder = machfs.File(), machfs.File()
+    system.type, system.creator, system.rsrc = b"ZSYS", b"MACS", FORK
+    finder.type, finder.creator, finder.rsrc = b"FNDR", b"MACS", FORK
+    v["System Folder"]["System"] = system
+    v["System Folder"]["Finder"] = finder
+    real = macfile.system_on(load_volume(v.write(800 * 1024, desktopdb=False, bootable=False)))
+    s = System(system_file=real)
+    files = FileManager(s.files, None, s.files.dir_for(MemoryFolder([MacFile("Doc", b"doc")])))
+    node = files.lookup_file(0, 0, "Finder", search=True)
+    assert node.parent is s.files.system_folder and node.type == b"FNDR"
+    _, _, files = in_memory(MacFile("Doc", b"doc"))     # macrt's own System has none
+    refused(fm.fnfErr, files.lookup_file, 0, 0, "Finder", True)
+
+
 def test_an_unmounted_volume_is_no_default(qapp):
     """Nor does unmounting it mind a program having taken its VCB out of
     the queue itself."""
@@ -266,6 +287,26 @@ def test_the_forms_a_host_file_is_in(qapp, tmp_path):
     files.rename(0, 0, "Lone", "Alone")                 # only its resource fork to move
     assert not (tmp_path / "Alone").exists()
     assert load_file(tmp_path / "._Alone").rsrc == FORK
+
+
+def test_a_host_folder_named_as_a_volume_already_mounted(qapp, tmp_path):
+    """Its volume has a number after the name, so a full pathname of its
+    own finds it, and one of the other volume's finds that; names are
+    told apart as far as the 27 characters a VCB holds of them."""
+    s = System()
+    fs = s.files
+    disk = fs.mount_folder(VolumeFolder(floppy("Shared")))
+    for name in ("Shared", "L" * 27, "L" * 28):
+        (tmp_path / name).mkdir()
+    (tmp_path / "Shared" / "Good").write_bytes(b"good")
+    files = FileManager(fs, None, fs.dir_for(HostFolder(tmp_path / "Shared")))
+    host = fs.mount_folder(HostFolder(tmp_path / "Shared"))
+    assert (disk.name, host.name) == ("Shared", "Shared 2")
+    assert files.lookup(0, 0, "Shared 2:Good").volume is host
+    assert files.lookup(0, 0, "Shared:File").volume is disk
+    assert fs.mount_folder(HostFolder(tmp_path / "Shared")) is host
+    assert fs.mount_folder(HostFolder(tmp_path / ("L" * 27))).name == "L" * 27
+    assert fs.mount_folder(HostFolder(tmp_path / ("L" * 28))).name == "L" * 25 + " 2"
 
 
 def test_host_folders(qapp, tmp_path, monkeypatch):

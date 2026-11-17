@@ -30,19 +30,31 @@ dialog is first moved to where the item is shown, so that what the hook
 does with the mouse (a pop-up of its own, say) is where the user sees
 it; a pop-up menu's value is set to the item chosen before the hook
 hears of it.  The widgets show what the hook leaves the items as.
-While System 7's dialog is up, its reply record says what's selected in
-the list (with nothing selected, the folder shown), as a hook that picks
-a folder reads it (Inside Macintosh: Files, "Selecting a Directory"); a
-dialog the hook ends with Cancel leaves it saying so, sfGood FALSE, and
-one it ends with Open while a folder or disk is selected returns it,
-sfGood TRUE.  A hook can also ask for the folder holding what it puts
-in the reply, with that selected (sfHookChangeSelection; on its first
+While a dialog is up, SFSaveDisk and CurDirStore say the folder shown,
+the current directory ("the directory whose contents are listed in the
+dialog box", Inside Macintosh: Files, "Setting the Current Directory"),
+and a hook that changes them and returns 101 (sfHookRebuildList) has
+the folder they name shown (Technical Note FL 33, "Standard File
+Customization").  While System 7's dialog is up, its reply record says
+what's selected in the list (with nothing selected, the folder shown),
+as a hook that picks a folder reads it (Inside Macintosh: Files,
+"Selecting a Directory"); a dialog the hook ends with Cancel leaves it
+saying so, sfGood FALSE.  One the hook ends with Open itself, for
+another item, while a folder or disk is selected, or nothing, returns
+that or the folder shown: in System 7's reply, sfGood TRUE, and, as
+macrt's own rule, in the original calls' SFReply, good TRUE, its name
+with no file type in a working directory for the folder holding it (a
+disk's, for the disk).  A hook can also ask for the folder holding what
+it puts in the reply, with that selected (sfHookChangeSelection; on its first
 call, where the dialog starts), or for the desktop (sfHookGoToDesktop,
 as the Desktop button is to it).  The hook hears sfHookNullEvent when
 a folder's list is shown and each time the selection changes, where a
-Mac sends it whenever nothing else happens.  The modal-dialog filter,
-the activation list and procedure aren't used.  Without a display (no one to ask) every dialog is
-cancelled.
+Mac sends it whenever nothing else happens.  The list it asks to be
+rebuilt (sfHookRebuildList) is made from the type list as the hook has
+left it, so a hook that changes the types to be displayed, as IM Files
+has it, changes what's listed.  The modal-dialog filter, the activation
+list and procedure aren't used.  Without a display (no one to ask) every
+dialog is cancelled.
 """
 
 from __future__ import annotations
@@ -53,7 +65,7 @@ from dataclasses import dataclass
 
 from PyQt6.QtGui import QColor, QImage
 
-from ..memory import ADDRESS_MASK, from_mac, to_mac
+from ..memory import from_mac, to_mac
 from ..toolbox import files as fm
 from ..toolbox import lowmem
 from ..toolbox.dialogs import substitute
@@ -145,7 +157,7 @@ class Custom:
         self.t = t
         self.w = w
         self.numbers = numbers
-        self.hook = hook & ADDRESS_MASK
+        self.hook = hook & t.mem.system.addr_mask
         self.new = new                      # System 7's: the hook gets yourDataPtr too
         self.data = data
         self.offset: int | None = None      # an expandable hook's itemOffset
@@ -157,7 +169,7 @@ class Custom:
         """The application's part, if it has one: a hook, or a dialog with
         items of its own."""
         numbers = (NEW if new else ORIGINAL)[put]
-        hook &= ADDRESS_MASK
+        hook &= t.mem.system.addr_mask
         h = t.process.resources.GetResource("DLOG", dlg_id) if dlg_id else 0
         if h:
             tmpl = parse_dlog(t.tb.contents(h))
@@ -195,7 +207,7 @@ class Custom:
         Manager's are: the standard items (Standard File's, or as numbers
         says), then the items of DITL ditl_id (none if there's no such DITL),
         kept where they are to each other, at the bottom."""
-        hook &= ADDRESS_MASK
+        hook &= t.mem.system.addr_mask
         h = t.process.resources.GetResource("DITL", ditl_id) if ditl_id else 0
         expansion = t.tb.contents(h) if h else b""
         data_ = _standard_items(numbers, ok)
@@ -233,12 +245,12 @@ class Custom:
 
     def set_name(self, name: str) -> None:
         item = self._name_item()
-        if item is not None and item.handle & ADDRESS_MASK:
-            dm._set_handle(self.t, item.handle & ADDRESS_MASK, to_mac(name)[:255])
+        if item is not None and item.handle & self.t.mem.system.addr_mask:
+            dm._set_handle(self.t, item.handle & self.t.mem.system.addr_mask, to_mac(name)[:255])
 
     def name(self) -> str | None:
         item = self._name_item()
-        if item is None or not item.handle & ADDRESS_MASK:
+        if item is None or not item.handle & self.t.mem.system.addr_mask:
             return None
         return from_mac(dm._text(self.t, item.handle))
 
@@ -247,8 +259,8 @@ class Custom:
         for its hook to read."""
         for n, text in edits.items():
             item = dm._item(self.t, self.w, n)
-            if item is not None and item.type == editText and item.handle & ADDRESS_MASK:
-                dm._set_handle(self.t, item.handle & ADDRESS_MASK, to_mac(text)[:255])
+            if item is not None and item.type == editText and item.handle & self.t.mem.system.addr_mask:
+                dm._set_handle(self.t, item.handle & self.t.mem.system.addr_mask, to_mac(text)[:255])
 
     def _theirs(self, item) -> bool:
         """Whether an item is the application's own: one after Standard
@@ -291,7 +303,7 @@ class Custom:
                 enabled = item.enabled and c.active
                 visible = c.visible and not item.hidden and not c.rect.sect(port).empty
             elif item.type in DRAWN:
-                if item.type != userItem or item.handle & ADDRESS_MASK:
+                if item.type != userItem or item.handle & t.mem.system.addr_mask:
                     drawn.append(item)
                 continue
             elif item.type == statText:
@@ -348,7 +360,7 @@ class Custom:
         all of it meanwhile."""
         t, w = self.t, self.w
         surfaces = t.tb.qd.surfaces
-        vis = w.vis_rgn & ADDRESS_MASK
+        vis = w.vis_rgn & t.mem.system.addr_mask
         kept = read_rgn(t.mem, vis) if vis else None
         if vis:
             write_rgn(t.system.heap_of(vis), vis, Region.rect(w.port_rect))
@@ -389,7 +401,7 @@ class Dialog:
     """One Standard File dialog, from the application's side."""
 
     def __init__(self, t, put: bool, prompt: str = "", name: str = "", file_filter: int = 0,
-                 types: set[bytes] | None = None, data: int | None = None,
+                 type_list: tuple[int, int] = (-1, 0), data: int | None = None,
                  folders: bool = False, hook: int = 0, dlg_id: int = 0, new: bool = False,
                  reply: int = 0):
         self.t = t
@@ -398,8 +410,9 @@ class Dialog:
         self.put = put
         self.prompt = prompt
         self.name = name
-        self.filter = file_filter & ADDRESS_MASK
-        self.types = types                  # None: every type
+        self.filter = file_filter & t.mem.system.addr_mask
+        self.type_list = type_list          # numTypes, and where the types are
+        self.types = _types(t, *type_list)  # None: every type
         self.data = data                    # CustomGetFile's yourDataPtr, for its filter
         self.folders = folders              # does the filter see folders
         self.dir: Dir | None = self._start()        # None: the desktop
@@ -410,24 +423,33 @@ class Dialog:
         self.new_name: str | None = None    # what a hook changed the name to save as to
         self.ok = ""                        # the default button's title, if not Open or Save
         self.preview: QImage | None = None  # shown beside the list
-        self.reply = reply & ADDRESS_MASK   # System 7's, to say what's selected
+        self.reply = reply & t.mem.system.addr_mask   # System 7's, to say what's selected
         self.described = False              # has it said so
         self.select: fm.Node | None = None  # what to select when the next place is shown
+        self.saved: tuple[int, int] | None = None   # what SFSaveDisk and CurDirStore were set to
 
     def _start(self) -> Dir:
+        d = self._current()
+        if d is None:
+            vol, _, dirid = self.files.get_vol()
+            d = vol.dir(dirid)
+        return d
+
+    def _current(self) -> Dir | None:
+        """The folder SFSaveDisk and CurDirStore name, if there is one."""
         world = self.t.process.world
         try:
             vol = self.fs.volume(-world.r16(lowmem.SFSaveDisk))
             d = vol.dir(world.r32(lowmem.CurDirStore) or fm.ROOT)
-            return vol.root if d is vol.top else d
         except FileError:
-            vol, _, dirid = self.files.get_vol()
-            return vol.dir(dirid)
+            return None
+        return vol.root if d is vol.top else d
 
     # =====================================================================
     # What the dialog shows
     # =====================================================================
     def place(self) -> stdfile.Place:
+        self._remember()
         message, self.message = self.message, ""
         place = self._place(message)
         select, self.select = self.select, None
@@ -459,7 +481,7 @@ class Dialog:
         while n is not None:
             path.append(n.volume.name if n is n.volume.root else n.name)
             n = n.parent
-        return stdfile.Place(path, items, d.volume.name, not d.volume.locked, message)
+        return stdfile.Place(path, items, d.volume.name, not d.volume.lock_error, message)
 
     def _wanted(self, node: File, index: int) -> bool:
         if self.types is not None and node.type not in self.types:
@@ -603,10 +625,10 @@ class Dialog:
                     return ("save", name, isinstance(self.dir.child(name), File))
             elif 0 <= row < len(self.entries):
                 node = self.entries[row]
-                if isinstance(node, File) or not self.reply:
+                if isinstance(node, File):
                     return ("open", row)
                 return ("chosen", node)     # a folder or disk, for a hook that picks one
-            elif self.reply and self.dir is not None:
+            elif self.dir is not None:
                 return ("chosen", self.dir)
         elif got == n.cancel:
             return ("cancel",)
@@ -629,6 +651,9 @@ class Dialog:
             return SAME
         if kind == "chosen":
             return action
+        if kind == "rebuild":               # the hook may have changed the types, or the folder
+            self.types = _types(self.t, *self.type_list)
+            self._follow()
         if kind == "change":
             return MORE if self._go_to_reply() else SAME
         if kind == "desktop":
@@ -687,12 +712,20 @@ class Dialog:
         return True
 
     def _remember(self) -> None:
-        """Where the next dialog starts."""
+        """The folder shown, and so where the next dialog starts."""
         d = self.dir
         if d is not None:
             world = self.t.process.world
             world.w16(lowmem.SFSaveDisk, -d.volume.vref)
             world.w32(lowmem.CurDirStore, d.cnid)
+            self.saved = (-d.volume.vref & 0xFFFF, d.cnid)
+
+    def _follow(self) -> None:
+        """Show the folder SFSaveDisk and CurDirStore name, if the hook has
+        changed them."""
+        world = self.t.process.world
+        if (world.r16(lowmem.SFSaveDisk), world.r32(lowmem.CurDirStore)) != self.saved:
+            self.dir = self._current() or self.dir
 
 
 def display_of(t):
@@ -729,12 +762,18 @@ def _sf_reply(t, reply: int, result) -> None:
     if result is None:
         m.w8(reply + rGood, 0)
         return
-    if result[0] == "open":
-        node = result[1]
-        d, name, ftype = node.parent, node.name, node.type
-    else:
+    if result[0] == "save":
         _, d, name, _ = result
         ftype = bytes(4)
+    else:                                   # a file opened, or a folder or disk a hook chose
+        node = result[1]
+        if isinstance(node, fm.Volume):
+            node = node.root
+        name = node.name
+        if isinstance(node, File):
+            d, ftype = node.parent, node.type
+        else:
+            d, ftype = (node if node is node.volume.root else node.parent), bytes(4)
     files = t.process.files
     m.fill(reply, SF_REPLY)
     m.w8(reply + rGood, 1)
@@ -744,14 +783,14 @@ def _sf_reply(t, reply: int, result) -> None:
 
 
 def _sf_get(t, reply, file_filter, num_types, type_list, hook=0, dlg_id=DIALOG_IDS[False]):
-    dialog = Dialog(t, False, file_filter=file_filter, types=_types(t, num_types, type_list),
+    dialog = Dialog(t, False, file_filter=file_filter, type_list=(num_types, type_list),
                     hook=hook, dlg_id=dlg_id)
-    _sf_reply(t, reply & ADDRESS_MASK, dialog.run())
+    _sf_reply(t, reply & t.mem.system.addr_mask, dialog.run())
 
 
 def _sf_put(t, reply, prompt, orig_name, hook=0, dlg_id=DIALOG_IDS[True]):
     dialog = Dialog(t, True, _str(t, prompt), _str(t, orig_name), hook=hook, dlg_id=dlg_id)
-    _sf_reply(t, reply & ADDRESS_MASK, dialog.run())
+    _sf_reply(t, reply & t.mem.system.addr_mask, dialog.run())
 
 
 @trap
@@ -798,7 +837,7 @@ def _standard_reply(t, reply: int, result, described: bool = False) -> None:
     cancelled (result None), it's left saying what the dialog last had
     selected, if it said so."""
     m = t.mem
-    reply &= ADDRESS_MASK
+    reply &= t.mem.system.addr_mask
     if result is None and described:
         m.w8(reply + sfGood, 0)
         return
@@ -822,7 +861,7 @@ def _standard_reply(t, reply: int, result, described: bool = False) -> None:
 
 @trap
 def StandardGetFile(t, file_filter, num_types, type_list, reply):
-    dialog = Dialog(t, False, file_filter=file_filter, types=_types(t, num_types, type_list),
+    dialog = Dialog(t, False, file_filter=file_filter, type_list=(num_types, type_list),
                     folders=True)
     _standard_reply(t, reply, dialog.run())
 
@@ -835,7 +874,7 @@ def StandardPutFile(t, prompt, default_name, reply):
 @trap
 def CustomGetFile(t, file_filter, num_types, type_list, reply, dlg_id, where, dlg_hook,
                   filter_proc, active_list, activate_proc, your_data):
-    dialog = Dialog(t, False, file_filter=file_filter, types=_types(t, num_types, type_list),
+    dialog = Dialog(t, False, file_filter=file_filter, type_list=(num_types, type_list),
                     data=your_data, folders=True, hook=dlg_hook, dlg_id=dlg_id, new=True,
                     reply=reply)
     _standard_reply(t, reply, dialog.run(), dialog.described)

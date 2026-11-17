@@ -14,11 +14,19 @@ A new mode is a new depth for the whole screen: the device's PixMap and
 colour table, the buffer, and each cGrafPort on the screen
 (System.set_depth).  SetEntries changes the colours as the hardware
 shows them, keeping the table's seed, and in grey mode (SetGray) shows
-each as its luminance; there is no gamma table to change.
+each as its luminance.  The driver keeps a gamma table, a linear one
+to start with: GetGamma gives a pointer to it, and SetGamma puts a copy
+of another in its place, or a linear one again for NIL (Designing Cards
+and Drivers, the gamma table data structure).  The colours shown aren't
+corrected by it.
 
     VDPageInfo          csMode (word), csData (long), csPage (word), csBaseAddr
     VDSetEntryRecord    csTable (a ColorSpec array), csStart, csCount
     VDGrayRecord, VDFlagRecord, VDDefModeRec: a byte
+    VDGammaRecord       csGTable, a pointer to a gamma table
+    GammaTbl            gVersion, gType, gFormulaSize, gChanCnt, gDataCnt,
+                        gDataWidth (words), then the formula data and each
+                        channel's gDataCnt values
 
 A Control or Status call's csParam holds a pointer to its record.
 """
@@ -28,7 +36,6 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
-from ..memory import ADDRESS_MASK
 from ..toolbox.color import luminance
 from ..toolbox.files import FileError
 from ..toolbox.gdevice import DEFAULT_MODE, DEPTH_MODES, GDevice, deref
@@ -41,6 +48,10 @@ csCode, csParam = 26, 28
 gdDevType = 0
 
 DEPTHS = {DEFAULT_MODE + m: d for d, m in DEPTH_MODES.items()}     # a mode's bits a pixel
+# A linear gamma table: version 0, no formula data, one channel for all
+# three of 256 byte-wide values, each the value it corrects.
+LINEAR_GAMMA = struct.pack(">6h", 0, 0, 0, 1, 256, 8) + bytes(range(256))
+MAX_GAMMA_VALUES = 4096         # a channel's, as many as macrt takes
 
 
 @dataclass
@@ -49,6 +60,7 @@ class Card:
     gray: bool = False          # SetGray: colours shown as their luminance
     interrupts: bool = True     # SetInterrupt: the card's VBL interrupts
     default_mode: int = DEFAULT_MODE    # SetDefaultMode's sResource ID
+    gamma: int = 0              # its gamma table, once a program has asked
 
 
 def _card(t) -> Card:
@@ -84,7 +96,7 @@ def set_mode(t, mode: int, gray: bool | None = None) -> bool:
 # The driver's calls, from the File Manager's Control and Status
 # =========================================================================
 def _record(t, pb: int) -> int:
-    return t.mem.r32(pb + csParam) & ADDRESS_MASK
+    return t.mem.r32(pb + csParam) & t.mem.system.addr_mask
 
 
 def _page_info(t, p: int, mode: int | None = None) -> None:
@@ -123,7 +135,9 @@ def control(t, pb: int) -> None:
         card.interrupts = not m.r8(p)
     elif code == 9:                                     # SetDefaultMode
         card.default_mode = m.r8(p)
-    elif code not in (1, 4):                            # KillIO, SetGamma: nothing to do
+    elif code == 4:                                     # SetGamma
+        _set_gamma(t, m.r32(p) & m.system.addr_mask)
+    elif code != 1:                                     # KillIO: nothing to do
         raise FileError(controlErr)                     # DirectSetEntries, on no direct mode
 
 
@@ -149,10 +163,37 @@ def status(t, pb: int) -> None:
         m.w8(p, card.gray)
     elif code == 7:                                     # GetInterrupt: 0 if enabled
         m.w8(p, not card.interrupts)
+    elif code == 8:                                     # GetGamma
+        if not card.gamma:
+            _set_gamma(t, 0)
+        m.w32(p, card.gamma)
     elif code == 9:                                     # GetDefaultMode
         m.w8(p, card.default_mode)
-    else:                                               # GetGamma: there's no table
+    else:
         raise FileError(statusErr)
+
+
+def _set_gamma(t, table: int) -> None:
+    """The driver's gamma table a copy of the one at table, in the
+    System heap, or a linear one for NIL: an error for a version but 0,
+    a number of channels but 1 or 3, or values more than a byte wide or
+    more than macrt takes."""
+    m, card = t.mem, _card(t)
+    data = LINEAR_GAMMA
+    if table:
+        version, _, formula, channels, count, width = struct.unpack(">6h", m.read(table, 12))
+        if (version or formula < 0 or channels not in (1, 3)
+                or not 0 < count <= MAX_GAMMA_VALUES or not 0 < width <= 8):
+            raise FileError(controlErr)
+        data = m.read(table, 12 + formula + channels * count)
+    heap = t.system.sys_heap
+    p = heap.new_ptr(len(data))
+    if not p:
+        raise FileError(controlErr)
+    m.write(p, data)
+    if card.gamma:
+        heap.dispose_ptr(card.gamma)
+    card.gamma = p
 
 
 def _table(t) -> int:
@@ -167,7 +208,7 @@ def _places(t, p: int) -> list[tuple[int, int]]:
     index it's for, csCount + 1 of them from csStart, or with csStart -1
     those their values name; ctSize + 1 the table's entries."""
     m = t.mem
-    specs, start, count = m.r32(p) & ADDRESS_MASK, m.r16s(p + 4), m.r16s(p + 6)
+    specs, start, count = m.r32(p) & t.mem.system.addr_mask, m.r16s(p + 4), m.r16s(p + 6)
     ct = _table(t)
     size = m.r16s(ct + 6) + 1 if ct else 0
     places = [(specs + 8 * i, m.r16s(specs + 8 * i) if start < 0 else start + i)
@@ -218,7 +259,7 @@ def _gray_page(t) -> None:
 # =========================================================================
 def _is_main(t, gdh: int) -> bool:
     devices = t.system.devices
-    return devices is not None and gdh & ADDRESS_MASK == devices.main & ADDRESS_MASK
+    return devices is not None and gdh & t.mem.system.addr_mask == devices.main & t.mem.system.addr_mask
 
 
 @trap

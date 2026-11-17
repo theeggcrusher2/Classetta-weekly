@@ -288,22 +288,32 @@ def test_what_is_shown_of_an_applications_own_items(qapp, monkeypatch):
 # What the hook's answers do
 # =========================================================================
 def test_a_hook_that_opens_what_is_selected_itself(qapp):
-    """Open, from the hook: the file selected, or nothing with nothing
-    selected; with a reply to say it in, the folder or, with nothing
-    selected, the folder shown."""
+    """Open, from the hook: the file selected, or the folder selected or,
+    with nothing selected, the folder shown; in the original calls' reply
+    with no file type, in a working directory for the folder holding it
+    (macrt's own rule), and in System 7's, as a folder."""
     t = app()
     d = docs(t)
+    boot = t.system.files.boot
     t.procs[HOOK] = lambda n, w, *data: 1 if n == sf.sfHookNullEvent else n
-    host = asking(t, ("select",), ("cancel",))
+    for rows, chosen, ftype, holder in (([1], d.child("Memo"), b"TEXT", d),
+                                        ([2], d.child("Old"), bytes(4), d),
+                                        ([], d, bytes(4), boot.root)):
+        host = asking(t, ("select",), rows=rows)
+        reply = sf_get(t, HOOK)
+        assert names(host.shown[0][5]) == ["Letter", "Memo", "Old", "Sheet"]
+        assert t.mem.r8(reply + sf.rGood) == 1
+        assert t.mem.r_pstr(reply + sf.rFName) == chosen.name.encode()
+        assert t.mem.read(reply + sf.rFType, 4) == ftype
+        wd = t.mem.r16s(reply + sf.rVRefNum)
+        assert t.process.files.lookup(wd, 0, chosen.name) is chosen
+        assert t.process.files.lookup(wd, 0, "") is holder
+    t.process.world.w32(lowmem.CurDirStore, fm.ROOT)
+    asking(t, ("select",))
     reply = sf_get(t, HOOK)
-    assert len(host.resumed) == 1 and t.mem.r8(reply + sf.rGood) == 0
-    host = asking(t, ("select",), rows=[1])
-    reply = sf_get(t, HOOK)
-    assert names(host.shown[0][5]) == ["Letter", "Memo", "Old", "Sheet"]
-    assert t.mem.r8(reply + sf.rGood) == 1 and t.mem.r_pstr(reply + sf.rFName) == b"Memo"
-    assert t.mem.read(reply + sf.rFType, 4) == b"TEXT"
-    wd = t.mem.r16s(reply + sf.rVRefNum)
-    assert t.process.files.lookup(wd, 0, "Memo") is d.child("Memo")
+    assert t.mem.r_pstr(reply + sf.rFName) == boot.name.encode()
+    assert t.process.files.lookup(t.mem.r16s(reply + sf.rVRefNum), 0, "") is boot.root
+    docs(t)
 
     for rows, chosen in (([2], "Old"), ([], "Docs")):
         asking(t, ("select",), rows=rows)
@@ -350,6 +360,52 @@ def test_what_a_hooks_other_answers_do(qapp):
     assert len(host.resumed) == 2
     assert seen == [sf.sfHookFirstCall] + [sf.sfHookNullEvent] * 6 + [2, sf.sfHookLastCall]
     assert m.r8(reply + sf.sfGood) == 0
+
+
+def test_the_current_directory_while_a_dialog_is_up(qapp):
+    """SFSaveDisk and CurDirStore say the folder shown (Inside Macintosh:
+    Files, "Setting the Current Directory"); a hook that changes them and
+    returns 101 has the folder they name shown (Technical Note FL 33), and
+    one that returns 101 leaving them as they are, the same folder."""
+    t = app()
+    d = docs(t)
+    old = d.child("Old")
+    world = t.process.world
+    seen = []
+
+    def hook(n, w):
+        if n != sf.sfHookNullEvent:
+            return n
+        seen.append((world.r16(lowmem.SFSaveDisk), world.r32(lowmem.CurDirStore)))
+        if len(seen) == 2:
+            world.w32(lowmem.CurDirStore, d.cnid)
+        return sf.sfHookRebuildList if len(seen) in (2, 3) else n
+    t.procs[HOOK] = hook
+    host = asking(t, ("open", 2), *[("select",)] * 4, ("cancel",))
+    sf_get(t, HOOK)
+    vref = -t.system.files.boot.vref & 0xFFFF
+    assert seen == [(vref, old.cnid), (vref, old.cnid), (vref, d.cnid), (vref, d.cnid)]
+    assert [p.path[0] for p in host.places] == ["Old", "Docs", "Docs"]
+    assert world.r32(lowmem.CurDirStore) == d.cnid
+
+
+def test_a_list_rebuilt_after_the_hook_changes_the_types(qapp):
+    """A hook that changes the types in the type list and asks for the
+    list to be rebuilt has the files of the new types listed."""
+    t = app()
+    docs(t)
+    types = t.ptr(b"TEXT")
+
+    def hook(n, w):
+        if n != sf.sfHookNullEvent or t.mem.read(types, 4) != b"TEXT":
+            return n
+        t.mem.write(types, b"XLS ")
+        return sf.sfHookRebuildList
+    t.procs[HOOK] = hook
+    host = asking(t, ("select",), ("cancel",))
+    t("SFGetFile", WHERE, 0, 0, 1, types, HOOK, t.ptr(bytes(sf.SF_REPLY)))
+    assert names(host.shown[0][5]) == ["Letter", "Memo", "Old"]
+    assert [names(p) for p in host.places] == [["Old", "Sheet"]]
 
 
 def test_a_hooks_first_answer(qapp):

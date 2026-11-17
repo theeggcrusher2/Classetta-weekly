@@ -325,6 +325,42 @@ def test_fill_c_rgn_and_fill_c_poly_fill_with_a_pixel_pattern(g):
     assert screen_colors(g, Rect(45, 40, 46, 50)) == [[argb(WHITE)] * 10]
 
 
+def test_transparent_pen_mode_leaves_out_the_background_colour(g):
+    """In transparent (36, or 44 with the pattern bit), what a pattern
+    paints in the background colour is left out: in white on white,
+    PaintRect leaves what's there (the Maxis CD-ROM Sampler); in blue on
+    white with a grey pen, every other pixel is blue."""
+    cport(g)
+    r = Rect(20, 20, 22, 28)
+    red, blue = (g.system.devices.nearest(argb(c)) for c in (RED, BLUE))
+    g("RGBForeColor", rgb(g, *RED))
+    g("PaintRect", g.rect_ptr(r))
+    g("RGBForeColor", rgb(g, *WHITE))
+    for mode in (36, 44):
+        g("PenMode", mode)
+        g("PaintRect", g.rect_ptr(r))
+        assert screen_colors(g, r) == [[red] * 8] * 2
+    g("RGBForeColor", rgb(g, *BLUE))
+    g("PenPat", g.ptr(GRAY_PAT))
+    g("PaintRect", g.rect_ptr(r))
+    assert screen_colors(g, r) == [[blue, red] * 4, [red, blue] * 4]
+
+
+def test_transparent_pen_mode_leaves_out_a_pixel_patterns_background_colour(g):
+    cport(g)
+    r = Rect(20, 20, 22, 28)
+    red, blue = (g.system.devices.nearest(argb(c)) for c in (RED, BLUE))
+    g("RGBForeColor", rgb(g, *RED))
+    g("PaintRect", g.rect_ptr(r))
+    h = g("NewPixPat")
+    for color, expect in ((WHITE, red), (BLUE, blue)):
+        g("MakeRGBPat", h, rgb(g, *color))
+        g("PenPixPat", h)
+        g("PenMode", 44)
+        g("PaintRect", g.rect_ptr(r))
+        assert screen_colors(g, r) == [[expect] * 8] * 2
+
+
 def test_copy_pix_map_copies_into_the_destinations_own_colour_table(g, monkeypatch):
     src, dst = g("NewPixMap"), g("NewPixMap")
     table = color_table([WHITE, RED, BLUE, BLACK], seed=7)
@@ -417,6 +453,23 @@ def test_a_pixmap_with_bounds_wider_than_its_rows_is_drawn_on_as_far_as_they_go(
     assert rows == [bytes([2, 4, 4, 1])] * 2 + [bytes([2, 3, 0, 1])]
 
 
+def test_an_empty_port_rect_leaves_drawing_to_the_regions(g):
+    """Excel 4.0 draws its toolbar's buttons in a port whose portRect it
+    copies from a window it made with no size, having set the port's
+    visRgn and clipRgn to the PixMap's bounds: what's drawn goes where
+    they let it."""
+    port = cport(g)
+    table = g.handle(color_table([WHITE, BLACK, WHITE, BLACK, RED]))
+    h = offscreen(g, [bytes([2] * 4)] * 3, table)
+    g("SetPortPix", h)
+    port.port_rect = Rect(0, 0, 0, 0)
+    g("SetRectRgn", port.vis_rgn, 0, 0, 4, 3)
+    g("ClipRect", g.rect_ptr(Rect(0, 0, 2, 4)))
+    port.fg_color = 4
+    g("PaintRect", g.rect_ptr(Rect(0, 1, 3, 3)))
+    assert values(g, h) == [bytes([2, 4, 4, 2])] * 2 + [bytes([2] * 4)]
+
+
 def test_copy_bits_between_pixmaps_of_one_colour_table_copies_pixel_values(g):
     """From a PixMap to one with the same colour table, or one whose seed
     is the same, CopyBits copies pixel values as they are, scaled, with
@@ -429,6 +482,40 @@ def test_copy_bits_between_pixmaps_of_one_colour_table_copies_pixel_values(g):
         g("CopyBits", deref(g.mem, src), deref(g.mem, dst), g.rect_ptr(Rect(0, 0, 2, 2)),
           g.rect_ptr(Rect(0, 0, 4, 4)), 0, 0)
         assert values(g, dst) == [bytes([2, 2, 3, 3])] * 2 + [bytes([0, 0, 1, 1])] * 2
+
+
+def test_a_pixmap_with_no_colour_table_is_drawn_on_in_the_devices_colours(g):
+    """The Discovery Demo draws its pictures in an 8-bit PixMap whose
+    pmTable is NIL, then copies them out through another PixMap of the
+    same pixels with the screen's colour table: what's drawn there is in
+    the current device's colours, not black and white (in which the
+    sky, dark, was all 1s, the standard table's pale yellow)."""
+    port = cport(g)
+    devices = g.system.devices
+    rows = [bytes([5, 100, 200, 254]), bytes([0, 35, 215, 255])]
+    src = offscreen(g, rows, devices.pixmap(devices.main).pm_table)
+    for to_port in (False, True):
+        dst = offscreen(g, [bytes(4)] * 2, 0)
+        g("SetPortPix", dst)
+        g("CopyBits", deref(g.mem, src), port.addr + 2 if to_port else deref(g.mem, dst),
+          g.rect_ptr(Rect(0, 0, 2, 4)), g.rect_ptr(Rect(0, 0, 2, 4)), 0, 0)
+        assert values(g, dst) == rows
+
+
+def test_copy_bits_in_transparent_between_pixmaps_of_one_seed_copies_pixel_values(g):
+    """TerraTopia gives its offscreen PixMap the screen's seed but not its
+    colours, and draws its sprites in it in transparent: as in srcCopy,
+    the pixel values are copied as they are, but for the port's
+    bkColor's, which leave what's there."""
+    port = cport(g)
+    src = offscreen(g, [bytes([2, 3]), bytes([0, 1])],
+                    g.handle(color_table([WHITE, RED, BLUE, BLACK], seed=9)))
+    dst = offscreen(g, [bytes([2, 2])] * 2,
+                    g.handle(color_table([WHITE, BLACK, WHITE, BLACK], seed=9)))
+    port.bk_color = 0
+    g("CopyBits", deref(g.mem, src), deref(g.mem, dst), g.rect_ptr(Rect(0, 0, 2, 2)),
+      g.rect_ptr(Rect(0, 0, 2, 2)), 36, 0)
+    assert values(g, dst) == [bytes([2, 3]), bytes([2, 1])]
 
 
 def test_copy_bits_asks_the_search_procedures_for_a_bitmaps_black_and_white(g):

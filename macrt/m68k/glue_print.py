@@ -27,7 +27,6 @@ from weakref import WeakKeyDictionary
 from PyQt6.QtCore import QPoint
 from PyQt6.QtGui import QPainter
 
-from ..memory import ADDRESS_MASK
 from ..toolbox import lowmem, pict
 from ..toolbox import printing as pr
 from ..toolbox.events import ProcessKilled
@@ -97,7 +96,7 @@ def _record_heap(t, h: int):
 
 
 def _record(t, h: int) -> bytes:
-    p = t.mem.r32(h) & ADDRESS_MASK if h else 0
+    p = t.mem.r32(h) & t.mem.system.addr_mask if h else 0
     if not p:
         return b""
     heap = _record_heap(t, h)
@@ -112,7 +111,7 @@ def _put_record(t, h: int, rec: bytes) -> None:
     heap = _record_heap(t, h)
     if heap is not None and heap.handle_size(h) < pr.PRINT_SIZE:
         heap.set_handle_size(h, pr.PRINT_SIZE)
-    p = t.mem.r32(h) & ADDRESS_MASK
+    p = t.mem.r32(h) & t.mem.system.addr_mask
     if p:
         t.mem.write(p, rec)
 
@@ -498,7 +497,7 @@ def control(t, which: int, p1: int, p2: int, p3: int) -> int:
         elif p1 >> 16 == lPrLineFeed >> 16:
             st.raw_v += st.raw_line * (p1 & 0xFFFF or 1)
     elif which == iPrBitsCtl:
-        _raw_bits(t, st, p1 & ADDRESS_MASK, t.rect(p2), p3)
+        _raw_bits(t, st, p1 & t.mem.system.addr_mask, t.rect(p2), p3)
     elif which == iPrEvtCtl:
         _raw_screen(t, st, p1)
     return 0

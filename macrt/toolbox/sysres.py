@@ -6,6 +6,7 @@ macrt's own."""
 from __future__ import annotations
 
 import struct
+from collections.abc import Mapping
 
 from ..ui import keymap
 from . import intl, script
@@ -286,9 +287,16 @@ def fond(family: int, sizes: tuple[int, ...], ids: tuple[int, ...] = ()) -> byte
     return header + table
 
 
-def fonts() -> list[tuple[str, int, bytes, str]]:
-    return [("FOND", family, fond(family, sizes), name)
-            for family, (name, sizes) in FONTS.items()]
+def fonts(outlines: Mapping[int, int] | None = None) -> list[tuple[str, int, bytes, str]]:
+    """The FONDs of FONTS's families, and of those in outlines an outline
+    font too, size 0, with the ID of the 'sfnt' outlines gives."""
+    found = []
+    for family, (name, sizes) in FONTS.items():
+        ids = tuple(family << 7 | size for size in sizes)
+        if outlines and family in outlines:
+            sizes, ids = (0, *sizes), (outlines[family], *ids)
+        found.append(("FOND", family, fond(family, sizes, ids), name))
+    return found
 
 
 # The System's pattern list, PAT# 0 (sysPatListID), which GetIndPattern

@@ -6,7 +6,8 @@ import threading
 from builders import pstr
 from guest import Guest, Processor
 
-from macrt.m68k.glue_resources import RESOURCE_STUB, load_resource
+from macrt.m68k.glue_resources import (GET1_RESOURCE, GET_RESOURCE, RESOURCE_STUB,
+                                       get_resource, load_resource)
 from macrt.resfork import Resource
 from macrt.toolbox import resources as rm
 from macrt.toolbox.files import fsRdWrPerm
@@ -132,7 +133,7 @@ def test_a_patch_on_the_resource_stub_is_called_to_read_resources_in(qapp):
     were after, and the patch's handle the resource's."""
     g = Processor(FORK)
     res = g.process.resources
-    g.process.thread = threading.current_thread()
+    g.thread_id = threading.get_ident()
     patch = 0x1234
     g.patches = {RESOURCE_STUB: patch}
     res.load_hook = lambda m, e, force: load_resource(g, m, e, force)
@@ -170,3 +171,30 @@ def test_a_patch_on_the_resource_stub_is_called_to_read_resources_in(qapp):
     calls = len(seen)
     g.holding = False
     assert g.contents(g("GetResource", ICON, 1)) == bytes(128) and len(seen) == calls
+
+
+def test_the_toolbox_gets_resources_through_a_patch_on_getresource(qapp):
+    """macrt's own managers get a resource through the application's patch
+    on GetResource, or on Get1Resource, with its type and ID: Prince of
+    Destruction's expands the dialogs and pictures it keeps compressed.
+    The trap itself is the original the patch calls on to."""
+    g = Guest(FORK)
+    res = g.process.resources
+    g.thread_id = threading.get_ident()
+    get, get1 = 0x1234, 0x2345
+    g.patches = {GET_RESOURCE: get, GET1_RESOURCE: get1}
+    res.get_hook = lambda rtype, rid, one: get_resource(g, rtype, rid, one)
+    made = g.handle(pstr("Made"))
+    g.procs = {get: lambda rtype, rid: made if rid == 129 else g("GetResource", rtype, rid),
+               get1: lambda rtype, rid: made}
+
+    assert g.contents(g("GetString", 129)) == pstr("Made")
+    assert g.calls == [(get, (("l", STR), ("h", 129)))]
+    assert g.contents(g("GetString", 128)) == pstr("Hello") and len(g.calls) == 2
+    assert g.contents(g("GetResource", STR, 129)) == pstr("Bye") and len(g.calls) == 2
+    assert res.Get1Resource("STR ", 128) == made and g.calls[-1] == (get1, (("l", STR), ("h", 128)))
+    assert g.contents(g("Get1Resource", STR, 128)) == pstr("Hello") and len(g.calls) == 3
+
+    # The application isn't the one running: the Resource Manager gets it.
+    g.holding = False
+    assert g.contents(g("GetString", 129)) == pstr("Bye") and len(g.calls) == 3

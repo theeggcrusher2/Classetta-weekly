@@ -27,7 +27,6 @@ from contextlib import contextmanager
 
 from PyQt6.QtGui import QPainterPath
 
-from ..memory import ADDRESS_MASK
 from ..toolbox import constants as k
 from ..toolbox.controls import Control, Painter
 from ..toolbox.qdraw import CHICAGO_SYMBOLS, patXor, rect_path
@@ -67,8 +66,8 @@ def is_popup(proc_id: int) -> bool:
 
 
 def _data(t, c: Control) -> int:
-    h = c.data & ADDRESS_MASK
-    return t.mem.r32(h) & ADDRESS_MASK if h else 0
+    h = c.data & t.mem.system.addr_mask
+    return t.mem.r32(h) & t.mem.system.addr_mask if h else 0
 
 
 def _menu(t, c: Control):
@@ -81,7 +80,7 @@ def _menu(t, c: Control):
     menu_id = t.mem.r16s(d + MENU_ID)
     m = t.tb.GetMHandle(menu_id)
     if m is None:
-        m = _kept(t, t.mem.r32(d + MENU_HANDLE) & ADDRESS_MASK, menu_id)
+        m = _kept(t, t.mem.r32(d + MENU_HANDLE) & t.mem.system.addr_mask, menu_id)
     if m is None:
         rm = t.process.resources
         err = rm.error
@@ -127,7 +126,7 @@ def message(t, c: Control, msg: int, param: int) -> int:
         if c.visible and c.active and _Geometry(t, c, menu).area.contains(pt):
             return 1
     elif msg in (k.calcCRgns, k.calcCntlRgn, k.calcThumbRgn):
-        rgn = param & ADDRESS_MASK
+        rgn = param & t.mem.system.addr_mask
         set_rect_rgn(t.system.heap_of(rgn), rgn, _Geometry(t, c, menu).area)
     elif msg == k.autoTrack:
         return _track(t, c, menu)
@@ -171,7 +170,7 @@ def _dispose(t, c: Control, menu) -> None:
     """The menu goes too, unless the application put it in the menu list."""
     if menu is not None and t.tb.GetMHandle(menu.id) is None:
         t.tb.DisposeMenu(menu)
-    t.process.heap.dispose_handle(c.data & ADDRESS_MASK)
+    t.process.heap.dispose_handle(c.data & t.mem.system.addr_mask)
     c.data = 0
 
 

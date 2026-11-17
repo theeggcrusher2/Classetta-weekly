@@ -30,7 +30,7 @@ import struct
 from bisect import bisect_right
 from typing import TYPE_CHECKING, Callable, Iterable, Iterator, NamedTuple
 
-from ..memory import (ADDRESS_MASK, BYTE, INTEGER, LONG, LONGINT, POINT, RECT, Field, Record,
+from ..memory import (BYTE, INTEGER, LONG, LONGINT, POINT, RECT, Field, Record,
                       from_mac)
 from . import lowmem
 from .events import tick_count
@@ -690,7 +690,7 @@ class EditRecord:
         self.system = system
         self.mem = system.mem
         self.qd = qd
-        self.h = h & ADDRESS_MASK
+        self.h = h & system.addr_mask
         self.heap = system.heap_of(self.h)
         self.hooks = hooks or Hooks()
         self.now = now
@@ -713,7 +713,7 @@ class EditRecord:
 
     @property
     def port(self) -> GrafPort | None:
-        p = self.te.in_port & ADDRESS_MASK
+        p = self.te.in_port & self.mem.system.addr_mask
         return self.system.port_at(p) if p else None
 
     @property
@@ -730,8 +730,8 @@ class EditRecord:
         return min(a, b), max(a, b)
 
     def _deref(self, h: int) -> int:
-        h &= ADDRESS_MASK
-        return self.mem.r32(h) & ADDRESS_MASK if h else 0
+        h &= self.mem.system.addr_mask
+        return self.mem.r32(h) & self.mem.system.addr_mask if h else 0
 
     def _heap_for(self, h: int) -> Heap:
         return self.system.find_heap(h) or self.heap
@@ -744,7 +744,7 @@ class EditRecord:
 
     def _read_text(self) -> bytes:
         te = self.te
-        h = te.h_text & ADDRESS_MASK
+        h = te.h_text & self.mem.system.addr_mask
         p = self._deref(h)
         if not p:
             return b""
@@ -833,7 +833,7 @@ class EditRecord:
         return lay
 
     def _break_test(self) -> Callable[[int], bool] | None:
-        proc = self.te.word_break & ADDRESS_MASK
+        proc = self.te.word_break & self.mem.system.addr_mask
         if proc in (0, self.records.word_break_proc):
             return None
 
@@ -858,7 +858,7 @@ class EditRecord:
         self.mem.write(te.addr + HEADER, data[:2 * room])
 
     def _write_text(self, text: bytes) -> bool:
-        h = self.te.h_text & ADDRESS_MASK
+        h = self.te.h_text & self.mem.system.addr_mask
         if not h:
             h = self.heap.new_handle(len(text))
             if not h:
@@ -882,7 +882,7 @@ class EditRecord:
             if st not in styles:
                 styles.append(st)
             index.append(styles.index(st))
-        sh = self.te.style_handle & ADDRESS_MASK
+        sh = self.te.style_handle & self.mem.system.addr_mask
         size = STYLE_REC + 4 * (len(runs) + 1)
         if self._heap_for(sh).handle_size(sh) < size:
             if not self._resize(sh, size):
@@ -900,7 +900,7 @@ class EditRecord:
         lh = b"".join(struct.pack(">hh", *lay.line_metrics(i)) for i in range(lay.count))
         lh += bytes(4)
         for h, data in ((sr.style_tab, tab), (sr.lh_tab, lh)):
-            if h & ADDRESS_MASK and self._resize(h, len(data)):
+            if h & self.mem.system.addr_mask and self._resize(h, len(data)):
                 self.mem.write(self._deref(h), data)
 
     def _sel_fields(self) -> None:
@@ -966,8 +966,8 @@ class EditRecord:
         """r inverted, or given to the application's hook if it has one."""
         if r is None or r.empty:
             return
-        if hook & ADDRESS_MASK:
-            self.hooks.hilite(hook & ADDRESS_MASK, self.h, r)
+        if hook & self.mem.system.addr_mask:
+            self.hooks.hilite(hook & self.mem.system.addr_mask, self.h, r)
         else:
             self.qd.region(port, "Invert", Region.rect(r).sect(area))
 
@@ -1148,7 +1148,7 @@ class EditRecord:
         holds: a program can give a record other text by setting hText
         alone, as Script Editor does to label its buttons."""
         te = self.te
-        h = te.h_text & ADDRESS_MASK
+        h = te.h_text & self.mem.system.addr_mask
         if self._deref(h):
             te.te_length = min(self._heap_for(h).handle_size(h), 0x7FFF)
             self.layout = self._layout()
@@ -1235,7 +1235,7 @@ class EditRecord:
             lo, hi = min(anchor[0], u[0]), max(anchor[1], u[1])
             self.select(lo, hi, ld and lo == hi)
         to(off, lead)
-        clik = te.clik_loop & ADDRESS_MASK
+        clik = te.clik_loop & self.mem.system.addr_mask
         while tracker.still_down():
             if clik not in (0, self.records.clik_loop_proc):
                 if not self.hooks.clik_loop(clik, self.h):
@@ -1380,7 +1380,7 @@ class EditRecord:
 
     # -- the dispatch record -----------------------------------------------------
     def _dispatch_rec(self) -> int:
-        h = self.te.h_dispatch_rec & ADDRESS_MASK
+        h = self.te.h_dispatch_rec & self.mem.system.addr_mask
         return self._deref(h) if h and self._heap_for(h).is_handle(h) else 0
 
     def feature(self, bit: int, action: int) -> int:
@@ -1563,25 +1563,25 @@ def new_record(system: System, qd: QuickDraw, heap: Heap, port: GrafPort, dest: 
 
 def dispose_record(system: System, h: int) -> None:
     """TEDispose: the record, its text and the rest of what it owns."""
-    h &= ADDRESS_MASK
+    h &= system.addr_mask
     heap = system.heap_of(h)
     mem = system.mem
     te = TERec(mem, heap.deref(h))
 
     def free(x: int) -> None:
-        x &= ADDRESS_MASK
+        x &= mem.system.addr_mask
         if not x:
             return
         owner = system.find_heap(x)
         if owner is not None and owner.is_handle(x):
             owner.dispose_handle(x)
-    sh = te.style_handle & ADDRESS_MASK if te.tx_size == -1 else 0
-    p = mem.r32(sh) & ADDRESS_MASK if sh else 0
+    sh = te.style_handle & mem.system.addr_mask if te.tx_size == -1 else 0
+    p = mem.r32(sh) & mem.system.addr_mask if sh else 0
     if p:
         sr = TEStyleRec(mem, p)
-        null = sr.null_style & ADDRESS_MASK
-        if null and mem.r32(null) & ADDRESS_MASK:
-            free(mem.r32((mem.r32(null) & ADDRESS_MASK) + 4))
+        null = sr.null_style & mem.system.addr_mask
+        if null and mem.r32(null) & mem.system.addr_mask:
+            free(mem.r32((mem.r32(null) & mem.system.addr_mask) + 4))
         for x in (sr.style_tab, sr.lh_tab, null):
             free(x)
     for x in (sh, te.h_text, te.h_dispatch_rec, h):
@@ -1630,15 +1630,15 @@ def set_scrap_length(world: World, n: int) -> None:
 
 
 def te_scrap(world: World, mem) -> bytes:
-    h = world.r32(lowmem.TEScrpHandle) & ADDRESS_MASK
-    p = mem.r32(h) & ADDRESS_MASK if h else 0
+    h = world.r32(lowmem.TEScrpHandle) & mem.system.addr_mask
+    p = mem.r32(h) & mem.system.addr_mask if h else 0
     return mem.read(p, scrap_length(world)) if p else b""
 
 
 def set_te_scrap(world: World, heap: Heap, data: bytes) -> bool:
     """The TextEdit scrap's contents, in a handle in heap; False if
     there's no room."""
-    h = world.r32(lowmem.TEScrpHandle) & ADDRESS_MASK
+    h = world.r32(lowmem.TEScrpHandle) & world.mem.system.addr_mask
     if not h or not heap.is_handle(h):
         h = heap.new_handle(len(data))
         if not h:

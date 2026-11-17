@@ -158,15 +158,27 @@ def vbl() -> bytes:
     return macbinary("VBL", b"", build_fork(resources), b"APPL", b"VBLT")
 
 
+def deferred() -> bytes:
+    code = assemble(HERE / "deferred.s")
+    resources = code_resources(code, globals_size=72)
+    return macbinary("Deferred", b"", build_fork(resources), b"APPL", b"DEFR")
+
+
 def timer() -> bytes:
     code = assemble(HERE / "timer.s")
     resources = code_resources(code, globals_size=66)
     return macbinary("Timer", b"", build_fork(resources), b"APPL", b"TIMR")
 
 
+def threads() -> bytes:
+    code = assemble(HERE / "threads.s")
+    resources = code_resources(code, globals_size=106)
+    return macbinary("Threads", b"", build_fork(resources), b"APPL", b"THRD")
+
+
 def poll() -> bytes:
     code = assemble(HERE / "poll.s")
-    resources = code_resources(code, globals_size=24)
+    resources = code_resources(code, globals_size=36)
     return macbinary("Poll", b"", build_fork(resources), b"APPL", b"POLL")
 
 
@@ -282,7 +294,8 @@ def panel() -> bytes:
 
 APPS = {"Hello.bin": hello, "Launcher.bin": launcher, "Controls.bin": controls,
         "Dialogs.bin": dialogs, "Edit.bin": edit, "Lists.bin": lists, "Menus.bin": menus,
-        "Frames.bin": frames, "VBL.bin": vbl, "Timer.bin": timer, "AEvents.bin": aevents,
+        "Frames.bin": frames, "VBL.bin": vbl, "Timer.bin": timer, "Threads.bin": threads,
+        "AEvents.bin": aevents, "Deferred.bin": deferred,
         "ResStub.bin": resstub, "OSPatch.bin": ospatch, "Vectors.bin": vectors, "Poll.bin": poll,
         "Spin.bin": spin, "Tempo.bin": tempo, "Sounds.bin": sounds, "Driver.bin": driver,
         "Desk.bin": desk, "Panel.bin": panel, "Unanswered.bin": unanswered}

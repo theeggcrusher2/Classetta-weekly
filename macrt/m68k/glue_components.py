@@ -27,7 +27,6 @@ import struct
 from dataclasses import dataclass
 from weakref import WeakKeyDictionary
 
-from ..memory import ADDRESS_MASK
 from ..toolbox.files import fsRdPerm
 from ..toolbox.memmgr import noErr
 from .dispatch import pop_args, put_result, raw
@@ -135,13 +134,13 @@ def _matches(c: Component, looking: tuple) -> bool:
 
 
 def _description(t, p: int) -> tuple:
-    return DESC.unpack(t.mem.read(p & ADDRESS_MASK, DESC.size))
+    return DESC.unpack(t.mem.read(p & t.mem.system.addr_mask, DESC.size))
 
 
 def _handle_bytes(t, h: int) -> bytes:
-    h &= ADDRESS_MASK
+    h &= t.mem.system.addr_mask
     heap = t.system.find_heap(h) if h else None
-    p = t.mem.r32(h) & ADDRESS_MASK if heap is not None else 0
+    p = t.mem.r32(h) & t.mem.system.addr_mask if heap is not None else 0
     return t.mem.read(p, heap.handle_size(h)) if p else b""
 
 
@@ -225,7 +224,7 @@ def _call_function(t) -> None:
     the storage if it was pushed, as its first; it returns to the caller
     with its result where the caller left room for it."""
     cpu, mem = t.cpu, t.mem
-    func, params = mem.r32(cpu.sp) & ADDRESS_MASK, mem.r32(cpu.sp + 4) & ADDRESS_MASK
+    func, params = mem.r32(cpu.sp) & mem.system.addr_mask, mem.r32(cpu.sp + 4) & mem.system.addr_mask
     size = mem.r8(params + 1)
     sp = cpu.sp + 8 - size
     mem.write(sp, mem.read(params + 4, size))
@@ -380,7 +379,7 @@ def _new(t, desc: tuple, flags: int) -> Component:
 def _register_resource(t, cr: int, flags: int) -> int:
     rm = t.process.resources
     err = rm.error
-    refnum = rm.HomeResFile(cr & ADDRESS_MASK)
+    refnum = rm.HomeResFile(cr & t.mem.system.addr_mask)
     home = rm.node_of(refnum) if rm.error == noErr else None
     rm.error = err
     data = _handle_bytes(t, cr)
@@ -400,7 +399,7 @@ def _register_resource(t, cr: int, flags: int) -> int:
 # =========================================================================
 def RegisterComponent(t, cd, entry, flags, name, info, icon):
     comp = _new(t, _description(t, cd), flags)
-    comp.entry = entry & ADDRESS_MASK
+    comp.entry = entry & t.mem.system.addr_mask
     comp.name, comp.info, comp.icon = (_handle_bytes(t, h) for h in (name, info, icon))
     return _register(t, comp, flags)
 
@@ -432,10 +431,10 @@ def GetComponentInfo(t, ref, cd, name, info, icon):
     if comp is None:
         return invalidComponentID
     if cd:
-        t.mem.write(cd & ADDRESS_MASK, DESC.pack(*comp.desc))
+        t.mem.write(cd & t.mem.system.addr_mask, DESC.pack(*comp.desc))
     for h, data in ((name, comp.name), (info, comp.info), (icon, comp.icon)):
         if h:
-            _fill(t, h & ADDRESS_MASK, data)
+            _fill(t, h & t.mem.system.addr_mask, data)
     return noErr
 
 
@@ -570,7 +569,7 @@ def OpenDefaultComponent(t, kind, sub):
 
 def DelegateComponentCall(t, params, ci):
     inst = manager(t).instances.get(ci)
-    return _request(t, inst, params & ADDRESS_MASK) if inst is not None else badComponentInstance
+    return _request(t, inst, params & t.mem.system.addr_mask) if inst is not None else badComponentInstance
 
 
 # D0: name, the arguments' codes, the result's, and the routine

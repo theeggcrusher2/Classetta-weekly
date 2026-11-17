@@ -2,12 +2,16 @@
 Manual's tables have it (Section 8), for a program that times a disk's
 bytes by the instructions it runs between them."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from macrt.m68k.cpu import CPU
 from macrt.m68k.cycles import RATE, cycles, untaken
 from macrt.m68k.hardware import Clock
 from macrt.memory import RAM
+
+SYSTEM_24 = SimpleNamespace(mmu_32_bit=False, addr_mask=0xFFFFFF)
 
 CODE = 0x10000
 
@@ -49,7 +53,7 @@ def test_a_branch_not_taken_takes_more_or_less(code, more):
 def test_timed_code_counts_the_cycles_of_the_instructions_it_runs():
     """A branch of two words that isn't taken too, though the core says
     each instruction is a word long."""
-    mem = RAM(0x20000)
+    mem = RAM(SYSTEM_24, 0x20000)
     mem.write(CODE, bytes.fromhex("7002"            # moveq #2,d0          4
                                   "51c8 fffe"       # dbra d0,*            10 10 14
                                   "b000"            # cmp.b d0,d0          4

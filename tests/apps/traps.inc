@@ -15,12 +15,15 @@
         trap    InitDialogs,    0xA97B
         trap    InitCursor,     0xA850
         trap    FlushEvents,    0xA032
+        trap    PostEvent,      0xA02F
         trap    GetMenu,        0xA9BF
         trap    InsertMenu,     0xA935
         trap    AppendResMenu,  0xA94D
         trap    DrawMenuBar,    0xA937
         trap    GetNewWindow,   0xA9BD
         trap    SetPort,        0xA873
+        trap    MovePortTo,     0xA877
+        trap    BlockMove,      0xA02E
         trap    WaitNextEvent,  0xA860
         trap    BeginUpdate,    0xA922
         trap    EndUpdate,      0xA923
@@ -90,6 +93,7 @@
         trap    GetResource,    0xA9A0
         trap    VInstall,       0xA033
         trap    VRemove,        0xA034
+        trap    DTInstall,      0xA082
         trap    Delay,          0xA03B
         trap    InsTime,        0xA058
         trap    InsXTime,       0xA458
@@ -135,3 +139,7 @@
         trap    SystemEdit,     0xA9C2
         trap    TickCount,      0xA975
         trap    Button,         0xA974
+        trap    NewPtr,         0xA11E
+        trap    SetGrowZone,    0xA04B
+        trap    StackSpace,     0xA065
+        trap    ThreadDispatch, 0xABF2  | not in trapdefs: dispatch.EXTRA_NAMES

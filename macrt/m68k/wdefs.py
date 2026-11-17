@@ -13,8 +13,10 @@ window a point is in (wHit).  The window's view on the host takes the
 shape of the structure region, and shows the frame drawn there.
 
 68k code runs on the application's thread, so the host only notes a
-window whose frame needs doing (Process.frames_due) and the application
-does it at its next trap.
+window whose frame needs doing (Process.frames_due), and the application
+does it at the end of its next call of the Window, Dialog or Event
+Manager's that macrt does it at (runtime.FRAMES_AT), or as ModalDialog
+waits.
 
 An application's WDEF may leave some of its messages to the System's
 (Excel's do), so system_wdef answers them for WDEF 0 and 1 with the
@@ -28,7 +30,6 @@ from contextlib import nullcontext
 
 from PyQt6.QtGui import QColor, QImage, QPainter, QRegion
 
-from ..memory import ADDRESS_MASK
 from ..toolbox import constants as k
 from ..toolbox import lowmem
 from ..toolbox.events import ProcessKilled
@@ -37,20 +38,23 @@ from ..toolbox.system import RTS
 from ..toolbox.types import Point
 from ..toolbox.windows import WindowRecord, describe_proc
 from ..ui import chrome
+from .cpu import INTERRUPT_MASK
 
 
 def entry(t, w: WindowRecord) -> int:
     """Where w's own WDEF starts; 0 if it has none to run."""
-    if not w.own_wdef:
+    if not w.has_custom_definition:
         return 0
-    h = w.window_def_proc & ADDRESS_MASK
-    p = t.mem.r32(h) & ADDRESS_MASK
+    # The variation code sits in the handle's top byte in 24-bit mode.
+    # On a 32 bit system, the entire 32 bits is address.
+    h = w.window_def_proc & t.mem.system.addr_mask
+    p = t.mem.r32(h) & t.mem.system.addr_mask
     if not p:
         res = t.process.resources
         err = res.error
-        res.LoadResource(h)             # purged, as a Mac's Window Manager would find it
+        res.LoadResource(h)
         res.error = err
-        p = t.mem.r32(h) & ADDRESS_MASK
+        p = t.mem.r32(h) & t.mem.system.addr_mask
     return p if p and t.mem.r16(p) != RTS else 0
 
 
@@ -66,7 +70,7 @@ def message(t, w: WindowRecord, msg: int, param: int = 0) -> int:
     if not at:
         return 0
     with nullcontext() if t.holding else t.resumed():
-        var = t.mem.r32(t.process.partition.a5) & ADDRESS_MASK     # thePort
+        var = t.mem.r32(t.process.partition.a5) & t.mem.system.addr_mask     # thePort
         saved = t.mem.r32(var)
         t.mem.w32(var, t.mem.r32(lowmem.WMgrPort))
         bounds = t.mem.read(w.addr + 8, 8) if msg == k.wCalcRgns and w.is_color else None
@@ -74,7 +78,7 @@ def message(t, w: WindowRecord, msg: int, param: int = 0) -> int:
             t.mem.w_rect(w.addr + 8, w.port_bits_bounds)
         t.in_wdef += 1
         try:
-            return t.call(at, (("h", (w.window_def_proc >> 24) & 0xFF), ("p", w.addr),
+            return t.call(at, (("h", w.proc_id), ("p", w.addr),
                                ("h", msg), ("l", param)), "l")
         finally:
             t.in_wdef -= 1
@@ -91,9 +95,11 @@ def _live(t, w: WindowRecord) -> bool:
 # Shape and frame
 # =========================================================================
 def refresh(t) -> None:
-    """Shape and draw the windows whose frames need it, between two of the
-    application's traps."""
+    """Shape and draw the windows whose frames need it, unless this is
+    a WDEF's own call or interrupts are masked."""
     due = t.process.frames_due
+    if not due or t.in_wdef or t.cpu.sr & INTERRUPT_MASK:
+        return
     while due:
         w = due.pop()
         if _live(t, w) and entry(t, w):
@@ -132,7 +138,7 @@ def draw(t, w: WindowRecord, part: int = 0) -> None:
     # clipped to the structure region.
     surfaces = t.tb.qd.surfaces
     saved = []
-    for wmgr in dict.fromkeys(mem.r32(a) & ADDRESS_MASK for a in (lowmem.WMgrPort,
+    for wmgr in dict.fromkeys(mem.r32(a) & mem.system.addr_mask for a in (lowmem.WMgrPort,
                                                                   lowmem.WMgrCPort)):
         port = t.system.port_at(wmgr) if wmgr else None
         if port is None:
@@ -211,7 +217,7 @@ class WindowDefinitions:
 # The System's WDEF 0 and 1
 # =========================================================================
 def system_wdef(t, def_id: int, var: int, w_ptr: int, msg: int, param: int) -> int:
-    w = t.window(w_ptr & ADDRESS_MASK)
+    w = t.window(w_ptr & t.mem.system.addr_mask)
     if w is None:
         return 0
     if msg == k.wDraw and param in (k.wInGoAway, k.wInZoomIn, k.wInZoomOut):
@@ -231,7 +237,7 @@ def system_wdef(t, def_id: int, var: int, w_ptr: int, msg: int, param: int) -> i
         for h, rgn in ((w.cont_rgn, cont), (w.struc_rgn, struc)):
             write_rgn(t.system.heap_of(h), h, rgn)
     elif msg == k.wDraw and w.visible:
-        surface = t.tb.qd.surfaces.get(t.mem.r32(lowmem.WMgrPort) & ADDRESS_MASK)
+        surface = t.tb.qd.surfaces.get(t.mem.r32(lowmem.WMgrPort) & t.mem.system.addr_mask)
         if isinstance(surface, ImageSurface):    # the image draw() has it draw in
             with surface.painter() as p:
                 p.translate(x0, y0)

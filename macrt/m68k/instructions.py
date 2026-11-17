@@ -1,8 +1,9 @@
 """
 Instructions the core doesn't know, done here as the processor does them:
-the 68020's CHK2 and CMP2, and the 68881's FMOVE to and from its packed
-decimal real format, FMOVE from #<data> to its control registers, and
-FSAVE and FRESTORE.
+the 68020's CHK2, CMP2, PACK and UNPK, and the 68881's FMOVE to and from
+its packed decimal real format, FMOVE from #<data> to its control
+registers, FMOVEM of its data registers to a predecrement, and FSAVE
+and FRESTORE.
 
 The core takes CHK2 and CMP2 for illegal instructions, and MPW Pascal's
 code for a 68020 checks a subrange's bounds with CHK2 (MPWAccuracy's).
@@ -13,10 +14,25 @@ error; Mandelbrot 2.7 turns its numbers into text with one.  An FMOVE of
 MPWAccuracy clears its FPSR with one.  FSAVE and FRESTORE it takes for
 illegal instructions, and MPWAccuracy's own trap for raising a
 floating-point exception has them.  It takes each before it has done any of it, so run() does it
-here, from where it was (see CPU._intr).
+here, from where it was (see CPU._intr).  PACK and UNPK it runs as
+instructions of one word that leave the registers as they were, and then
+their adjustment word as the next instruction, so the core is stopped at them, as at a TRAPcc, for
+run() to do them here (see CPU._stop_at).  SCSITools looks for a 68020 by
+running a PACK, with its own handler for the illegal instruction a 68000
+would take it for.
+
+An FMOVEM.X to -(An) with no registers in its list the core runs as if
+it had one: it leaves An 12 bytes lower, though it writes nothing.
+Masters of the Elements' code saves the FPU with an FSAVE, an FMOVEM of
+FP0-FP7 and one of no registers, all to -(A7), and takes them back up
+with an FMOVEM of no registers from (A7)+, which the core runs as it
+should: so A7 comes back 12 bytes lower, and the code returns to what's
+there.  So the core is stopped at an FMOVEM.X to -(An) with no registers
+in its word, or with its list in a data register, which may have none,
+for run() to do it here.
 
 From the M68000 Family Programmer's Reference Manual: CHK2, CMP2,
-FMOVE, FMOVE and FMOVEM of the system control registers, FSAVE and
+PACK, UNPK, FMOVE, FMOVEM, FMOVE and FMOVEM of the system control registers, FSAVE and
 FRESTORE, the packed decimal real format (1.5.1), and the FPCR and FPSR
 (1.2.2, 1.2.3); and the MC68881/MC68882 User's Manual, for the 68881's
 state frames.
@@ -54,6 +70,9 @@ PACKED = 12                             # bytes
 FMOVE_P_IN, FMOVE_P_OUT = 0x4C00, 0x6C00   # an FMOVE.P's second word, but its register and k-factor
 P_STATIC, P_DYNAMIC = 3, 7              # a destination format's: a k-factor in the word, in Dn
 FMOVE_IMMEDIATE = 0xF23C                # an FMOVE from #<data>
+FMOVEM_DOWN = 0xF220                    # an FMOVEM with -(An), but An
+FMOVEM_X_DOWN, DYNAMIC_LIST = 0xE000, 0x0800    # its second word: FPn to -(An), the list in Dn
+EXTENDED = 12                           # an extended real's bytes in memory
 FSAVE, FRESTORE = 0xF300, 0xF340
 # The 68881's state frames, from its user's manual (6.4.2): a null one, a
 # format word of 0, and an idle one, of the first version, with 24 bytes
@@ -67,6 +86,7 @@ NULL_FRAME, IDLE_FORMAT, IDLE_FRAME = 4, 0x1F18, 28
 NO_EXCEPTION_PENDING = 1 << 27
 IDLE = struct.pack(">HHHH12sII", IDLE_FORMAT, 0, 0, 0xFFFF, bytes(12), 0, 0x7C00FFFF)
 FMOVE_TO_CONTROL, CONTROL_LIST = 0x8000, 0x1C00     # its second word: to FPCR, FPSR, FPIAR
+PACK, UNPK = 0x8140, 0x8180             # but their registers and R/M bit
 
 
 def _s8(value: int) -> int:
@@ -85,6 +105,11 @@ class Illegal(Exception):
     """An extension word the processor has no meaning for."""
 
 
+def is_pack(op: int) -> bool:
+    """Whether op is a PACK's or an UNPK's first word."""
+    return op & 0xF1F0 in (PACK, UNPK)
+
+
 def known(mem, at: int) -> bool:
     """Whether the instruction at at is one done here."""
     op, ext = mem.r16(at), mem.r16(at + 2)
@@ -97,6 +122,8 @@ def known(mem, at: int) -> bool:
         return mode in (2, 3, 5, 6) or mode == 7 and reg < 4
     if op == FMOVE_IMMEDIATE and ext & 0xE000 == FMOVE_TO_CONTROL:     # FMOVEM.L #<data>,<list>
         return ext & 0xE3FF == FMOVE_TO_CONTROL and ext & CONTROL_LIST != 0
+    if op & 0xFFF8 == FMOVEM_DOWN and ext & 0xE000 == FMOVEM_X_DOWN:    # FMOVEM.X <list>,-(An)
+        return ext == FMOVEM_X_DOWN or ext & 0xFF8F == FMOVEM_X_DOWN | DYNAMIC_LIST
     if op & 0xFFC0 == 0xF200 and mode > 1:                  # FMOVE.P, from memory or to it
         return (ext & 0xFC7F == FMOVE_P_IN
                 or ext & 0xFC00 == FMOVE_P_OUT and (mode < 7 or reg < 2)
@@ -116,8 +143,12 @@ def do(cpu, at: int) -> tuple[int, int | None]:
             return _frestore(cpu, at, op)
         if op == FMOVE_IMMEDIATE and ext & 0xE000 == FMOVE_TO_CONTROL:
             return _fmove_to_control(cpu, at, ext), None
+        if op & 0xFFF8 == FMOVEM_DOWN and ext & 0xF700 == FMOVEM_X_DOWN:
+            return _fmovem_down(cpu, at, op, ext), None
         if op & 0xFFC0 == 0xF200:
             return _fmove_packed(cpu, at, op, ext), None
+        if is_pack(op):
+            return _pack(cpu, at, op, ext), None
         return _chk2(cpu, at, op, ext)
     except Illegal:
         return at, ILLEGAL
@@ -235,6 +266,46 @@ def _extend(value: int, size: int) -> int:
     return value - (1 << bits) if value >> (bits - 1) else value
 
 
+# -- PACK, UNPK --------------------------------------------------------------------
+def _pack(cpu, at: int, op: int, adjustment: int) -> int:
+    """PACK: the adjustment added to the source's word, and the low four
+    bits of each of its bytes made a byte, into the destination's low
+    byte.  UNPK: the source byte's two digits made the low four bits of
+    each byte of a word, and the adjustment added, into the destination's
+    low word.  From data register to data register, or from -(Ax) to -(Ay),
+    a byte at a time, the word's low byte at the higher address.  The
+    condition codes are as they were."""
+    src, dst = op & 7, op >> 9 & 7
+    unpack = op & 0xF1F0 == UNPK
+    if not op & 8:
+        value = cpu.d(src)
+        if unpack:
+            result = (value << 4 & 0xF00 | value & 0xF) + adjustment
+            cpu.set_d(dst, cpu.d(dst) & 0xFFFF0000 | result & 0xFFFF)
+        else:
+            result = value + adjustment
+            cpu.set_d(dst, cpu.d(dst) & 0xFFFFFF00 | result >> 4 & 0xF0 | result & 0xF)
+        return at + 4
+    mem = cpu.mem
+    if unpack:
+        value = mem.r8(_predecrement(cpu, src))
+        result = (value << 4 & 0xF00 | value & 0xF) + adjustment
+        mem.w8(_predecrement(cpu, dst), result & 0xFF)
+        mem.w8(_predecrement(cpu, dst), result >> 8 & 0xFF)
+    else:
+        low = mem.r8(_predecrement(cpu, src))
+        result = (mem.r8(_predecrement(cpu, src)) << 8 | low) + adjustment
+        mem.w8(_predecrement(cpu, dst), result >> 4 & 0xF0 | result & 0xF)
+    return at + 4
+
+
+def _predecrement(cpu, n: int) -> int:
+    """-(An) for a byte: by two for A7, which stays even."""
+    a = (cpu.a(n) - (2 if n == 7 else 1)) & 0xFFFFFFFF
+    cpu.set_a(n, a)
+    return a
+
+
 # -- FSAVE and FRESTORE ------------------------------------------------------------
 def _fsave(cpu, at: int, op: int) -> int:
     """FSAVE <ea>: an idle state frame, the core being done with each
@@ -283,6 +354,24 @@ def _fmove_to_control(cpu, at: int, ext: int) -> int:
     if ext & 0x0400:
         at += 4
     return at
+
+
+# -- FMOVEM.X <list>,-(An) ---------------------------------------------------------
+def _fmovem_down(cpu, at: int, op: int, ext: int) -> int:
+    """FMOVEM.X <list>,-(An): each FPn in the list, from FP7 down, put as
+    an extended real 12 bytes below An, An being taken down to it, so that
+    it's left at the last.  The list is the word's low byte, or Dn's, a
+    bit n for each FPn: with none in it, An is left as it is."""
+    n = op & 7
+    listed = cpu.d(ext >> 4 & 7) if ext & DYNAMIC_LIST else ext
+    a = cpu.a(n)
+    for r in range(7, -1, -1):
+        if listed >> r & 1:
+            se, mantissa = cpu.fp(r)
+            a = (a - EXTENDED) & 0xFFFFFFFF
+            cpu.mem.write(a, struct.pack(">HHQ", se, 0, mantissa))
+    cpu.set_a(n, a)
+    return at + 4
 
 
 # -- FMOVE.P -----------------------------------------------------------------------

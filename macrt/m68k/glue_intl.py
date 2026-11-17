@@ -7,7 +7,6 @@ and 1 is given the US ones (macrt.toolbox.sysres).
 
 from __future__ import annotations
 
-from ..memory import ADDRESS_MASK
 from ..toolbox import intl
 from ..toolbox import script as sm
 from ..toolbox.memmgr import noErr
@@ -38,7 +37,7 @@ def intl_handle(t, which: int) -> int:
 
 
 def _record(t, h: int, which: int) -> bytes:
-    p = t.mem.r32(h) & ADDRESS_MASK if h else 0
+    p = t.mem.r32(h) & t.mem.system.addr_mask if h else 0
     return t.mem.read(p, SIZES[which]) if p else intl.DEFAULTS[which]()
 
 
@@ -110,7 +109,7 @@ def IUSetIntl(t, refnum, which, h):
     if rm.error == noErr:
         old = rm.get("INTL", which, one=True)
         if old and old != h:
-            data = t.mem.read(t.mem.r32(h) & ADDRESS_MASK, t.system.heap_of(h).handle_size(h))
+            data = t.mem.read(t.mem.r32(h) & t.mem.system.addr_mask, t.system.heap_of(h).handle_size(h))
             heap = t.system.heap_of(old)
             if heap.set_handle_size(old, len(data)):
                 t.mem.write(heap.deref(old), data)
@@ -135,7 +134,7 @@ def IUGetItlTable(t, script, table_code, itl_p, offset_p, length_p):
     itlPtr is NIL, as for a table a script hasn't got (Inside Macintosh:
     Text, the Script Manager)."""
     h = intl_handle(t, 4) if script in ROMAN and table_code in ITL4_TABLES else 0
-    p = t.mem.r32(h) & ADDRESS_MASK if h else 0
+    p = t.mem.r32(h) & t.mem.system.addr_mask if h else 0
     offset_at, length_at = ITL4_TABLES.get(table_code, (0, 0))
     offset = t.mem.r32(p + offset_at) if p else 0
     length = t.mem.r16(p + length_at) if p else 0

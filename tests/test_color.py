@@ -7,6 +7,7 @@ import pytest
 from macrt.resfork import Resource
 from macrt.toolbox.color import is_light, luminance, rgb_color
 from macrt.toolbox.constants import blackColor, whiteColor
+from macrt.toolbox.memmgr import memWZErr
 
 from guest import Guest
 
@@ -101,3 +102,25 @@ def test_get_c_table(qapp):
     h = g("GetCTable", 300)
     assert g.contents(h) == clut and not g.heap.get_state(h) & 0x20      # a copy
     assert g("GetCTable", 301) == 0
+    g("DisposeCTable", 0xFFFFFFFF)         # in no heap, as DisposeHandle has it
+    assert g.mem_err == memWZErr
+
+
+def test_get_c_table_with_the_highlight_colour(qapp):
+    """64 + depth: the standard colours with the highlight colour added
+    (Inside Macintosh: Imaging With QuickDraw's GetCTable)."""
+    g = Guest()
+    g("HiliteColor", rgb(g, 0xFFFF, 0x8000, 0xFFFF))
+    tables = {}
+    for ct_id in (4, 8, 66, 68, 72):
+        h = g("GetCTable", ct_id)
+        assert struct.unpack_from(">l", g.contents(h))[0] == ct_id
+        tables[ct_id] = [e[1:] for e in colour_table(g.contents(h))]
+    assert tables[66] == [(0xFFFF,) * 3, (0x7FFF,) * 3, (0xFFFF, 0x8000, 0xFFFF), (0, 0, 0)]
+    # the closest of the 4-bit colours, light grey, is $4040 off: averaged
+    assert [i for i in range(16) if tables[68][i] != tables[4][i]] == [12]
+    assert tables[68][12] == (0xE05F, 0xA060, 0xE05F)
+    assert tables[72] == tables[8]          # $FFFF $9999 $FFFF is near enough
+    g("HiliteColor", rgb(g, 0x1000, 0x2000, 0xF000))
+    assert [e[1:] for e in colour_table(g.contents(g("GetCTable", 68)))] == tables[4]
+    assert g("GetCTable", 64) == 0 and g("GetCTable", 65) == 0 and g("GetCTable", 67) == 0

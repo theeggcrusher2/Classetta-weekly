@@ -6,3 +6,4 @@ build/
 dist/
 .claude/worktrees/
 dt2/
+.DS_Store

@@ -356,6 +356,22 @@ def test_paths_working_directories_and_the_search_path(qapp):
     assert wd not in fs.wds
 
 
+def test_a_missing_directory_is_fnferr_whether_or_not_it_could_be_a_volume(qapp):
+    """A bare name that's neither in the directory nor a volume's is a
+    directory that isn't there."""
+    s = System()
+    fs = s.files
+    files = FileManager(fs, None, fs.boot.root)
+    a = files.create(0, 0, "A", directory=True)
+    for call in (lambda: files.open_wd(0, a.cnid, "Users", fm.ERIK),
+                 lambda: files.hset_vol(0, a.cnid, "Users"),
+                 lambda: files.set_vol(0, "Users")):
+        with pytest.raises(FileError) as e:
+            call()
+        assert e.value.code == fm.fnfErr
+    assert files.open_wd(0, a.cnid, "Macintosh HD", fm.ERIK) == fs.boot.vref
+
+
 def test_get_vols_block_given_back_to_set_vol_puts_the_directory_back(qapp):
     """GetVol gives the volume's name with a working directory's number;
     ResEdit hands both back to SetVol and HSetVol, and looks for itself in
@@ -375,6 +391,55 @@ def test_get_vols_block_given_back_to_set_vol_puts_the_directory_back(qapp):
         assert files.get_vol()[1:] == (fs.boot.vref, fm.ROOT)
     files.hset_vol(wd, 0, "Macintosh HD:")
     assert files.get_vol()[1:] == (fs.boot.vref, fm.ROOT)
+
+
+def test_a_volume_s_name_given_to_set_vol_names_it_where_a_file_has_the_name(qapp):
+    """SetVol's volName is a mounted volume's name (Inside Macintosh:
+    Files), even where a file in the default directory has it too:
+    Solitaire Antics gives SetVol back GetVol's name, and its application
+    has its volume's name.  A file's name that's no volume's is still no
+    directory."""
+    s = System()
+    fs = s.files
+    files = FileManager(fs, None, fs.boot.root)
+    a = files.create(0, 0, "A", directory=True)
+    files.create(0, a.cnid, "Macintosh HD")
+    files.create(0, a.cnid, "F")
+    wd = files.open_wd(0, a.cnid, None, fm.ERIK)
+    for set_vol in (files.set_vol, lambda vref, name: files.hset_vol(vref, 0, name)):
+        files.set_vol(wd, None)
+        set_vol(0, "Macintosh HD")
+        assert files.get_vol()[1:] == (fs.boot.vref, fm.ROOT)
+        files.set_vol(wd, None)
+        with pytest.raises(FileError) as e:
+            set_vol(0, "F")
+        assert e.value.code == fm.dirNFErr
+    assert files.open_wd(0, a.cnid, "Macintosh HD", fm.ERIK) == fs.boot.vref
+
+
+def test_a_volume_s_number_means_its_root_even_with_the_default_directory_on_it(qapp):
+    """A volume reference number names the volume's root directory, the
+    default volume's too, and a partial pathname given with one starts
+    there (Inside Macintosh: Files, Table 2-10); only 0 means the default
+    directory.  Over the Reich, launched from a folder on its CD, gets the
+    information of a file by the CD's number and a partial pathname from
+    the CD's root."""
+    s = System()
+    fs = s.files
+    folder = FileManager(fs, None, fs.boot.root).create(0, 0, "App", directory=True)
+    files = FileManager(fs, None, folder)
+    files.create(0, 0, "Doc")
+    other = fs.dir_for(MemoryFolder([MacFile("Other", data=b"x")])).volume
+    assert files.lookup_file(0, 0, "Doc").parent is folder
+    assert files.lookup(fs.boot.vref, 0, None) is fs.boot.root
+    assert files.lookup_file(fs.boot.vref, 0, ":App:Doc").parent is folder
+    assert files.lookup(fs.boot.vref, 0, "Macintosh HD:App") is folder
+    assert files.lookup_file(other.vref, 0, "Other").parent is other.root
+    for name in ("Doc", ":Doc"):
+        with pytest.raises(FileError) as e:
+            files.lookup_file(fs.boot.vref, 0, name)
+        assert e.value.code == fm.fnfErr
+    files.close_all()
 
 
 def test_a_shared_working_directory_outlives_the_application_that_opened_it(qapp):
@@ -837,6 +902,90 @@ def test_open_deny(qapp, tmp_path):
     assert data > 0 and t.field16(2, "ioRefNum") == data
     assert t.system.files.fcb(data).write and not t.system.files.fcb(rsrc).write
     assert t.system.files.fcb(rsrc).rsrc
+    t.close()
+
+
+def test_cat_search(qapp, tmp_path):
+    """PBCatSearch (Inside Macintosh: Files, chapter 2), as Space Gypsy
+    searches its volume: by part of a name, by attributes, by a folder's
+    number of files and a data fork's length, the other way round with
+    fsSBNegate, and in pieces, going on from ioCatPosition.  The first
+    finds the three it asks for at the catalog's last entry: it stops for
+    ioReqMatchCount, noErr, as Big Science Comics wants of the one search
+    that finds its preferences file."""
+    (tmp_path / "Notes").write_bytes(b"12345")
+    (tmp_path / "Old notes").write_bytes(b"x" * 300)
+    (tmp_path / "Notes folder").mkdir()
+    (tmp_path / "Notes folder" / "inner note").write_bytes(b"")
+    a = Asm()
+    a.pb(0xA260, PB(0), R(0), selector=0x18)        # files named ...note...
+    a.pb(0xA260, PB(1), R(1), selector=0x18)        # everything, two at a time
+    for off in range(0, 16, 4):
+        a.copy_l(PB(1) + g.ioCatPosition + off, PB(2) + g.ioCatPosition + off)
+    a.pb(0xA260, PB(2), R(2), selector=0x18)        # the next two
+    for off in range(0, 16, 4):
+        a.copy_l(PB(2) + g.ioCatPosition + off, PB(3) + g.ioCatPosition + off)
+    a.pb(0xA208, PB(4), R(4))                       # PBHCreate
+    a.pb(0xA260, PB(3), R(3), selector=0x18)        # and on: catChangedErr
+    a.pb(0xA260, PB(5), R(5), selector=0x18)        # folders of one file
+    a.pb(0xA260, PB(6), R(6), selector=0x18)        # data forks of 1 to 100 bytes
+    a.pb(0xA260, PB(7), R(7), selector=0x18)        # and not
+    a.pb(0xA260, PB(8), R(8), selector=0x30)        # PBHGetVolParms
+    a.mark(DONE)
+    a.rts()
+
+    t = Guest(host_app(tmp_path, a))
+    lo, hi = t.at(-1344), t.at(-1216)               # the two CInfoPBRecs
+    t.mem.fill(lo, 128)
+    t.mem.fill(hi, 128)
+    t.pstr(NAME(9), "NOTE")
+    t.mem.w32(lo + g.ioNamePtr, t.at(NAME(9)))
+    t.mem.w8(hi + g.ioFlAttrib, g.ioDirFlg)         # files, not directories
+    t.mem.w16(lo + g.ioFlStBlk, 1)                  # ioDrNmFls
+    t.mem.w16(hi + g.ioFlStBlk, 1)
+    t.mem.w32(lo + g.ioFlLgLen, 1)
+    t.mem.w32(hi + g.ioFlLgLen, 100)
+    searches = [(g.fsSBPartialName | g.fsSBFlAttrib, 3), (0, 2), (0, 2), (0, 1),
+                (None, 0), (g.fsSBDrNmFls, 1), (g.fsSBFlLgLen, 1),
+                (g.fsSBFlLgLen | g.fsSBNegate, 3)]
+    at = -2944                                      # after PB(8): the matches
+    for i, (bits, count) in enumerate(searches):
+        if bits is None:
+            t.pb(i, "New")
+            continue
+        base = t.pb(i)
+        for field, value in (("ioMatchPtr", t.at(at)), ("ioReqMatchCount", count),
+                             ("ioSearchBits", bits), ("ioSearchInfo1", lo),
+                             ("ioSearchInfo2", hi)):
+            t.mem.w32(base + getattr(g, field), value)
+        searches[i] = at
+        at += count * g.FSSPEC_SIZE
+    t.pb(8, ioBuffer=t.at(BUF(0)), ioReqCount=6)
+    t.run()
+
+    vol = t.proc.files.lookup_file(0, 0, "Notes").volume
+    folder = t.proc.files.lookup(0, 0, "Notes folder")
+
+    def found(i):
+        n = t.field32(i, "ioActMatchCount")
+        return [(t.r16(searches[i] + k * 70), t.mem.r32(t.at(searches[i] + k * 70 + 2)),
+                 t.text(searches[i] + k * 70 + 6)) for k in range(n)]
+
+    def spec(parid, name):
+        return vol.vref, parid, name
+
+    assert [t.result(i) for i in range(9)] == [
+        0, 0, 0, g.catChangedErr, 0, 0, 0, 0, 0]
+    assert found(0) == [spec(fm.ROOT, "Notes"), spec(fm.ROOT, "Old notes"),
+                        spec(folder.cnid, "inner note")]
+    assert found(1) == [spec(fm.ROOT_PARENT, vol.name), spec(fm.ROOT, "Notes")]
+    assert found(2) == [spec(fm.ROOT, "Notes folder"), spec(fm.ROOT, "Old notes")]
+    assert found(3) == []
+    assert found(5) == [spec(fm.ROOT, "Notes folder")]
+    assert found(6) == [spec(fm.ROOT, "Notes")]
+    assert found(7) == [spec(fm.ROOT_PARENT, vol.name), spec(fm.ROOT, "New"),
+                        spec(fm.ROOT, "Notes folder")]
+    assert t.mem.r32(t.at(BUF(0)) + 2) & g.bHasCatSearch     # vMAttrib
     t.close()
 
 

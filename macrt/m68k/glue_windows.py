@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import Callable
 
-from ..memory import ADDRESS_MASK
 from ..toolbox import constants as k
 from ..toolbox import lowmem
 from ..toolbox.api import IN_FRONT
@@ -28,10 +27,18 @@ from .glue_quickdraw import _rgn
 # =========================================================================
 @trap
 def InitWindows(t):
-    if not t.system.wmgr_port_kept():       # the program threw the last port away, as
-        t.system.open_wmgr_port()           # Rogue's start does
+    # It opens the Window Manager port, which makes that the current port
+    # (IM I: OpenPort), for a program's first call or when the program has
+    # thrown the last one away, as Rogue's start does.  Called again, as
+    # Disk Copy's licence agreement does after SetPort to its dialog, it
+    # leaves thePort be.
+    opened = not t.system.wmgr_port_kept()
+    if opened:
+        t.system.open_wmgr_port()
     t.mem.w8(lowmem.WWExist, 0)
-    t.mem.w32(_the_port_var(t), t.mem.r32(lowmem.WMgrPort))
+    if opened or not t.process.windows_set_up:
+        t.mem.w32(_the_port_var(t), t.mem.r32(lowmem.WMgrPort))
+    t.process.windows_set_up = True
     if t.system.model.color:
         # With Color QuickDraw it makes the default auxiliary window and
         # control records (Inside Macintosh V); Microsoft Word 4 reads the
@@ -328,7 +335,7 @@ def _desk_brush(t):
     binary DeskPattern."""
     mem = t.mem
     h = mem.r32(lowmem.DeskCPat) if mem.r8(lowmem.SPMisc2) & pCDeskPat else 0
-    return t.tb.qd.desk_brush(mem.read(lowmem.DeskPattern, 8), h & ADDRESS_MASK)
+    return t.tb.qd.desk_brush(mem.read(lowmem.DeskPattern, 8), h & mem.system.addr_mask)
 
 
 @trap
@@ -353,7 +360,7 @@ def PaintBehind(t, start, clobbered):
     Control Panel window drawn again so."""
     rgn, behind = _rgn(t, clobbered), False
     for rec in list(t.process.windows):
-        behind = behind or rec.addr == start & ADDRESS_MASK
+        behind = behind or rec.addr == start & t.mem.system.addr_mask
         if behind:
             _paint_one(t, rec, rgn)
 

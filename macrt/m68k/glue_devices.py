@@ -29,21 +29,39 @@ for hardware it hasn't got (UNLOADED_DRIVERS): opening one of those fails
 as if there were no such driver.  A program can also make a device
 control entry itself, with DrvrInstall, and open it by its driver's
 name.  The drivers an application opens or installs go when it quits.
+
+Of macrt's own drivers, two kinds have a device control entry in the
+table.  The screen's video driver, on a colour machine, has one as a slot
+card's driver has (Inside Macintosh V, the Device Manager): with the
+card's slot, its sResource's ID and its device base after dCtlMenu.
+Programs find it through the main GDevice's gdRefNum and take the slot
+from it for SlotVInstall (Powerball).  And a CD-ROM's driver has one, at
+the reference number its volume's drive gives, named as the Apple CD-ROM
+driver is, .AppleCD (Technical Note DV 22, "CD-ROM Driver Calls"): Lode
+Runner: The Legend Returns takes its volume's driver from its VCB's
+vcbDRefNum, looks it up with GetDCtlEntry and compares the name with
+that.  Each one's driver is a header with the driver's name, for
+programs that look for a driver by it, and the calls to it are macrt's
+own still, glue_video's and glue_files'.
 """
 
 from __future__ import annotations
 
 from contextlib import contextmanager
 
-from ..memory import ADDRESS_MASK, from_mac
+from ..memory import from_mac
 from ..toolbox import lowmem
+from ..toolbox.gdevice import VIDEO_DRIVER, VIDEO_SLOT
 from ..toolbox.resources import UNWRITTEN
 from ..toolbox.system import UNLOADED_DRIVERS
 from .dispatch import raw
 
-UNITS = 48                      # the unit table's length, as from the Mac Plus's ROM on
+# The unit table's length: IM Devices' reserved unit numbers go up to 127,
+# 48 on being for slot and other drivers (Disk Copy's goes there).
+UNITS = 128
 FIRST_SPARE = 32                # where a driver goes whose own unit is taken
 LOW_DCES = 16                   # the DCEs made with the unit table, low in memory
+CD_DRIVER = b".AppleCD"         # a CD-ROM's driver's name (Technical Note DV 22)
 
 noErr = 0
 controlErr = -17
@@ -97,6 +115,9 @@ dCtlEMask = 36
 dCtlMenu = 38
 DCE_SIZE = 40
 dOpened, dRAMBased, drvrActive = 0x20, 0x40, 0x80
+# A slot device's goes on (Inside Macintosh V, the Device Manager)
+dCtlSlot, dCtlSlotId, dCtlDevBase = 40, 41, 42
+SLOT_DCE_SIZE = 52
 
 # The driver's header
 drvrFlags = 0
@@ -140,22 +161,71 @@ def init(machine) -> None:
     mem.w32(lowmem.UTableBase, table)
     mem.w16(lowmem.UnitNtryCnt, UNITS)
     mem.w32(lowmem.JIODone, machine.io_done)
+    machine.own_units = set()
+    if system.model.color:
+        _video_dce(machine)
+    files = system.files
+    files.add_driver = lambda vol: _disk_driver(machine, vol)
+    for vol in files.volumes + files.offline:
+        _disk_driver(machine, vol)
+
+
+def _own_dce(machine, refnum: int, name: bytes, size: int = DCE_SIZE) -> int:
+    """A device control entry in the table at refnum for one of macrt's
+    own drivers: open, for Control and Status calls, its driver a header
+    that has only its name.  Its address."""
+    mem, heap = machine.mem, machine.system.sys_heap
+    flags = dCtlEnable | dStatEnable
+    drvr = heap.new_ptr(drvrName + 2 + len(name) & ~1, clear=True)
+    mem.w16(drvr + drvrFlags, flags)
+    mem.w8(drvr + drvrName, len(name))
+    mem.write(drvr + drvrName + 1, name)
+    dh = heap.new_handle(size, clear=True)
+    heap.lock(dh)
+    dce = mem.r32(dh) & mem.system.addr_mask
+    mem.w32(dce + dCtlDriver, drvr)
+    mem.w16(dce + dCtlFlags, flags | dOpened)
+    mem.w16(dce + dCtlRefNum, refnum)
+    mem.w32((mem.r32(lowmem.UTableBase) & mem.system.addr_mask) + 4 * ~refnum, dh)
+    machine.own_units.add(~refnum)
+    return dce
+
+
+def _video_dce(machine) -> None:
+    """The video driver's device control entry, with the card's slot
+    fields as the Slot Manager has them (glue_slots)."""
+    from .glue_slots import VIDEO, VIDEO_NAME
+    mem = machine.mem
+    dce = _own_dce(machine, VIDEO_DRIVER, b"." + VIDEO_NAME, SLOT_DCE_SIZE)
+    mem.w8(dce + dCtlSlot, VIDEO_SLOT)
+    mem.w8(dce + dCtlSlotId, VIDEO)
+    mem.w32(dce + dCtlDevBase, machine.system.screen_bits.base)
+
+
+def _disk_driver(machine, vol) -> None:
+    """A CD-ROM's driver's device control entry, the first time a volume
+    on one is mounted; it stays when the volume goes."""
+    unit = ~vol.driver
+    table = machine.mem.r32(lowmem.UTableBase) & machine.mem.system.addr_mask
+    if vol.cdrom and 0 <= unit < UNITS and not machine.mem.r32(table + 4 * unit):
+        _own_dce(machine, vol.driver, CD_DRIVER)
 
 
 def _dce(t, unit: int) -> int:
-    """The unit's DCE, 0 if it has none: for macrt's own drivers it hasn't."""
+    """The unit's DCE, 0 if it has none: for macrt's own drivers, but
+    the video driver and CD-ROMs', it hasn't."""
     m = t.mem
-    table = m.r32(lowmem.UTableBase) & ADDRESS_MASK
+    table = m.r32(lowmem.UTableBase) & t.mem.system.addr_mask
     if not table or not 0 <= unit < m.r16(lowmem.UnitNtryCnt):
         return 0
-    h = m.r32(table + 4 * unit) & ADDRESS_MASK
-    return m.r32(h) & ADDRESS_MASK if h else 0
+    h = m.r32(table + 4 * unit) & t.mem.system.addr_mask
+    return m.r32(h) & t.mem.system.addr_mask if h else 0
 
 
 def _driver(t, dce: int) -> int:
-    d = t.mem.r32(dce + dCtlDriver) & ADDRESS_MASK
+    d = t.mem.r32(dce + dCtlDriver) & t.mem.system.addr_mask
     if t.mem.r16(dce + dCtlFlags) & dRAMBased:
-        d = t.mem.r32(d) & ADDRESS_MASK
+        d = t.mem.r32(d) & t.mem.system.addr_mask
     return d
 
 
@@ -169,12 +239,13 @@ def call(t, w: int, built_in) -> bool:
     """Do Device Manager call w, A0 its parameter block, if it's for a
     driver in 68k code; False if it isn't, for the File Manager's or
     macrt's own drivers.  built_in has those, by name: their refnums."""
-    pb = t.cpu.a(0) & ADDRESS_MASK
+    pb = t.cpu.a(0) & t.mem.system.addr_mask
     n = w & 0xFF
     if n == 0:
         return _open(t, pb, w, built_in)
     dce = _dce_for(t, pb)
-    if not dce:
+    refnum = t.mem.r16s(pb + ioRefNum)
+    if not dce or refnum in built_in.values() or ~refnum in t.machine.own_units:
         return False
     if n == 1:
         _close(t, pb, w, dce)
@@ -192,7 +263,7 @@ def call(t, w: int, built_in) -> bool:
 # =========================================================================
 def _open(t, pb: int, w: int, built_in) -> bool:
     m = t.mem
-    p = m.r32(pb + ioNamePtr) & ADDRESS_MASK
+    p = m.r32(pb + ioNamePtr) & t.mem.system.addr_mask
     name = m.r_pstr(p) if p else b""
     if not name.startswith(b".") or from_mac(name).lower() in built_in:
         return False
@@ -244,7 +315,7 @@ def _install(t, name: bytes, taken, system_too: bool = False) -> int | None:
         rm.error = err                      # the program's ResError isn't for this
         if not found:
             return None
-        table = m.r32(lowmem.UTableBase) & ADDRESS_MASK
+        table = m.r32(lowmem.UTableBase) & t.mem.system.addr_mask
         count = m.r16(lowmem.UnitNtryCnt)
         if not 0 <= unit < count or unit in taken or m.r32(table + 4 * unit):
             free = [u for u in range(FIRST_SPARE, count)
@@ -260,9 +331,9 @@ def _install(t, name: bytes, taken, system_too: bool = False) -> int | None:
         if not dh:
             return memFullErr
         system.sys_heap.lock(dh)
-        dce = m.r32(dh) & ADDRESS_MASK
+        dce = m.r32(dh) & t.mem.system.addr_mask
         m.fill(dce, DCE_SIZE)
-        drvr = m.r32(h) & ADDRESS_MASK
+        drvr = m.r32(h) & t.mem.system.addr_mask
         m.w32(dce + dCtlDriver, h)
         m.w16(dce + dCtlFlags, m.r16(drvr + drvrFlags) & 0xFF00 | dRAMBased)
         m.w16(dce + dCtlRefNum, ~unit)
@@ -300,14 +371,15 @@ def _remove(t, unit: int, code: bool = True) -> None:
     """Take the driver at unit out of the table, and, if code, let its
     code go: it can be purged once no other driver in the table runs it."""
     m, system = t.mem, t.system
-    table = m.r32(lowmem.UTableBase) & ADDRESS_MASK
+    table = m.r32(lowmem.UTableBase) & t.mem.system.addr_mask
     with system.lock:
         t.machine.drivers.pop(unit, None)
-        dh = m.r32(table + 4 * unit) & ADDRESS_MASK
+        t.machine.own_units.discard(unit)
+        dh = m.r32(table + 4 * unit) & t.mem.system.addr_mask
         m.w32(table + 4 * unit, 0)
         if not dh:
             return
-        h = m.r32((m.r32(dh) & ADDRESS_MASK) + dCtlDriver) & ADDRESS_MASK
+        h = m.r32((m.r32(dh) & t.mem.system.addr_mask) + dCtlDriver) & t.mem.system.addr_mask
         if dh in t.machine.low_dces:
             t.machine.spare_dces.append(dh)
         else:
@@ -315,7 +387,7 @@ def _remove(t, unit: int, code: bool = True) -> None:
         if not code:
             return
         others = (_dce(t, u) for u in range(m.r16(lowmem.UnitNtryCnt)))
-        if any(dce and m.r32(dce + dCtlDriver) & ADDRESS_MASK == h for dce in others):
+        if any(dce and m.r32(dce + dCtlDriver) & t.mem.system.addr_mask == h for dce in others):
             return
         e = system.sys_map.find_handle(h)
         if e is not None and e.offset == UNWRITTEN:
@@ -343,7 +415,7 @@ def DrvrInstall(t, word):
     m, cpu, system = t.mem, t.cpu, t.system
     refnum = _s16(cpu.d(0))
     unit = ~refnum
-    table = m.r32(lowmem.UTableBase) & ADDRESS_MASK
+    table = m.r32(lowmem.UTableBase) & cpu.mask
     if refnum >= 0 or not table or unit >= m.r16(lowmem.UnitNtryCnt):
         cpu.set_d(0, badUnitErr & 0xFFFFFFFF)
         return
@@ -357,7 +429,7 @@ def DrvrInstall(t, word):
         if not dh:
             cpu.set_d(0, memFullErr & 0xFFFFFFFF)
             return
-        dce = m.r32(dh) & ADDRESS_MASK
+        dce = m.r32(dh) & cpu.mask
         m.w16(dce + dCtlFlags, dRAMBased)
         m.w16(dce + dCtlRefNum, refnum)
         m.w32(table + 4 * unit, dh)
@@ -384,7 +456,7 @@ def DrvrRemove(t, word):
         cpu.set_d(0, dRemovErr & 0xFFFFFFFF)
         return
     code = bool(flags & dRAMBased) and t.process.resources.is_resource(
-        m.r32(dce + dCtlDriver) & ADDRESS_MASK)
+        m.r32(dce + dCtlDriver) & cpu.mask)
     _remove(t, unit, code=code)
     cpu.set_d(0, noErr)
 
@@ -454,7 +526,7 @@ def control(t, unit: int, code: int, param: int = 0) -> int:
         m.w32(pb + csParam, param)
         _queue(t, dce, pb, CONTROL, drvrCtl)
         _start(t, dce)
-        if m.r32(dce + dCtlQHead) & ADDRESS_MASK != pb:
+        if m.r32(dce + dCtlQHead) & t.mem.system.addr_mask != pb:
             return m.r16s(pb + ioResult)
         # Its control routine returned without going through IODone: so
         # it's done, since nothing will wait for it here.
@@ -509,7 +581,7 @@ def _queue(t, dce: int, pb: int, w: int, routine: int) -> None:
     m.w16(pb + ioResult, 1)                 # in progress
     m.w32(pb + qLink, 0)
     m.w16(pb + qType, ioQType)
-    tail = m.r32(dce + dCtlQTail) & ADDRESS_MASK
+    tail = m.r32(dce + dCtlQTail) & t.mem.system.addr_mask
     m.w32(tail + qLink if tail else dce + dCtlQHead, pb)
     m.w32(dce + dCtlQTail, pb)
 
@@ -517,10 +589,10 @@ def _queue(t, dce: int, pb: int, w: int, routine: int) -> None:
 def _start(t, dce: int) -> None:
     """Start the driver on the request at the head of its queue."""
     m = t.mem
-    pb = m.r32(dce + dCtlQHead) & ADDRESS_MASK
+    pb = m.r32(dce + dCtlQHead) & t.mem.system.addr_mask
     if pb:
         m.w16(dce + dCtlFlags, m.r16(dce + dCtlFlags) | drvrActive)
-        t.call_with(m.r32(pb + ioCmdAddr) & ADDRESS_MASK, a0=pb, a1=dce)
+        t.call_with(m.r32(pb + ioCmdAddr) & t.mem.system.addr_mask, a0=pb, a1=dce)
 
 
 def wait(t, pb: int, w: int) -> None:
@@ -545,7 +617,7 @@ def _kill(t, pb: int, w: int, dce: int) -> None:
     err = _call_routine(t, pb, w | IMMEDIATE, dce, drvrCtl)
     if err == noErr:
         m.w16(dce + dCtlFlags, m.r16(dce + dCtlFlags) & ~drvrActive)
-        while (head := m.r32(dce + dCtlQHead) & ADDRESS_MASK):
+        while (head := m.r32(dce + dCtlQHead) & t.mem.system.addr_mask):
             _dequeue(t, dce, head)
             done(t, head, abortErr)
     finish(t, pb, w, err)
@@ -553,7 +625,7 @@ def _kill(t, pb: int, w: int, dce: int) -> None:
 
 def _dequeue(t, dce: int, pb: int) -> None:
     m = t.mem
-    after = m.r32(pb + qLink) & ADDRESS_MASK
+    after = m.r32(pb + qLink) & t.mem.system.addr_mask
     m.w32(dce + dCtlQHead, after)
     if not after:
         m.w32(dce + dCtlQTail, 0)
@@ -564,11 +636,11 @@ def io_done(t) -> None:
     with the request at the head of its queue, with its DCE in A1 and the
     result in D0; and then back to whoever called the routine."""
     cpu, m = t.cpu, t.mem
-    dce = cpu.a(1) & ADDRESS_MASK
+    dce = cpu.a(1) & cpu.mask
     err = _s16(cpu.d(0))
     cpu.pc = cpu.pop32()
     flags = m.r16(dce + dCtlFlags)
-    pb = m.r32(dce + dCtlQHead) & ADDRESS_MASK
+    pb = m.r32(dce + dCtlQHead) & cpu.mask
     if not flags & drvrActive or not pb:
         return                              # an immediate request's: D0 has it
     _dequeue(t, dce, pb)
@@ -600,7 +672,7 @@ def done(t, pb: int, err: int) -> None:
     """A request's done: its result, and its completion routine if it was asynchronous."""
     m = t.mem
     m.w16(pb + ioResult, err)
-    completion = m.r32(pb + ioCompletion) & ADDRESS_MASK
+    completion = m.r32(pb + ioCompletion) & t.mem.system.addr_mask
     if m.r16(pb + ioTrap) & ASYNC and completion:
         t.call_with(completion, a0=pb, d0=err & 0xFFFFFFFF)
 

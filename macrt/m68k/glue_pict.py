@@ -19,7 +19,7 @@ from functools import partial
 
 from PyQt6.QtGui import QImage
 
-from ..memory import ADDRESS_MASK, from_mac
+from ..memory import from_mac
 from ..toolbox import pict
 from ..toolbox.api import CHICAGO_SYMBOLS
 from ..toolbox.color import is_light
@@ -55,30 +55,16 @@ CQD_EXTRA = 7                # a CQDProcs' opcodeProc and newProc1 to 6
 @trap
 def DrawPicture(t, h, r):
     port = _port(t)
-    p = t.mem.r32(h) & ADDRESS_MASK if h else 0
+    p = t.mem.r32(h) & t.mem.system.addr_mask if h else 0
     if port is None or not p:
         return
     heap, size = _picture_heap(t, h, p)
     # the frame first: the buffer below can move the handle (Winter Games'
     # pictures, in handles it has unlocked)
     frame = t.mem.r_rect(p + 2)
-    get_pic = _custom_proc(t, port, GET_PIC_PROC, 0xA8EE)
-    buf = 0
-    if get_pic:                         # spooled: the handle holds only the size and frame
-        buf = heap.new_ptr(SPOOL)
-        if not buf:
-            return
-
-        def read(n: int) -> bytes:
-            out = bytearray()
-            while len(out) < n:
-                k = min(n - len(out), SPOOL)
-                t.call(get_pic, (("p", buf), ("h", k)))
-                out += t.mem.read(buf, k)
-            return bytes(out)
-        reader = pict.Reader(read, 10)
-    else:                               # all of it, in case drawing moves the handle
-        reader = pict.Reader.of(t.mem.read(p, size), 10)
+    reader, buf = _picture_reader(t, port, heap, p, size)
+    if reader is None:
+        return
     proc = _custom_proc(t, port, COMMENT_PROC, 0xA8F1)
 
     def comment(kind: int, data: bytes | None) -> None:
@@ -91,6 +77,30 @@ def DrawPicture(t, h, r):
     finally:
         if buf:
             heap.dispose_ptr(buf)
+
+
+def _picture_reader(t, port, heap, p: int, size: int) -> tuple:
+    """A reader of a picture's opcodes, after its size and frame, and the
+    buffer it reads them into, to dispose of after (0 for none): through
+    the port's own getPicProc when it has one, for a picture spooled from
+    disk whose handle holds only its size and frame, or else all of it
+    from memory at once, in case drawing moves the handle.  (None, 0)
+    with no room for the buffer."""
+    get_pic = _custom_proc(t, port, GET_PIC_PROC, 0xA8EE) if port is not None else 0
+    if not get_pic:
+        return pict.Reader.of(t.mem.read(p, size), 10), 0
+    buf = heap.new_ptr(SPOOL)
+    if not buf:
+        return None, 0
+
+    def read(n: int) -> bytes:
+        out = bytearray()
+        while len(out) < n:
+            k = min(n - len(out), SPOOL)
+            t.call(get_pic, (("p", buf), ("h", k)))
+            out += t.mem.read(buf, k)
+        return bytes(out)
+    return pict.Reader(read, 10), buf
 
 
 def _picture_heap(t, h: int, p: int) -> tuple:
@@ -206,7 +216,7 @@ def PicComment(t, kind, size, h):
     rec = t.tb.qd.pictures.get(port.addr) if port is not None else None
     if rec is None or not port.pic_save:
         return
-    p = t.mem.r32(h) & ADDRESS_MASK if h else 0
+    p = t.mem.r32(h) & t.mem.system.addr_mask if h else 0
     rec.comment(kind, t.mem.read(p, size & 0xFFFF) if p and size else None)
 
 
@@ -467,7 +477,7 @@ def _put_mask(t, dst: int, dr: Rect, rows: list[bytes], width: int) -> None:
     """Rows of width bits into dstRect of a BitMap, clipped to its bounds
     and to nothing else."""
     mem = t.mem
-    base, row_bytes = mem.r32(dst) & ADDRESS_MASK, mem.r16(dst + 4) & 0x3FFF
+    base, row_bytes = mem.r32(dst) & mem.system.addr_mask, mem.r16(dst + 4) & 0x3FFF
     bounds = mem.r_rect(dst + 6)
     if not base or not row_bytes:
         return

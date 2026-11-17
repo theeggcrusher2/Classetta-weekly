@@ -70,15 +70,13 @@ from concurrent.futures import Future
 from pathlib import Path
 
 from .. import moof
-from ..memory import ADDRESS_MASK
 from ..toolbox import lowmem
 from ..toolbox.constants import diskEvt
 from ..toolbox.events import EventRecord, tick_count
 from ..toolbox.files import SONY, FileError
 from ..ui import diskdlg
 from .cpu import INTERRUPT_MASK
-from .hardware import (CA0_ON, CA1_ON, CA2_ON, IWM_BASE, LSTRB, Q6_LOW, STRIDE, VIA_BASE, vBufA,
-                       vHeadSel)
+from .hardware import CA0_ON, CA1_ON, CA2_ON, LSTRB, Q6_LOW, STRIDE, vBufA, vHeadSel
 
 SECTOR, TAG = 512, 12
 SONY_VARS = 0x200               # how much room the driver's variables have
@@ -87,7 +85,7 @@ SETTLE_TIME = 0x34              # how long it waits for the head to settle on a 
 STEP_TIME = 0x3C                # and for a step to be over
 DRIVE_VARS = {1: 0x4A, 2: 0x8C}     # each drive's: the track its head is over first
 SETTLE, STEPPING = 30_000, 12_000   # the times here
-SCC_A_DATA = 0x9FFFFE           # where the SCC's channel A data is read
+SCC_A_DATA = 0x9FFFFE           # where a 24-bit Mac's SCC channel A data is read
 SEARCH = 64                     # how far past the address field the data marks may be
 OUT_FOR = 60                    # ticks an ejected disk is out of its drive
 
@@ -182,7 +180,7 @@ def read(t, pb: int) -> int:
     m.w32(pb + ioActCount, 0)
     disk = _disk(t, pb)
     first, count = _span(t, pb, disk)
-    buffer, tags = m.r32(pb + ioBuffer) & ADDRESS_MASK, t.machine.tag_buffer
+    buffer, tags = m.r32(pb + ioBuffer) & t.mem.system.addr_mask, t.machine.tag_buffer
     err = 0
     for i in range(count):
         n, at = first + i, buffer + i * SECTOR
@@ -214,8 +212,8 @@ def _routines(t, disk) -> tuple[int, int] | None:
     if not disk.tracks:
         return None
     m, machine = t.mem, t.machine
-    finder = m.r32(lowmem.RdAddr) & ADDRESS_MASK or machine.rd_addr
-    reader = m.r32(lowmem.RdData) & ADDRESS_MASK or machine.rd_data
+    finder = m.r32(lowmem.RdAddr) & t.mem.system.addr_mask or machine.rd_addr
+    reader = m.r32(lowmem.RdData) & t.mem.system.addr_mask or machine.rd_data
     if finder == machine.rd_addr and reader == machine.rd_data:
         return None
     return finder, reader
@@ -277,7 +275,7 @@ def _seek(t, drive: int, disk, sector: int) -> None:
     select the drive, which SonyVars says too, and the head on the
     sector's side with SEL: a program can go on from there itself.  Only
     a disk whose tracks are known has them."""
-    sony = t.mem.r32(lowmem.SonyVars) & ADDRESS_MASK
+    sony = t.mem.r32(lowmem.SonyVars) & t.mem.system.addr_mask
     if sony:
         t.mem.w16(sony + CURRENT_DRIVE, drive)
     if disk.tracks:
@@ -291,7 +289,7 @@ def _seek(t, drive: int, disk, sector: int) -> None:
 def _seek_head(t, track: int) -> None:
     """Move the selected drive's head to the track, and say so in its
     variables, as the driver does."""
-    iwm, sony = t.machine.iwm, t.mem.r32(lowmem.SonyVars) & ADDRESS_MASK
+    iwm, sony = t.machine.iwm, t.mem.r32(lowmem.SonyVars) & t.mem.system.addr_mask
     iwm.drive.seek(track)
     if sony:
         t.mem.w16(sony + DRIVE_VARS[2 if iwm.drive is iwm.drives[1] else 1], iwm.drive.track)
@@ -332,7 +330,7 @@ def _read_through(t, disk, sector: int, routines: tuple[int, int], at: int) -> i
                     return sectNFErr        # RdAddr never finds it
                 iwm.follow(disk.tracks.framed(track, side), bit, iwm.clock.now())
             d0 = t.call_with(reader, a0=at, a1=machine.data_marks,
-                             a3=machine.denibble - moof.GCR[0], **_POLL)
+                             a3=machine.denibble - moof.GCR[0], **_poll(t))
     finally:
         cpu.sr = sr
         iwm.put(b"")
@@ -340,8 +338,11 @@ def _read_through(t, disk, sector: int, routines: tuple[int, int], at: int) -> i
 
 
 # Where the ROM's routines read the disk and poll the serial ports
-# through, as SetUpPoll has them
-_POLL = {"a4": IWM_BASE + Q6_LOW * STRIDE, "a5": VIA_BASE + vBufA * STRIDE, "a6": SCC_A_DATA}
+# through, as SetUpPoll has them, on this machine.
+def _poll(t) -> dict:
+    chips = t.machine.chips
+    return {"a4": chips.iwm + Q6_LOW * STRIDE, "a5": chips.via + vBufA * STRIDE,
+            "a6": chips.scc_a_data}
 
 
 def _find(t, finder: int, found, track: int, number: int) -> int:
@@ -355,7 +356,7 @@ def _find(t, finder: int, found, track: int, number: int) -> int:
     iwm.follow(found, iwm.drive.angle() * found[2], iwm.clock.now())
     err = sectNFErr
     for _ in range(2 * moof.sectors_on(track)):
-        d0, d2 = t.call_for(finder, ("d0", "d2"), a2=t.machine.address_marks, **_POLL)
+        d0, d2 = t.call_for(finder, ("d0", "d2"), a2=t.machine.address_marks, **_poll(t))
         err = _signed(d0)
         if not err and d2 & 0xFF == number:
             return 0
@@ -376,7 +377,7 @@ def rd_data(t) -> None:
     Magician reads its SHOW SUPPORT file through marks of its own, those
     of the sector the master disk has it in."""
     cpu, m, iwm = t.cpu, t.mem, t.machine.iwm
-    marks = m.read(cpu.a(1) & ADDRESS_MASK, 5)
+    marks = m.read(cpu.a(1) & cpu.mask, 5)
     if isinstance(_tracks(t, 2 if iwm.drive is iwm.drives[1] else 1), moof.Formatted):
         marks = moof.DATA + b"\xde\xaa"
     ahead = iwm.ahead(SEARCH + 4 + moof.NIBBLES + 2)
@@ -394,7 +395,7 @@ def rd_data(t) -> None:
         elif ahead[at:at + 2] != marks[3:]:
             err = badDBtSlp
         else:
-            data, buffer = field[TAG:], cpu.a(0) & ADDRESS_MASK
+            data, buffer = field[TAG:], cpu.a(0) & cpu.mask
             if m.r8(lowmem.DskVerify):
                 err = 0 if m.read(buffer, SECTOR) == data else dataVerErr
             else:
@@ -419,8 +420,8 @@ def adr_disk(t) -> None:
         iwm.touch(phase if d0 >> bit & 1 else phase - 1)
     iwm.touch(LSTRB - 1)
     via.write(vBufA, via.regs[vBufA] & ~vHeadSel | (vHeadSel if d0 & 2 else 0))
-    cpu.set_a(0, IWM_BASE)
-    sony = m.r32(lowmem.SonyVars) & ADDRESS_MASK
+    cpu.set_a(0, t.machine.chips.iwm)
+    sony = m.r32(lowmem.SonyVars) & cpu.mask
     drive = m.r16(sony + CURRENT_DRIVE) if sony else 1
     cpu.set_d(1, cpu.d(1) & ~0xFFFF | DRIVE_VARS[2 if drive == 2 else 1])
     cpu.pc = cpu.pop32()
@@ -437,7 +438,7 @@ def rd_addr(t) -> None:
     sectors after through it itself).  Only a disk whose tracks are
     known has address fields to find."""
     cpu, m, iwm = t.cpu, t.mem, t.machine.iwm
-    marks = m.read(cpu.a(2) & ADDRESS_MASK, 5)
+    marks = m.read(cpu.a(2) & cpu.mask, 5)
     drive = iwm.drive
     with iwm.clock.held():
         tracks = _tracks(t, 2 if drive is iwm.drives[1] else 1)
@@ -493,9 +494,10 @@ def set_up_poll(t) -> None:
     the caller's stack in PollStack, which a routine that's done puts
     back, however deep it's got (Jazz)."""
     cpu = t.cpu
-    cpu.set_a(4, IWM_BASE + Q6_LOW * STRIDE)
-    cpu.set_a(5, VIA_BASE + vBufA * STRIDE)
-    cpu.set_a(6, SCC_A_DATA)
+    poll = _poll(t)
+    cpu.set_a(4, poll["a4"])
+    cpu.set_a(5, poll["a5"])
+    cpu.set_a(6, poll["a6"])
     cpu.pc = cpu.pop32()
     t.mem.w32(lowmem.PollStack, cpu.sp)
 
@@ -534,7 +536,7 @@ def write(t, pb: int) -> int:
     m.w32(pb + ioActCount, 0)
     disk = _disk(t, pb)
     first, count = _span(t, pb, disk)
-    buffer, tags = m.r32(pb + ioBuffer) & ADDRESS_MASK, t.machine.tag_buffer
+    buffer, tags = m.r32(pb + ioBuffer) & t.mem.system.addr_mask, t.machine.tag_buffer
     for i in range(count):
         n = first + i
         disk.sectors[n * SECTOR:(n + 1) * SECTOR] = m.read(buffer + i * SECTOR, SECTOR)
@@ -553,7 +555,7 @@ def control(t, pb: int) -> None:
     m = t.mem
     code = m.r16s(pb + csCode)
     if code == tagBufferCode:
-        t.machine.tag_buffer = m.r32(pb + csParam) & ADDRESS_MASK
+        t.machine.tag_buffer = m.r32(pb + csParam) & t.mem.system.addr_mask
     elif code in (verifyCode, ejectCode):
         _disk(t, pb)
         if code == ejectCode:

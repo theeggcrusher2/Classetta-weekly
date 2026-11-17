@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import struct
 
-from ..memory import ADDRESS_MASK
 from ..toolbox import lowmem, sane
 from ..toolbox.sane import FLOATS, SIZE, X, Env
 from .dispatch import namer, raw, trap
@@ -99,7 +98,7 @@ def _finish(t, env: Env, op: int, addrs: list[int], ccr: int | None = None,
     word |= env.raised << 8
     _set_env(t, word)
     halts = env.raised & word & 0x1F
-    if halts and vector & ADDRESS_MASK:
+    if halts and vector & cpu.mask:
         ccr, d0 = _halt(t, vector, halts, op, addrs, cpu.sr & CCR if ccr is None else ccr,
                         cpu.d(0) if d0 is None else d0)
     if ccr is not None:                 # else as they were, which most operations leave them
@@ -300,7 +299,7 @@ def _cstr(t, addr: int) -> bytes:
     """A C string, without its NUL."""
     mem, out = t.mem, bytearray()
     while True:
-        chunk = mem.read(addr + len(out), min(256, mem.size - ((addr + len(out)) & ADDRESS_MASK)))
+        chunk = mem.read(addr + len(out), min(256, mem.size - ((addr + len(out)) & mem.system.addr_mask)))
         n = chunk.find(0)
         if n >= 0 or not chunk:
             return bytes(out + chunk[:max(n, 0)])

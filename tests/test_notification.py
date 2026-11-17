@@ -35,6 +35,11 @@ def responses(g):
     return [args[0][1] for addr, args in g.calls if addr == RESPONSE]
 
 
+def test_gestalt_says_the_notification_manager_is_there(qapp):
+    """Auspice 3.1 looks for it before anything else."""
+    assert glue_os.Gestalt(Guest(), int.from_bytes(b"nmgr", "big")) == (0, 1)
+
+
 def test_a_request_without_a_message_is_responded_to_at_the_next_event_call(qapp):
     g = Guest()
     rec = request(g)

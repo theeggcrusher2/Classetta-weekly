@@ -52,7 +52,7 @@ class Runner(Processor):
     def __init__(self, resources=(), **system):
         super().__init__(resources, **system)
         self.stop = self.ptr(bytes(4))
-        self.process.thread = threading.current_thread()
+        self.thread_id = threading.get_ident()
         self.process.resources.decompressor = lambda data: decompressors.expand(self, data)
 
     def call(self, addr, args=(), result=""):
@@ -148,9 +148,9 @@ def test_a_dcmp_isnt_run_from_another_thread(qapp):
     """Only the application's own thread runs its 68k code."""
     g, res = runner(Resource(b"dcmp", 200, DOUBLE_9))
     g.call = None                       # not to be called
-    g.process.thread = None
+    g.thread_id = None
     assert decompressors.expand(g, compressed(9, 200)) is None
-    g.process.thread, g.expanding = threading.current_thread(), True
+    g.thread_id, g.expanding = threading.get_ident(), True
     assert decompressors.expand(g, compressed(9, 200)) is None     # nor while one runs
 
 

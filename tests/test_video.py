@@ -18,8 +18,8 @@ from macrt.demo import parse_args
 
 from guest import Guest
 
-GetMode, GetEntries, GetPages, GetBaseAddr, GetGray = 2, 3, 4, 5, 6
-SetMode, SetEntries, GrayPage, SetGray = 2, 3, 5, 6
+GetMode, GetEntries, GetPages, GetBaseAddr, GetGray, GetGamma = 2, 3, 4, 5, 6, 8
+SetMode, SetEntries, SetGamma, GrayPage, SetGray = 2, 3, 4, 5, 6
 
 
 @pytest.fixture
@@ -132,6 +132,37 @@ def test_set_entries_and_get_entries(g):
     assert call(g, True, SetEntries, struct.pack(">Lhh", specs, 300, 0))[0] == glue_video.paramErr
 
 
+def test_get_gamma_and_set_gamma(g):
+    """The driver's gamma table: linear to start with, a copy of the one
+    SetGamma is given, and linear again for NIL."""
+    err, rec = call(g, False, GetGamma, bytes(4))
+    first = struct.unpack(">L", rec)[0]
+    assert err == 0 and first
+    assert g.mem.read(first, 12 + 256) == glue_video.LINEAR_GAMMA
+    assert call(g, False, GetGamma, bytes(4))[1] == rec            # the same table again
+
+    dim = struct.pack(">6h", 0, 0, 0, 1, 256, 8) + bytes(i // 2 for i in range(256))
+    mine = g.ptr(dim)
+    assert call(g, True, SetGamma, struct.pack(">L", mine))[0] == 0
+    table = struct.unpack(">L", call(g, False, GetGamma, bytes(4))[1])[0]
+    assert table != mine and g.mem.read(table, len(dim)) == dim    # a copy, the driver's own
+    g.mem.write(mine, bytes(len(dim)))
+    assert g.mem.read(table, len(dim)) == dim
+
+    three = struct.pack(">6h", 0, 0, 2, 3, 4, 8) + b"\x01\x02" + bytes(range(12))
+    assert call(g, True, SetGamma, struct.pack(">L", g.ptr(three)))[0] == 0
+    table = struct.unpack(">L", call(g, False, GetGamma, bytes(4))[1])[0]
+    assert g.mem.read(table, len(three)) == three
+
+    for bad in ((1, 0, 0, 1, 256, 8), (0, 0, 0, 2, 256, 8), (0, 0, 0, 1, 0, 8),
+                (0, 0, 0, 1, 256, 16)):
+        record = struct.pack(">L", g.ptr(struct.pack(">6h", *bad) + bytes(512)))
+        assert call(g, True, SetGamma, record)[0] == glue_video.controlErr
+    assert call(g, True, SetGamma, bytes(4))[0] == 0
+    table = struct.unpack(">L", call(g, False, GetGamma, bytes(4))[1])[0]
+    assert g.mem.read(table, 12 + 256) == glue_video.LINEAR_GAMMA
+
+
 def test_gray_page(g):
     call(g, True, SetMode, page_info(0x80))
     assert call(g, True, GrayPage, page_info())[0] == 0
@@ -182,6 +213,15 @@ def test_the_system_file_says_how_the_screen_is_set_up(qapp):
             1, 0, 9, g.system.screen_bits.base, mode, 0x77FE, 0x8800 | colour, depth, -1,
             0, 0, 480, 640, 0)
     assert Guest().process.resources.GetResource("scrn", 0) == 0     # no Color QuickDraw
+
+
+def test_the_standard_colour_tables_are_resources(qapp):
+    """'clut' 1, 4 and 8, which RGetResource finds among a colour Mac's ROM
+    resources: Easy Color Paint sets the screen's colours to 'clut' 4."""
+    g = Guest(model="ii", depth=4)
+    for n in (1, 4, 8):
+        assert g.contents(g("RGetResource", b"clut", n)) == standard_table(n)
+    assert Guest()("RGetResource", b"clut", 4) == 0                  # no Color QuickDraw
 
 
 def test_an_old_port_on_the_screen_draws_at_its_depth(g):

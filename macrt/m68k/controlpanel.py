@@ -48,7 +48,6 @@ import logging
 import struct
 from collections import deque
 
-from ..memory import ADDRESS_MASK
 from ..toolbox import constants as k
 from ..toolbox import lowmem
 from ..toolbox.quickdraw import QD_GLOBALS_SIZE, QD_GRAY
@@ -272,7 +271,7 @@ class Host:
                            for p, n in heap.blocks().items() if p not in was]
         part = t.process.partition
         t.system.init_patches.update((key, at) for key, at in t.patches.items()
-                                     if not part.start <= at & ADDRESS_MASK < part.end)
+                                     if not part.start <= at & t.mem.system.addr_mask < part.end)
         # The Notification Manager's requests made as the Mac starts up are
         # answered as its event mechanism begins.
         glue_os.respond(t)

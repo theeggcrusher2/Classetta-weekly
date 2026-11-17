@@ -6,6 +6,7 @@ thread with.  (test_stdfile_traps.py runs it from the traps.)
 
 from types import SimpleNamespace
 
+import pytest
 from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt
 from PyQt6.QtGui import QImage, QMouseEvent
 from PyQt6.QtWidgets import QInputDialog, QMessageBox
@@ -44,6 +45,17 @@ class Screen:
 
     def mac_from_global(self, g):
         return ("mac", g.x(), g.y())
+
+
+@pytest.fixture(autouse=True)
+def _dialogs_closed(qapp):
+    """A dialog a test leaves up is hidden after it, as the application's
+    answer would: the survey's tests, run after these in the same process,
+    would take it for one of macrt's own dialogs waiting for the user."""
+    yield
+    for w in qapp.topLevelWidgets():
+        if w.isVisible() and w.windowType() == Qt.WindowType.Dialog:
+            w.hide()
 
 
 def mouse(kind, button=Qt.MouseButton.LeftButton):

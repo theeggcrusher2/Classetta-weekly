@@ -14,7 +14,7 @@ from contextlib import contextmanager
 
 from PyQt6.QtGui import QImage
 
-from ..memory import ADDRESS_MASK, from_mac
+from ..memory import from_mac
 from ..toolbox import constants as k
 from ..toolbox import cursors, lowmem
 from ..toolbox.gdevice import deref, oldPat
@@ -39,10 +39,10 @@ pixmapTooDeepErr = -148
 def _custom_proc(t, port: GrafPort, offset: int, key: int) -> int:
     """The port's own procedure at offset in its QDProcs, or 0 if it has
     none there or it's the standard one."""
-    procs = port.graf_procs & ADDRESS_MASK
+    procs = port.graf_procs & t.mem.system.addr_mask
     if not procs:
         return 0
-    proc = t.mem.r32(procs + offset) & ADDRESS_MASK
+    proc = t.mem.r32(procs + offset) & t.mem.system.addr_mask
     return 0 if proc in (0, t.machine.stub_for(key)) else proc
 
 
@@ -56,7 +56,7 @@ def InitGraf(t, globals_ptr):
     # world below $70000 before it calls this, and a desk accessory finds
     # the globals there; the rest of QuickDraw looks for them there now too,
     # until a trap comes with A5 back where it was
-    a5 = t.cpu.a(5) & ADDRESS_MASK
+    a5 = t.cpu.a(5) & t.mem.system.addr_mask
     part = t.process.partition
     if a5 != part.a5 and not part.left_a5:
         part.left_a5 = part.a5
@@ -719,7 +719,7 @@ def CopyBits(t, src, dst, src_r, dst_r, mode, mask_rgn):
     # into thePort's own portBits it's the port's bitsProc that copies, as
     # HyperCard's AddColor has it put its colour pictures over the card's
     proc = (_custom_proc(t, port, BITS_PROC, StdBits)
-            if port is not None and dst & ADDRESS_MASK == port.addr + 2 else 0)
+            if port is not None and dst & t.mem.system.addr_mask == port.addr + 2 else 0)
     if proc:
         t.call(proc, (("p", src), ("p", src_r), ("p", dst_r), ("h", mode), ("p", mask_rgn)))
         return
@@ -908,7 +908,7 @@ def PinRect(t, r, pt):
 @trap
 def Random(t):
     """QuickDraw's: randSeed times 7^5 mod 2^31-1, low word, never -32768."""
-    p = (_the_port_var(t) + QD_RAND_SEED) & ADDRESS_MASK
+    p = (_the_port_var(t) + QD_RAND_SEED) & t.mem.system.addr_mask
     seed = (t.mem.r32(p) * 16807) % 0x7FFFFFFF
     t.mem.w32(p, seed)
     r = seed & 0xFFFF

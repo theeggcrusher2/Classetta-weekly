@@ -24,17 +24,20 @@ import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from ..macfile import MacFile, fonts_beside
-from ..memory import ADDRESS_MASK, RAM, from_mac, to_mac
+from unicorn.m68k_const import UC_CPU_M68K_M68020, UC_CPU_M68K_M68030
+
+from ..macfile import MacFile, finder_beside, fonts_beside
+from ..memory import RAM, from_mac, to_mac
 from ..resfork import (InvalidForkError, build_fork, open_fork, resCompressed, resLocked,
                        resSysHeap, restype, vers_body)
 from . import lowmem, printing, sysres
 from .files import FileManager, FileSystem
 from .lowmem import World
 from .bitfont import Strike, fond_ids, fond_sizes, font_family, font_id, font_ids
+from .color import standard_table
 from .constants import kApplicationMenuID
 from .menus import MenuInfo
-from .memmgr import APPL_MASTERS, LOCKED, MIN_BLOCK, MORE_MAST, RESOURCE, Heap
+from .memmgr import APPL_MASTERS, GZ_PROC, LOCKED, MIN_BLOCK, MORE_MAST, RESOURCE, Heap
 from .resources import UNWRITTEN, Item, ResourceManager, ResourceMap
 from .events import InputGlobals
 from .gdevice import Devices, PixMap
@@ -44,7 +47,20 @@ from .qdraw import FAMILIES, MONO
 from .quickdraw import QD_GLOBALS_SIZE, BitMap, GrafPort, init_qd_globals, new_rgn
 from .types import Rect
 
+# 8MB of RAM for 24 bit machines
+# This was the usual maximum for a 24 bit machine, although since the
+# address space was 16MB in total, a few Macs allowed a little more -
+# (LC/LCII/Classic II and Color Classic: 10MB,
+# non-backlit Mac Portable: 9MB.)
 RAM_SIZE = 8 << 20
+
+# For 32 bit machines, 128MB of RAM, as that was the
+# maximum for a number of them. RAM will span from $00000000 to $08000000
+RAM32_SIZE = 128 << 20
+
+ROM32_BASE = 0xFFC00000         # a IIci's ROMBase
+ROM32_SLACK = 0x1000            # room above the ROM page to mirror into
+ROM32_END = 0x100000000         # the top of the address space
 # Over the top of RAM, where a Mac II's is with 24-bit addresses: a page of
 # ROM, with the model's version at ROMBase + 8.  ROM85 says whether it has
 # Color QuickDraw: a Mac II's does.  What the System leaves in the exception
@@ -91,6 +107,7 @@ APPLE_SYSTEM_TYPES = frozenset(restype(kind) for kind in (
 # The resource IDs a control panel owns ('cdev' -4064's), in its own file
 # and in the System file.
 CONTROL_PANEL_IDS = range(-4064, -4032)
+STANDARD_CLUTS = (1, 4, 8)      # the ROM's 'clut's macrt has the tables of
 APP_PACKS = 8                   # the packages AppPacks has handles to
 DRIVER_ROOM = 0x20000           # how much of a disk's System's drivers it adds
 SOUND_ROOM = 0x10000            # and of its sounds
@@ -117,6 +134,12 @@ DEPTHS = (1, 2, 4, 8, 16, 32)  # bits a pixel the screen may have, with Color Qu
 COLOR_DEPTH = 8                 # and has, unless it's told otherwise
 DEFAULT_PARTITION = 1 << 20
 DEFAULT_STACK = 0x8000
+# The stack in the partition a SIZE resource, or the Finder's Get Info,
+# gives a program, with its heap and A5 world (Inside Macintosh: Memory,
+# "Organization of Memory in an Application Partition"): "At the start of
+# each application program, the limit is initialized to allow 8K bytes for
+# the stack" (Inside Macintosh II-17).
+SIZE_STACK = 0x2000
 MIN_STACK = 0x400           # MinStack, as a Mac has it
 APP_PARAMS = 32             # above A5, before the jump table
 MIN_HEAP = 0x8000
@@ -131,10 +154,11 @@ class Model:
     either way; what the model changes is the exception frames it stacks.
     A 68000's are six bytes, with no format word, and programs from before
     the Mac II pop them themselves: MacWrite 4.5 returns from its TRAP
-    handler with ADDQ.W #2,A7 and RTS."""
+    handler with ADDQ.W #2,A7 and RTS.  The Mac IIx is a Mac II that says
+    it has a 68030 and a 68882, for programs that ask for them."""
     name: str
-    cpu: int            # CPUFlag: 0 for a 68000, 2 for a 68020
-    fpu: bool
+    cpu: int            # CPUFlag: 0 for a 68000, 2 for a 68020, 3 for a 68030
+    fpu: int            # Gestalt's 'fpu ': 0 for none, 1 for a 68881, 2 for a 68882
     gestalt: int        # Gestalt's 'mach'
     environs: int       # SysEnvirons' machineType
     rom: int            # the ROM's version
@@ -151,14 +175,106 @@ class Model:
     # bits 0-8 of the word, bit 9 being "reserved for future use" (Inside
     # Macintosh I and IV, Using Assembly Language).
     toolbox_traps: int = 1024
+    # Whether to use 32 bit addressing or not.
+    mmu_32_bit: bool = False
+    # Which core unicorn runs.  macrt answers for a 68000 with a 68020's
+    # instructions either way; a model that claims a 68030 gets the 68030
+    # core, which is the same translator with its own instructions.
+    cpu_core: int = UC_CPU_M68K_M68020
 
 
 MODELS = {
-    "plus": Model("Macintosh Plus", 0, False, gestalt=4, environs=2, rom=0x0075, keyboard=3,
-                  hardware=0x91, toolbox_traps=512),
-    "ii": Model("Macintosh II", 2, True, gestalt=6, environs=4, rom=0x0178, keyboard=5,
-                hardware=0x9B, color=True, slots=True, adb=True),
+    "plus": Model(
+        name="Macintosh Plus",
+        cpu=0, # 68000
+        fpu=0, # No FPU
+        gestalt=4,
+        environs=2,
+        rom=0x0075,
+        keyboard=3,
+        hardware=0x91,
+        toolbox_traps=512
+    ),
+    "ii": Model(
+        "Macintosh II",
+        cpu=2, # 68020
+        fpu=1, # 68881
+        gestalt=6,
+        environs=4,
+        rom=0x0178,
+        keyboard=5,
+        hardware=0x9B,
+        color=True,
+        slots=True,
+        adb=True
+    ),
+    "iix": Model(
+        "Macintosh IIx",
+        cpu=3, # 68030
+        fpu=2, # 68882
+        gestalt=7,
+        environs=5,
+        rom=0x0178,
+        keyboard=5,
+        hardware=0x9B,
+        color=True,
+        slots=True,
+        adb=True
+    ),
+    "iici": Model(
+        "Macintosh IIci",
+        cpu=3, # 68030
+        fpu=2, # 68882
+        gestalt=19,
+        environs=19,
+        rom=0x0178,
+        keyboard=5,
+        hardware=0x9B,
+        color=True,
+        slots=True,
+        adb=True,
+        mmu_32_bit=True,
+        cpu_core=UC_CPU_M68K_M68030
+    ),
 }
+
+
+@dataclass(frozen=True)
+class DeviceMap:
+    """Where a machine's chips answer, and the pages around them."""
+
+    via: int
+    via_window: tuple[int, int]
+    iwm: int
+    iwm_window: tuple[int, int]
+    asc: int
+    scc_a_data: int
+
+
+# A 24-bit Mac's chips, and macrt's own place for the ASC above the ROM's
+# empty space (a Mac Plus has neither ASC nor SCC).
+CHIPS_24 = DeviceMap(
+    via=0xEFE1FE,
+    via_window=(0xEFE000, 0xF00000),
+    iwm=0xDFE1FF,
+    iwm_window=(0xDFE000, 0xE00000),
+    asc=0xC00000,
+    scc_a_data=0x9FFFFE
+)
+
+# The chip map for a 32 bit Mac, inspired by the Mac IIci.
+CHIPS_32 = DeviceMap(
+    via=0x50F00000,
+    via_window=(0x50F00000, 0x50F02000),
+    iwm=0x50F1C000,
+    iwm_window=(0x50F1C000, 0x50F1E000),
+    asc=0x50F18000,
+    scc_a_data=0x50F10004
+)
+
+
+def device_map(model: Model) -> DeviceMap:
+    return CHIPS_32 if model.mmu_32_bit else CHIPS_24
 
 RTS = 0x4E75
 VBL_TASK_SIZE = 14
@@ -251,6 +367,16 @@ class System:
         self.speed = speed
         self.sound = list(sound)
         self.model = MODELS[model]
+        # Whether addresses are whole: a 24-bit Mac ignores the top byte,
+        # so the mask strips it.  RAM and the heaps take their copy from
+        # here, so this must be set before the RAM is made.
+        self.mmu_32_bit = self.model.mmu_32_bit
+        self.addr_mask = 0xFFFFFFFF if self.mmu_32_bit else 0xFFFFFF
+        # 32-bit addressing: RAM to MemTop, the ROM's page over the top of
+        # the address space, and the devices in the slot space between.
+        self.ram_size = RAM32_SIZE if self.model.mmu_32_bit else RAM_SIZE
+        self.chips = device_map(self.model)
+        self.rom_base = ROM32_BASE if self.model.mmu_32_bit else self.ram_size
         self.version = system_version(system_file or disk_system)
         if depth is None:
             depth = COLOR_DEPTH if self.model.color else 1
@@ -260,7 +386,11 @@ class System:
         self._width, self._row_bytes = w, (row_bytes or 0, depth)
         if row_bytes is not None and (row_bytes & 1 or not 0 < row_bytes < 0x4000):
             raise ValueError(f"a screen's rows can't be {row_bytes} bytes apart")
-        self.mem = mem = RAM(RAM_SIZE + ROM_SIZE)
+        self.mem = mem = RAM(self, self.ram_size + ROM_SIZE)
+        if self.mmu_32_bit:
+            # The ROM page is the last of the bytes, reached from over the
+            # top of the address space: what a IIci's ROMBase says it is.
+            mem.mirror(self.rom_base, self.rom_base + ROM_SIZE, self.ram_size)
         self.lock = threading.RLock()
         row_bytes = self.row_bytes_for(depth)
         # Applications' partitions start where the System heap stops, or
@@ -269,14 +399,17 @@ class System:
         # (SYS7_HEAP_END).  Excel 1.0 keeps itself to the first megabyte,
         # and can't start if none of its heap is there.
         self._reserved: list[tuple[int, int]] = []      # what partitions keep out of
-        classic = (w, h) == CLASSIC_SIZE and depth == 1 and row_bytes == w // 8
+        # The classic screen and its mirroring belong to a 24-bit Mac: a
+        # 32-bit one's $3F2000 is just RAM, and nothing repeats through it.
+        classic = ((w, h) == CLASSIC_SIZE and depth == 1 and row_bytes == w // 8
+                   and not self.model.mmu_32_bit)
         if classic:
             base, sys_heap_end = CLASSIC_SCREEN, CLASSIC_ALTERNATE
-            self.partitions_start, self.partitions_end = CLASSIC_END, RAM_SIZE
+            self.partitions_start, self.partitions_end = CLASSIC_END, self.ram_size
             mem.mirror(PLUS_SCREENS, PLUS_SCREENS_END, CLASSIC_ALTERNATE & ~0xFFF)
             self._reserved.append((PLUS_SCREENS, PLUS_SCREENS_END))
         else:
-            base = (RAM_SIZE - row_bytes * h) & ~3
+            base = (self.ram_size - row_bytes * h) & ~3
             if base < SYS_HEAP_END + DEFAULT_PARTITION:
                 raise ValueError(f"a {w}x{h} screen leaves no room for applications")
             sys_heap_end = SYS_HEAP_END
@@ -297,13 +430,22 @@ class System:
         # unit table and drivers' device control entries, which a Mac makes
         # there at startup: macrt.m68k.glue_devices has it.
         self.device_room = self.sys_heap.new_ptr(DEVICE_ROOM)
-        self.ports: dict[int, GrafPort] = {}            # canonical views, by address
+        self.ports: dict[int, GrafPort] = {}            # all Python view objects, by address
+        self.controls: dict[int, object] = {}           # all controls, by handle
+        # Drawing that's landed outside a port's portRect, which macrt
+        # doesn't clip to, when something's watching for it (a survey's
+        # outside_port_rect): QuickDraw._outside_port_rect's.  None if not.
+        self.outside_port_rect: dict[tuple, dict] | None = None
         self.gestalt_procs: dict[int, int] = {}         # NewGestalt selector -> 68k function
+        # PPostEvent's event queue entries in the system heap, each with the
+        # queue and event it was last given for: free once that's been got
+        self.event_qels: dict[int, tuple] = {}
         self.init_patches: dict[int, int] = {}          # trap key -> address: the INITs'
         self.extensions_off: set[str] = set()           # control panels to open without their INITs
         self.script_settings: dict[int, int] = {}       # SetEnvirons verb -> value
         self.kchr_cache = 0                             # GetEnvirons(smKCHRCache)'s copy
         self.font_records: dict[tuple, int] = {}        # FMSwapFont's FONTs of host fonts
+        self.cicon_records: dict[int, int] = {}         # GetCIcon's records: handle -> size
         self.font_lines: dict[tuple[int, int], tuple[int, int, int]] = {}  # _disk_font_lines
         self.width_table = 0                            # and its global width table,
         self.width_request: tuple | None = None         # with what it was last made for
@@ -313,9 +455,9 @@ class System:
         self._rts = self.sys_heap.new_ptr(2)            # a routine that does nothing
         mem.w16(self._rts, RTS)
 
-        mem.w32(lowmem.MemTop, RAM_SIZE)
-        mem.w32(lowmem.ROMBase, ROM_BASE)
-        mem.w16(ROM_BASE + 8, self.model.rom)
+        mem.w32(lowmem.MemTop, self.ram_size)
+        mem.w32(lowmem.ROMBase, self.rom_base)
+        mem.w16(self.rom_base + 8, self.model.rom)
         mem.w32(lowmem.ScrnBase, base)
         # The top of applications' memory, as when nothing is installed
         # under the screen: Dark Castle asks for the alternate screen only
@@ -338,7 +480,7 @@ class System:
         self.fcbs = self.files.fcbs                     # open files, by reference number
         self._open_system_file(system_file, disk_system, disk_fonts)
         self.screen = Screen(self, desk_top)            # the buffer at ScrnBase
-        self.input = InputGlobals(mem)                  # the mouse and keys, in low memory
+        self.input = InputGlobals(mem, Rect(0, 0, h, w))  # the mouse and keys, in low memory
         # System 7's Application menu, in every application's menu list
         # after its own menus; the display gives it its items.
         self.application_menu = MenuInfo.new(self, self.sys_heap, kApplicationMenuID, "")
@@ -382,15 +524,15 @@ class System:
         pixel values (and each GrafPort's rowBytes)."""
         mem, devices = self.mem, self.devices
         main = devices.pixmap(devices.main)
-        base, matching = main.base_addr & ADDRESS_MASK, devices.matching()
+        base, matching = main.base_addr & self.addr_mask, devices.matching()
         for port in list(self.ports.values()):
-            if port.port_bits_base & ADDRESS_MASK != base and not port.is_color:
+            if port.port_bits_base & self.addr_mask != base and not port.is_color:
                 continue
             if not port.is_color:
                 port.port_bits_row_bytes = self.screen_bits.row_bytes
                 continue
             p = port.pixmap()
-            if not p or mem.r32(p) & ADDRESS_MASK != base:
+            if not p or mem.r32(p) & self.addr_mask != base:
                 continue
             pm = PixMap(mem, p)
             pm.row_bytes, pm.pixel_type, pm.pixel_size = (main.row_bytes, main.pixel_type,
@@ -529,6 +671,8 @@ class System:
         with self.lock:
             for addr in [a for a in self.ports if part.start <= a < part.end]:
                 del self.ports[addr]
+            for h in [a for a in self.controls if part.start <= a < part.end]:
+                del self.controls[h]
             # A Gestalt function left in the application's heap would be
             # called after it's gone; on a Mac that crashes, here it's forgotten.
             for sel in [s for s, a in self.gestalt_procs.items() if part.start <= a < part.end]:
@@ -614,7 +758,7 @@ class System:
             for s in [s for s, (h, _) in self._zones.items() if h.start < limit and start < h.end]:
                 del self._zones[s]
             heap = Heap(self.mem, start, limit - MIN_BLOCK, align=self.align)
-            self.mem.w32(start + 16, grow_zone)                 # gzProc
+            self.mem.w32(start + GZ_PROC, grow_zone)
             self.mem.w16(start + MORE_MAST, more_masters)
             heap.more_masters()
             self._zones[start] = heap, owner
@@ -623,7 +767,7 @@ class System:
     def zone(self, start: int) -> Heap | None:
         """The zone starting at start, if it's the system heap or one
         InitZone made."""
-        start &= ADDRESS_MASK
+        start &= self.addr_mask
         if start == self.sys_heap.start:
             return self.sys_heap
         zone = self._zones.get(start)
@@ -632,7 +776,7 @@ class System:
     def find_heap(self, addr: int) -> Heap | None:
         """The heap addr is in; None for one in none, such as a handle
         whose master pointer is in a program's globals."""
-        a = addr & ADDRESS_MASK
+        a = addr & self.addr_mask
         for heap, _ in self._zones.values():
             if heap.contains(a):
                 return heap
@@ -648,7 +792,7 @@ class System:
     def heap_of(self, addr: int) -> Heap:
         heap = self.find_heap(addr)
         if heap is None:
-            raise ValueError(f"${addr & ADDRESS_MASK:06X} is not in a heap")
+            raise ValueError(f"${addr & self.addr_mask:06X} is not in a heap")
         return heap
 
     # =====================================================================
@@ -660,21 +804,38 @@ class System:
         # in the high byte, as SuperPaint passes a locked handle's master
         # pointer to NewWindow, and use it without them after.
         with self.lock:
-            self.ports[port.addr & ADDRESS_MASK] = port
+            self.ports[port.addr & self.addr_mask] = port
 
     def unregister(self, port: GrafPort) -> None:
         with self.lock:
-            self.ports.pop(port.addr & ADDRESS_MASK, None)
+            self.ports.pop(port.addr & self.addr_mask, None)
 
     def port_at(self, addr: int) -> GrafPort | None:
-        return self.ports.get(addr & ADDRESS_MASK)
+        return self.ports.get(addr & self.addr_mask)
+
+    # =====================================================================
+    # Controls: Python Control objects, stored against handles on the Mac
+    # to keep a persistent object for each handle so that future uses of
+    # it can still have the variant code set on 32 bit machines where
+    # it's not stored in the high byte of the address.
+    # =====================================================================
+    def register_control(self, c) -> None:
+        with self.lock:
+            self.controls[c.handle & self.addr_mask] = c
+
+    def unregister_control(self, c) -> None:
+        with self.lock:
+            self.controls.pop(c.handle & self.addr_mask, None)
+
+    def control_at(self, h: int):
+        return self.controls.get(h & self.addr_mask)
 
     def port_with_pixmap(self, pm: int) -> GrafPort | None:
         """The cGrafPort whose portPixMap is the PixMap at pm, if one's is."""
         with self.lock:
             ports = list(self.ports.values())
         for port in ports:
-            if port.is_color and port.pixmap() == pm & ADDRESS_MASK:
+            if port.is_color and port.pixmap() == pm & self.addr_mask:
                 return port
         return None
 
@@ -709,10 +870,18 @@ class System:
         # would have left it ('scrn' 0).
         if self.devices is not None and m.find(restype("scrn"), 0) is None:
             self._add_system_resources([("scrn", 0, self.devices.scrn())])
+        # And the standard colour tables of 1, 4 and 8 bits, 'clut' 1, 4 and
+        # 8, among the 'clut's Inside Macintosh V's "Resources in ROM" lists,
+        # where RGetResource finds them; macrt's ROM resources are the System
+        # file's.  Easy Color Paint sets the screen's colours to 'clut' 4.
+        if self.devices is not None:
+            self._add_system_resources([("clut", n, standard_table(n)) for n in STANDARD_CLUTS
+                                        if m.find(restype("clut"), n) is None])
         if all(next(m.entries(restype(kind)), None) is None for kind in ("FOND", "FONT", "NFNT")):
-            self._add_system_resources(sysres.fonts())      # a real System file brings its own
+            # A real System file brings its own.
+            font_files = [disk_system, *disk_fonts] if disk_system is not None else []
+            self._add_system_resources(sysres.fonts(self._disk_outlines(font_files)))
             if disk_system is not None:
-                font_files = [disk_system, *disk_fonts]
                 self._add_system_resources(self._disk_fonts(font_files))
                 for font_file in font_files:
                     for key, lines in self._disk_font_lines(font_file).items():
@@ -721,6 +890,12 @@ class System:
                 self._add_system_resources(self._disk_tables(disk_system))
         if real:
             self._add_system_resources(self._folder_fonts(fonts_beside(f)), replace=True)
+            # And the Finder beside it, in the System Folder with it, as on
+            # the disk: FinderColors opens it, and says to restart with
+            # MultiFinder off when it can't.
+            finder = finder_beside(f)
+            if finder is not None:
+                self.files.in_system_folder(finder)
         # The printer is macrt's whatever the System file says: its own
         # printer file's code would drive a serial port.
         name = to_mac(printing.PRINTER_NAME)
@@ -772,6 +947,30 @@ class System:
                     name = [e.name.decode("mac_roman")] if e.name else []
                     fonts.append((e.type.decode("mac_roman"), e.id, data, *name))
         return fonts
+
+    def _disk_outlines(self, files: Sequence[MacFile]) -> dict[int, int]:
+        """The standard families files, the System file on the disk the
+        applications come from and the suitcases beside it, have an outline
+        font of, size 0 in their FONDs, with its 'sfnt''s ID, the first
+        file's first.  macrt's FONDs of these list it too, as the Fonts
+        folder's do beside a real System file (_folder_fonts), and the
+        'sfnt' isn't taken there either: host fonts draw these families at
+        any size.  For an outline font RealFont "returns TRUE for almost
+        any size" (Inside Macintosh: Text, "Adding Font Sizes and Names to
+        the Menu"), and ATPM's DOCMaker issues, on a disk whose Fonts
+        folder has Geneva, Helvetica and Monaco as outline fonts, ask after
+        Geneva 11 and Helvetica 43 and say which are missing."""
+        outlines: dict[int, int] = {}
+        for f in files:
+            try:
+                fork = open_fork(f.rsrc)
+            except InvalidForkError:
+                continue
+            for e in fork.entries:
+                if e.type == b"FOND" and e.id in sysres.FONTS and not e.attrs & resCompressed:
+                    for rid in font_ids(fork.raw(e), 0)[:1]:
+                        outlines.setdefault(e.id, rid)
+        return outlines
 
     def _folder_fonts(self, files: Sequence[MacFile]) -> list[tuple]:
         """The fonts in files, the suitcases in the Fonts folder beside a
@@ -932,14 +1131,16 @@ class System:
         in place of any with the same type and ID if replace.  Their
         handles."""
         with self.lock:
+            m = self.sys_map
+            resident = self.resources.resident(m)
             items = []
             for kind, rid, data, *name in resources:
                 h = self.sys_heap.new_handle_with(data)
                 self.sys_heap.set_state(h, LOCKED | RESOURCE)
                 items.append(Item(restype(kind), rid, to_mac(name[0]) if name else None,
                                   resSysHeap | resLocked, UNWRITTEN, h))
+                resident[(restype(kind), rid)] = bytes(data)
             if items:
-                m = self.sys_map
                 new = {(it.type, it.id) for it in items} if replace else set()
                 m.rewrite(self.sys_heap,
                           [it for it in m.items() if (it.type, it.id) not in new] + items)

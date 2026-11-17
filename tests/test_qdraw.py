@@ -2,6 +2,7 @@
 memory, and its regions, checked against QuickDraw's own region format."""
 
 import random
+from types import SimpleNamespace
 
 import pytest
 from PyQt6.QtGui import QColor, QFont, QImage
@@ -12,6 +13,8 @@ from macrt.toolbox.qdraw import Region, oval_path, rect_path
 from macrt.toolbox.quickdraw import BLACK_PAT, GRAY_PAT, Backing, GrafPort
 from macrt.toolbox.system import System
 from macrt.toolbox.types import Point, Rect
+
+SYSTEM_24 = SimpleNamespace(mmu_32_bit=False, addr_mask=0xFFFFFF)
 
 W, H = 64, 32                   # the offscreen bitmap
 ROW_BYTES = W // 8
@@ -322,6 +325,17 @@ def test_arithmetic_modes_revert_to_classic_ones_in_one_bit():
         assert qdraw.mode_table(mode) == qdraw.mode_table(classic)
 
 
+def test_transparent_leaves_out_what_is_in_the_background_colour():
+    red, blue = 0xFFFF0000, 0xFF0000FF
+    assert qdraw.mode_table(qdraw.TRANSPARENT, red, blue) == ([qdraw.CLEAR, red], qdraw.OVER)
+    assert qdraw.mode_table(qdraw.TRANSPARENT, blue, blue) == ([qdraw.CLEAR] * 2, qdraw.OVER)
+
+
+def test_arithmetic_modes_with_the_pattern_bit_draw_as_without_it():
+    for mode in (qdraw.BLEND, qdraw.ADD_PIN, qdraw.TRANSPARENT, qdraw.AD_MIN):
+        assert qdraw.mode_table(mode + 8) == qdraw.mode_table(mode)
+
+
 def test_copy_bits_scales_and_masks(qd):
     src_port, src = offscreen(qd)
     dst_port, dst = offscreen(qd)
@@ -357,6 +371,34 @@ def test_scroll_rect(qd):
     r = rows(qd, bits, 4)
     assert r[0][:8] == "........" and r[1][:8] == "...##..." and r[2][:8] == "...##..."
     assert vacated == Region.rect(Rect(0, 0, 8, 8)).diff(Region.rect(Rect(1, 3, 8, 8)))
+
+
+def test_scroll_rect_keeps_to_the_port_rect(qd):
+    """Drawing isn't kept to the portRect, but ScrollRect is: IM I has it
+    move only the bits in the portRect, visRgn, clipRgn and bitmap."""
+    port, bits = offscreen(qd)
+    port.port_rect = Rect(0, 0, 8, 4)
+    qd.shape(port, "Paint", rect_path, Rect(0, 0, 2, 8))
+    vacated = qd.scroll_rect(port, Rect(0, 0, 8, 8), 0, 1)
+    assert rows(qd, bits, 3) == [s + "." * (W - 8) for s in ("....####", "########", "####....")]
+    assert vacated == Region.rect(Rect(0, 0, 1, 4))
+
+
+def test_drawing_outside_the_port_rect_is_noted_while_its_watched(qd):
+    """A survey's outside_port_rect: drawing that a clip to the portRect
+    would cut, one note a port, portRect, bit map and routine."""
+    port, bits = offscreen(qd)
+    port.port_rect = Rect(0, 0, 8, 4)
+    qd.shape(port, "Paint", rect_path, Rect(0, 0, 2, 8))
+    assert qd.sys.outside_port_rect is None
+    qd.sys.outside_port_rect = {}
+    qd.shape(port, "Paint", rect_path, Rect(0, 0, 2, 2))
+    assert qd.sys.outside_port_rect == {}
+    qd.shape(port, "Paint", rect_path, Rect(0, 0, 2, 8))
+    qd.shape(port, "Paint", rect_path, Rect(4, 2, 6, 10))
+    assert list(qd.sys.outside_port_rect.values()) == [
+        {"port": f"${port.addr:06X}", "port_rect": [0, 0, 8, 4], "bounds": [0, 0, H, W],
+         "via": "fill", "box": Rect(0, 4, 6, 10), "times": 2}]
 
 
 def test_get_pixel(qd):
@@ -395,7 +437,7 @@ def test_put_writes_the_images_pixels_where_the_region_is(qapp, depth, bounds, r
     rowBytes, or in the rows above and below, is as it was."""
     rng = random.Random(depth * 100 + width)
     before = bytes(rng.randrange(256) for _ in range(0x200))
-    mem = RAM(0x200)
+    mem = RAM(SYSTEM_24, 0x200)
     mem.write(0, before)
     table = qdraw.VALUE_TABLES[depth]
     s = qdraw.MemorySurface(mem, 0x40, rb, bounds, depth, table)
@@ -420,7 +462,7 @@ def test_put_writes_the_images_pixels_where_the_region_is(qapp, depth, bounds, r
 def test_drawing_on_rows_longer_than_their_pixels_leaves_the_rest_of_each_row(qapp):
     """32 bits a pixel on rows of 10 bytes: two pixels a row, each where
     it is in its row, and the last two bytes of each as they were."""
-    mem = RAM(0x100)
+    mem = RAM(SYSTEM_24, 0x100)
     mem.write(0x10, bytes(range(1, 31)))
     s = qdraw.MemorySurface.make(mem, 0x10, 10, Rect(0, 0, 3, 4), 32)
     assert s.bounds == Rect(0, 0, 3, 2)

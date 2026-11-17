@@ -298,6 +298,37 @@ def test_a_real_systems_fonts_folder_has_its_fonts(qapp):
     assert g.rows(port)[4][:8] == "..####.#"
 
 
+def test_the_disks_outline_fonts_are_real_at_any_size(qapp):
+    """With no System file given, the standard families the disk has as
+    outline fonts, in its System file or a suitcase beside it, are real
+    at almost any size, as they are beside a real System file: ATPM's
+    DOCMaker issues ask after Geneva 11 and Helvetica 43."""
+    def suitcase(*resources):
+        f = machfs.File()
+        f.type, f.creator, f.rsrc = b"FFIL", b"DMOV", build_fork(list(resources))
+        return f
+
+    v = machfs.Volume()
+    v.name = "Disk"
+    v["System Folder"] = machfs.Folder()
+    v["System Folder"]["Fonts"] = fonts = machfs.Folder()
+    system = machfs.File()
+    system.type, system.creator = b"zsys", b"MACS"
+    system.rsrc = build_fork([Resource(b"FOND", 3, sysres.fond(3, (0, 12), (2002, 3 << 7 | 12)),
+                                       b"Geneva"),
+                              Resource(b"sfnt", 2002, bytes(64))])
+    v["System Folder"]["System"] = system
+    fonts["Helvetica"] = suitcase(
+        Resource(b"FOND", 21, sysres.fond(21, (0, 10), (2003, 2004)), b"Helvetica"),
+        Resource(b"sfnt", 2003, bytes(64)), Resource(b"NFNT", 2004, blocky()))
+    disk = system_on(load_volume(v.write(800 * 1024, desktopdb=False, bootable=False)))
+    g = Guest(disk_system=disk, disk_fonts=fonts_beside(disk))
+    assert g("RealFont", 3, 11) and g("RealFont", 21, 43) and g("RealFont", 3, 9)
+    assert not g("RealFont", 2, 11) and g("RealFont", 2, 12)    # New York: bitmaps only
+    assert not g("RealFont", 3, 200)
+    assert g.system.sys_map.find(b"sfnt", 2002) is None
+
+
 def test_what_the_font_has_no_width_for_draws_nothing(qapp):
     """NUL and return are blank glyphs of no width in Chicago, Geneva and
     Monaco, where the host font standing in would draw boxes: Social

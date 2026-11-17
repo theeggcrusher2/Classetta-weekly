@@ -75,6 +75,22 @@ def test_init_windows_replaces_a_window_manager_port_thrown_away(qapp):
     assert m.r8(lowmem.QDExist) == 0
 
 
+def test_init_windows_called_again_leaves_the_current_port(qapp):
+    """The first call makes the Window Manager port the current port; Disk
+    Copy's licence agreement calls it again after SetPort to its dialog,
+    then makes its TextEdit record in the current port."""
+    g = Processor()
+    g.cpu.set_a(5, g.process.partition.a5)
+    m = g.mem
+    the_port = m.r32(g.process.partition.a5)
+    g("InitWindows")
+    assert m.r32(the_port) == m.r32(lowmem.WMgrPort)
+    port = g.ptr(bytes(GrafPort.SIZE))
+    g("OpenPort", port)
+    g("InitWindows")
+    assert m.r32(the_port) == port
+
+
 def test_init_graf_puts_the_globals_at_the_a5_the_program_runs_with(qapp):
     """Fokker Triplane moves its A5 world below $70000 before InitGraf: a
     desk accessory finds QuickDraw's globals at 0(A5), and so does the rest
@@ -568,15 +584,22 @@ def test_menu_list_layout():
     assert m.r16(p) == 4 * 6                       # lastMenu
     assert [m.r32(p + 6 + 6 * i) for i in range(4)] == [apple.handle, file.handle, edit.handle,
                                                         app_menu.handle]
-    assert m.r16(p + 6 + 4 * 6) == 6               # lastHMenu: no submenus
+    assert m.r16(p + 6 + 4 * 6) == 0               # lastHMenu: no submenus
     assert heap.handle_size(h) == 6 + 4 * 6 + 6
     assert [x.title for x in menus.own()] == [k.APPLE_MENU_TITLE, "File", "Edit"]
     assert menus.get(129) == edit and menus.get(5) is None
     sub = MenuInfo.new(system, heap, 100, "Sub")
     menus.insert(sub, before_id=k.hierMenu)
     p = heap.deref(h)
-    assert m.r16(p + 6 + 4 * 6) == 6 + 6 and m.r32(p + 6 + 4 * 6 + 6) == sub.handle
+    assert m.r16(p + 6 + 4 * 6) == 6 and m.r32(p + 6 + 4 * 6 + 6) == sub.handle
     assert menus.submenus() == [sub] and sub not in menus and menus.get(100) == sub
+    # As MacApp goes through them: lastHMenu / 6 entries after menuTitleSave.
+    sub2 = MenuInfo.new(system, heap, 101, "Sub 2")
+    menus.insert(sub2, before_id=k.hierMenu)
+    p = heap.deref(h)
+    sect = p + m.r16(p) + 6
+    assert [m.r32(sect + 6 + 6 * i) for i in range(m.r16(sect) // 6)] == [sub.handle, sub2.handle]
+    menus.delete(101)
     menus.delete(128)
     assert menus.own() == [apple, edit] and file not in menus
     menus.clear()

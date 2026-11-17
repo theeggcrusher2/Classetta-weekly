@@ -5,7 +5,7 @@ for the glue to work with."""
 from macrt.m68k import dispatch, runtime
 from macrt.m68k.cpu import CPU
 from macrt.m68k.hardware import VIA
-from macrt.m68k.sound import SILENT_FRAME, SpeakerSwitch
+from macrt.m68k.sound import SILENT_FRAME, Speaker, SpeakerSwitch
 from macrt.m68k.sound_manager import SoundManager
 from macrt.macfile import MacFile, MemoryFolder
 from macrt.process import Process
@@ -44,6 +44,7 @@ class Machine:
         self.via = VIA()
         self.sound = NoSoundDriver(self)
         self.sound_manager = SoundManager(self)
+        self.speaker = Speaker(self.mem, self.via)
         self.mem.w32(lowmem.SoundBase, system.sys_heap.new_ptr(runtime.SOUND_BUFFER, clear=True))
         self.sound_wait = system.sys_heap.new_ptr(len(runtime.SOUND_WAIT))
         self.mem.write(self.sound_wait, runtime.SOUND_WAIT)
@@ -75,10 +76,14 @@ class Guest:
     w32 = runtime.Runner.w32
     write_event = runtime.Runner.write_event
     window = runtime.Runner.window
+    note_once = runtime.Runner.note_once
     menu = runtime.Runner.menu
     ostype = staticmethod(runtime.Runner.ostype)
     holding = True              # the machine: there's only this thread
     in_wdef = 0
+    thread_id = None            # no thread runs the process: no grow-zone, 'dcmp' or patch runs
+    on_own_thread = runtime.Runner.on_own_thread
+    call_grow_zone = runtime.Runner.call_grow_zone
 
     def __init__(self, resources=(), sharing=None, **system):
         """sharing: another Guest, for an application on its machine."""
@@ -91,8 +96,13 @@ class Guest:
                                EventQueue(lambda: (Point(0, 0), 0)), app=app)
         self.tb = Toolbox(None, self.process)
         self.machine = Machine(self.system)
+        self.reported = set()
         self.calls = []
         self.procs = {}
+        self.missing_asked = []
+
+    def asked_missing(self, name: str) -> None:
+        self.missing_asked.append(name)
 
     def __call__(self, name: str, *args):
         """Call the trap name with args, as the dispatcher would."""

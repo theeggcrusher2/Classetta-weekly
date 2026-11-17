@@ -11,7 +11,6 @@ the menu's ID on a Mac with Color QuickDraw.
 
 from __future__ import annotations
 
-from ..memory import ADDRESS_MASK
 from ..toolbox.menus import (MCT_ENTRY, mct_entries, mct_key, mctAllItems, menu_color_table,
                              set_mct_entries, write_mct)
 from .dispatch import trap
@@ -32,7 +31,7 @@ def GetMCEntry(t, menu_id, item):
         return 0
     for i, e in enumerate(mct_entries(t.system, h)):
         if mct_key(e) == (menu_id, item):
-            return (t.mem.r32(h) & ADDRESS_MASK) + i * MCT_ENTRY
+            return (t.mem.r32(h) & t.mem.system.addr_mask) + i * MCT_ENTRY
     return 0
 
 
@@ -41,7 +40,7 @@ def SetMCEntries(t, count, entries):
     """Each entry in the array takes the place of the table's for its
     menu and item, or is added."""
     p = t.process
-    array = t.mem.read(entries & ADDRESS_MASK, max(count, 0) * MCT_ENTRY) if count > 0 else b""
+    array = t.mem.read(entries & t.mem.system.addr_mask, max(count, 0) * MCT_ENTRY) if count > 0 else b""
     set_mct_entries(t.system, p.world, p.heap,
                     [array[i:i + MCT_ENTRY] for i in range(0, len(array), MCT_ENTRY)])
 
@@ -80,6 +79,6 @@ def SetMCInfo(t, h):
 @trap
 def DisposeMCInfo(t, h):
     """DispMCInfo: a table GetMCInfo gave."""
-    h &= ADDRESS_MASK
+    h &= t.mem.system.addr_mask
     if h:
         t.system.heap_of(h).dispose_handle(h)

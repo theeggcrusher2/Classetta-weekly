@@ -4,6 +4,7 @@ wanted, the journal and other private files hidden, and an image wrapped
 in an Apple partition map, the way old Apple CD-ROMs ship."""
 
 import struct
+import time
 import unicodedata
 
 import machfs
@@ -56,14 +57,18 @@ def test_hfsplus_volume_round_trip():
 
 
 def test_hfsplus_dates_and_locked_file():
+    """Its dates are GMT on the disk, made local as HFS keeps them; the
+    volume's own are local time as the volume header keeps them."""
     entries = [
         {"kind": "file", "name": "Locked", "data": b"x", "rsrc": b"", "locked": True},
     ]
-    vol = load_volume(hfsplus_image("Dates", entries, created=0xA1112222))
+    created = 0xA1112222
+    local = created + time.localtime(created - 2082844800).tm_gmtoff
+    vol = load_volume(hfsplus_image("Dates", entries, created=created))
     node = vol["Locked"]
     assert node.locked
-    assert node.crdate == 0xA1112222 == node.mddate
-    assert vol.crdate == 0xA1112222
+    assert node.crdate == local == node.mddate
+    assert vol.crdate == created
 
 
 def test_hfsplus_invisible_entries_are_hidden():

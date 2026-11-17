@@ -45,7 +45,7 @@ from __future__ import annotations
 import struct
 from functools import partial
 
-from ..memory import ADDRESS_MASK, BusError
+from ..memory import BusError
 from ..toolbox.gdevice import GDevice, deref, gdDevType
 from ..toolbox.qdraw import rgb_argb
 from ..toolbox.windows import WindowRecord
@@ -63,6 +63,7 @@ MAX_ENTRIES = 4095
 CI_USAGE, CI_TOLERANCE = 6, 8
 APP_PALETTE = -1            # the window that's the application's default palette's
 SYSTEM_PALETTE = 0          # where 'pltt' 0 is kept, once looked for
+TWO_ENTRIES = -2            # the default made when there's no 'pltt' 0
 # NSetPalette's nCUpdates: none, when another's palette changes the
 # colours, when the window's own does, both.
 pmNoUpdates, pmBkUpdates, pmFgUpdates, pmAllUpdates = 0x8000, 0xA000, 0xC000, 0xE000
@@ -151,21 +152,42 @@ def _get_new_palette(t, palette_id: int) -> int:
 
 
 # -- which palette is a window's ----------------------------------------------
-def _key(p: int) -> int:
-    return APP_PALETTE if p & 0xFFFFFFFF == 0xFFFFFFFF else p & ADDRESS_MASK
+def _key(p: int, mask: int) -> int:
+    return APP_PALETTE if p & 0xFFFFFFFF == 0xFFFFFFFF else p & mask
 
 
 def _palette_of(t, p: int) -> int:
     """The palette whose colours a window has: its own, else the
     application's default, else the System's, 'pltt' 0, if there is one."""
     palettes = t.process.palettes
-    for key in (_key(p), APP_PALETTE):
+    for key in (_key(p, t.mem.system.addr_mask), APP_PALETTE):
         got = palettes.get(key)
         if got is not None and got[0]:
             return got[0]
     if SYSTEM_PALETTE not in palettes:
         palettes[SYSTEM_PALETTE] = (_get_new_palette(t, 0), 0)
     return palettes[SYSTEM_PALETTE][0]
+
+
+def _default_palette(t) -> int:
+    """The application's default palette: the one it set, else 'pltt' 0,
+    else one made of two entries, white and black.  \"If the System file
+    has no default palette, the Palette Manager creates a special
+    two-entry palette (black and white)\" (Inside Macintosh: Advanced Color
+    Imaging on the Mac OS, Palette Manager, \"Designating a Default Palette
+    for Your Application\").  0 if there isn't room for it."""
+    h = _palette_of(t, 0xFFFFFFFF)
+    if h:
+        return h
+    palettes = t.process.palettes
+    got = palettes.get(TWO_ENTRIES)
+    if got is None:
+        h = _new_palette(t, 2)
+        if not h:
+            return 0
+        _fill(t, _record(t, h), [(0xFFFF, 0xFFFF, 0xFFFF), (0, 0, 0)], pmCourteous, 0)
+        palettes[TWO_ENTRIES] = got = (h, 0)
+    return got[0]
 
 
 def _front(t) -> None:
@@ -178,7 +200,7 @@ def _front(t) -> None:
     if qd.palette_colors is None:
         qd.palette_colors = partial(_port_colors, t)
     palettes = t.process.palettes
-    windows = {w.addr & ADDRESS_MASK for w in t.process.windows}
+    windows = {w.addr & t.mem.system.addr_mask for w in t.process.windows}
     for key in [k for k in palettes if k > 0 and k not in windows]:
         del palettes[key]
     w = t.process.front_window()
@@ -197,7 +219,7 @@ def new_window(t, w: WindowRecord | None, palette_id: int | None = None) -> None
     if palette_id is not None:
         h = _get_new_palette(t, palette_id)
         if h:
-            t.process.palettes[w.addr & ADDRESS_MASK] = (h, FG_UPDATES | BK_UPDATES)
+            t.process.palettes[w.addr & t.mem.system.addr_mask] = (h, FG_UPDATES | BK_UPDATES)
     _front(t)
 
 
@@ -325,7 +347,7 @@ def _color_updates(t) -> None:
     bounds = GDevice(t.mem, _record(t, devices.main)).rect
     front = t.process.front_window()
     for w in t.process.windows:
-        got = t.process.palettes.get(w.addr & ADDRESS_MASK)
+        got = t.process.palettes.get(w.addr & t.mem.system.addr_mask)
         if got is None or not w.visible:
             continue
         if got[1] & (FG_UPDATES if w is front else BK_UPDATES):
@@ -435,19 +457,21 @@ def _updates(n_c_updates: int) -> int:
 @trap
 def NSetPalette(t, p, h, n_c_updates):
     """SetPalette's too, the same trap."""
-    t.process.palettes[_key(p)] = (h & ADDRESS_MASK, _updates(n_c_updates))
+    t.process.palettes[_key(p, t.mem.system.addr_mask)] = (h & t.mem.system.addr_mask, _updates(n_c_updates))
     _front(t)
 
 
 @trap
 def GetPalette(t, p):
-    """A colour window's palette, or the application's default; NIL for a
-    window that has none of its own, or isn't a colour window."""
-    key = _key(p)
-    if key != APP_PALETTE:
-        w = t.window(p)
-        if w is None or not w.is_color:
-            return 0
+    """A colour window's palette, or the application's default, which
+    there always is one of; NIL for a window that has none of its own, or
+    isn't a colour window."""
+    key = _key(p, t.mem.system.addr_mask)
+    if key == APP_PALETTE:
+        return _default_palette(t)
+    w = t.window(p)
+    if w is None or not w.is_color:
+        return 0
     got = t.process.palettes.get(key)
     return got[0] if got else 0
 
@@ -610,6 +634,30 @@ def Palette2CTab(t, h, ct_h):
     seed = devices.next_seed() if devices is not None else 0
     t.mem.write(heap.deref(ct_h), struct.pack(">lHh", seed, 0, len(colors) - 1) + b"".join(
         struct.pack(">HHHH", i, *rgb) for i, rgb in enumerate(colors)))
+
+
+@trap
+def ResizePalette(t, h, size):
+    """The palette has size entries: those added at the end courteous and
+    black, and those taken off the end disposed of "safely" (Inside
+    Macintosh: Advanced Color Imaging, Palette Manager), giving up the
+    indexes they had reserved."""
+    if not h or not _record(t, h) or size < 0:
+        return
+    n, size = _count(t, h), min(size, MAX_ENTRIES)
+    if size == n:
+        return
+    kept = t.mem.read(_record(t, h) + HEADER, INFO * min(n, size))
+    p = _resize(t, h, size)
+    if not p:
+        return
+    t.mem.write(p + HEADER, kept)
+    if size > n:
+        _fill(t, p + INFO * n, [(0, 0, 0)] * (size - n), pmCourteous, 0)
+    devices = t.system.devices
+    if devices is not None and any(ph == h and e >= size for ph, e in devices.reserved.values()):
+        _reserve(t, {i: (ph, e) for i, (ph, e) in devices.reserved.items()
+                     if ph != h or e < size})
 
 
 @trap

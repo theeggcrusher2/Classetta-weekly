@@ -136,19 +136,31 @@ def test_an_own_wdef_is_called_in_the_window_manager_port(qapp):
     g.procs[g.heap.deref(code)] = lambda *args: seen.append(
         (args, g.mem.r32(g.mem.r32(g.process.partition.a5)))) or k.wInDrag
     g.set_port(rec)
-    assert rec.own_wdef
+    assert rec.has_custom_definition
     assert wdefs.message(g, rec, k.wHit, 0x00100020) == k.wInDrag
     assert seen == [((3, rec.addr, k.wHit, 0x00100020), g.mem.r32(lowmem.WMgrPort))]
     assert g.mem.r32(g.mem.r32(g.process.partition.a5)) == rec.addr
     rts = g.handle(bytes.fromhex("4E75"))
     rec.window_def_proc = rts
-    assert rec.own_wdef and wdefs.entry(g, rec) == 0                # nothing to run
+    assert rec.has_custom_definition and wdefs.entry(g, rec) == 0                # nothing to run
+
+
+def test_a_32_bit_window_doesnt_get_upper_8_bits_corrupted(qapp):
+    """On a 32-bit machine windowDefProc is just the handle: there's no
+    variant stored in the upper byte like on a 24 bit machine. Ensure we
+    aren't corrupting these bits."""
+    g = Guest(model="iici")
+    rec = _window(g, proc_id=128 << 4 | 3)
+    rec.window_def_proc = 0x12345678              # a handle with its top byte set
+    assert g.mem.r32(rec.addr + 126) == 0x12345678    # stored whole in the record
+    assert rec.custom_definition_handle == 0x12345678  # not masked to 24 bits
+    assert rec.proc_id & 0xF == 3                 # the variant code is still there
 
 
 def test_the_systems_wdefs_are_not_the_applications_own(qapp):
     g = Guest()
     rec = _window(g)
-    assert not rec.own_wdef and wdefs.entry(g, rec) == 0
+    assert not rec.has_custom_definition and wdefs.entry(g, rec) == 0
     assert wdefs.message(g, rec, k.wHit, 0) == 0 and g.calls == []
 
 

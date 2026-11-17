@@ -15,7 +15,6 @@ from __future__ import annotations
 import time
 from contextlib import contextmanager
 
-from ..memory import ADDRESS_MASK
 from ..toolbox import lowmem, textedit
 from ..toolbox.events import ProcessKilled, tick_count
 from ..toolbox.memmgr import memFullErr, noErr
@@ -111,7 +110,7 @@ class _Hooks(Hooks):
         line and the viewRect, as TextEdit's own drawing is."""
         t = self.t
         with self._record(h) as p:
-            port = t.system.port_at(textedit.TERec(t.mem, p).in_port & ADDRESS_MASK)
+            port = t.system.port_at(textedit.TERec(t.mem, p).in_port & t.mem.system.addr_mask)
             old = read_rgn(t.mem, port.clip_rgn) if port is not None and port.clip_rgn else None
             if old is not None:
                 write_rgn(t.system.heap_of(port.clip_rgn), port.clip_rgn, old.sect(clip))
@@ -158,7 +157,7 @@ def do_text(t) -> None:
     port in A0, and from a hit test the offset in D0."""
     cpu = t.cpu
     cpu.pc = cpu.pop32()
-    p = cpu.a(3) & ADDRESS_MASK
+    p = cpu.a(3) & cpu.mask
     heap = t.system.find_heap(p)
     h = heap.recover_handle(p) if heap is not None else 0
     rec = edit(t, h)
@@ -171,8 +170,8 @@ def do_text(t) -> None:
 
 def edit(t, h: int) -> EditRecord | None:
     """The edit record h is, None if it's no handle."""
-    h &= ADDRESS_MASK
-    if not h or not t.mem.r32(h) & ADDRESS_MASK:
+    h &= t.mem.system.addr_mask
+    if not h or not t.mem.r32(h) & t.mem.system.addr_mask:
         return None
     try:
         return EditRecord(t.system, t.tb.qd, h, _Hooks(t))
@@ -520,8 +519,8 @@ GetStylScrap = TEGetStyleScrapHandle
 
 
 def _style_scrap(t, sh: int):
-    sh &= ADDRESS_MASK
-    p = t.mem.r32(sh) & ADDRESS_MASK if sh else 0
+    sh &= t.mem.system.addr_mask
+    p = t.mem.r32(sh) & t.mem.system.addr_mask if sh else 0
     if not p:
         return []
     return read_style_scrap(t.mem.read(p, t.system.heap_of(sh).handle_size(sh)))

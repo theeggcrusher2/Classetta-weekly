@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Iterator
 
-from ..memory import ADDRESS_MASK, BOOLEAN, INTEGER, LONG, LONGINT, Field, from_mac, to_mac
+from ..memory import BOOLEAN, INTEGER, LONG, LONGINT, Field, from_mac, to_mac
 from .constants import userKind
 from .lowmem import AuxWinHead, World, WindowList as WINDOW_LIST
 from .memmgr import Heap
@@ -83,21 +83,21 @@ def aux_wins(mem: RAM, head: int = AuxWinHead) -> Iterator[int]:
 
 
 def _aux_list(mem: RAM, h: int) -> Iterator[int]:
-    h, seen = h & ADDRESS_MASK, set()
+    h, seen = h & mem.system.addr_mask, set()
     while h and h not in seen:
         seen.add(h)
-        p = mem.r32(h) & ADDRESS_MASK
+        p = mem.r32(h) & mem.system.addr_mask
         if not p:
             return
         yield h
-        h = mem.r32(p) & ADDRESS_MASK
+        h = mem.r32(p) & mem.system.addr_mask
 
 
 def find_aux_win(mem: RAM, window: int, head: int = AuxWinHead) -> int:
     """A window's auxiliary record (with window 0, the default's); 0 if
     there's none."""
     for h in aux_wins(mem, head):
-        if (mem.r32((mem.r32(h) & ADDRESS_MASK) + 4) ^ window) & ADDRESS_MASK == 0:
+        if (mem.r32((mem.r32(h) & mem.system.addr_mask) + 4) ^ window) & mem.system.addr_mask == 0:
             return h
     return 0
 
@@ -107,8 +107,8 @@ def table_colors(mem: RAM, ct: int) -> dict[int, tuple[int, int, int]]:
     entry of each part's.  In order, so the first is the table's first
     colour, the one a part the table hasn't is drawn in (Inside
     Macintosh V, the Window Manager)."""
-    ct &= ADDRESS_MASK
-    p = mem.r32(ct) & ADDRESS_MASK if ct else 0
+    ct &= mem.system.addr_mask
+    p = mem.r32(ct) & mem.system.addr_mask if ct else 0
     if not p:
         return {}
     n = mem.r16(p + 6) + 1 & 0xFFFF
@@ -126,24 +126,24 @@ def window_colors(mem: RAM, world: World, window: int) -> dict[int, tuple[int, i
     another application runs).  Empty if the list has neither."""
     found = 0
     for h in _aux_list(mem, world.r32(AuxWinHead)):
-        owner = mem.r32((mem.r32(h) & ADDRESS_MASK) + 4) & ADDRESS_MASK
-        if owner == window & ADDRESS_MASK:
+        owner = mem.r32((mem.r32(h) & mem.system.addr_mask) + 4) & mem.system.addr_mask
+        if owner == window & mem.system.addr_mask:
             found = h
             break
         if not owner and not found:
             found = h                   # the default, at the end
     if not found:
         return {}
-    return table_colors(mem, mem.r32((mem.r32(found) & ADDRESS_MASK) + 8))
+    return table_colors(mem, mem.r32((mem.r32(found) & mem.system.addr_mask) + 8))
 
 
 def unlink_aux_win(mem: RAM, h: int, head: int = AuxWinHead) -> None:
     """Take a record out of the list."""
     prev = 0
     for x in aux_wins(mem, head):
-        if x == h & ADDRESS_MASK:
-            after = mem.r32(mem.r32(x) & ADDRESS_MASK)
-            mem.w32((mem.r32(prev) & ADDRESS_MASK) if prev else head, after)
+        if x == h & mem.system.addr_mask:
+            after = mem.r32(mem.r32(x) & mem.system.addr_mask)
+            mem.w32((mem.r32(prev) & mem.system.addr_mask) if prev else head, after)
             return
         prev = x
 
@@ -168,6 +168,11 @@ class WindowRecord(GrafPort):
     window_pic = Field(148, LONG)
     ref_con = Field(152, LONGINT)
 
+    # internal storage for the variant_id, stored separately on 32 bit systems
+    # but stored above the address in 24 bit systems
+    _variant_id: int = 0
+
+
     def __init__(self, system: System, process: Process, heap: Heap, addr: int):
         super().__init__(system.mem, addr)
         self.system = system
@@ -175,7 +180,7 @@ class WindowRecord(GrafPort):
         self.heap = heap                # where its regions and handles live
         self.owns_storage = False
         self.dialog = None              # the Dialog Manager's DialogState, for a dialog
-        self._proc_id: tuple[int, int, bool] | None = None  # (windowDefProc, procID, own)
+
         self.saved_vis: tuple[Region, Rect] | None = None   # BeginUpdate's: the visRgn, portRect
         self.updates_begun = 0          # its BeginUpdates so far
         # A window with a WDEF of the application's own (see own_wdef) has
@@ -209,8 +214,23 @@ class WindowRecord(GrafPort):
         rec.window_kind = userKind
         rec.visible = visible
         rec.go_away = go_away
-        wdef = process.resources.defproc("WDEF", proc_id >> 4)
-        rec.window_def_proc = ((proc_id & 0xF) << 24) | wdef
+
+        # Upeer 12 bits of proc_id: ID of the WDEF resource containing the procedure
+        wdef_resource_id = proc_id >> 4
+
+        # Lower 4 bits of proc_id: Variation Code to be passed to WDEF procedure
+        rec._variant_id = proc_id & 0xF
+
+        # Get a handle to the WDEF resource (whether ours or system)
+        wdef_handle = process.resources.defproc("WDEF", wdef_resource_id)
+
+        if system.mmu_32_bit:
+            # For a 32 bit system, store the WDEF handle in all of window_def_proc
+            rec.window_def_proc = wdef_handle
+        else:
+            # On a 24 bit system, the variation_code sits in the 4 bits above the address
+            rec.window_def_proc = (rec._variant_id << 24) | (wdef_handle & system.addr_mask)
+
         rec.struc_rgn = new_rgn(heap)
         rec.cont_rgn = new_rgn(heap)
         rec.update_rgn = new_rgn(heap)
@@ -322,6 +342,17 @@ class WindowRecord(GrafPort):
         seen = r.sect(self._seen())
         return Rect(0, 0, 0, 0) if seen.empty else seen.offset(-r.left, -r.top)
 
+    @property
+    def backing_rect(self) -> Rect:
+        """The content area where the Window Manager last placed it
+        (global): what of the screen its Backing keeps pixels for, whatever
+        the program has done to its portRect since.  Ricochet sets the
+        portRect to the half of its window it is about to copy to, without
+        SetOrigin, and QuickDraw goes on drawing where portBits.bounds puts
+        the pixels."""
+        at, port = self.backing_at, self.backing.port
+        return Rect(at.v, at.h, at.v + port.height, at.h + port.width)
+
     def fit_backing(self, moved: bool = False) -> bool:
         """After the window changes size, or moves, its pixels with it (or
         not: MovePortTo moves the port on the screen, and leaves what's on
@@ -356,7 +387,7 @@ class WindowRecord(GrafPort):
     @property
     def title(self) -> str:
         h = self.title_handle
-        return from_mac(self.mem.r_pstr(self.mem.r32(h) & ADDRESS_MASK)) if h else ""
+        return from_mac(self.mem.r_pstr(self.mem.r32(h) & self.system.addr_mask)) if h else ""
 
     @title.setter
     def title(self, text: str) -> None:
@@ -366,24 +397,48 @@ class WindowRecord(GrafPort):
 
     @property
     def proc_id(self) -> int:
-        # Finding the WDEF's ID means searching the resource maps, and the
-        # chrome asks on every paint, so remember it until windowDefProc changes.
-        return self._defproc()[1]
+        """ Return the resource ID of the resource windowDefProc points to,
+            combined with the window's variant ID."""
+        # Look up the resource ID of the resource referenced from WindowDefProc
+        # Note: returns 0 if resource not found, which is a valid and common resource ID...
+        rsrc_type, rsrc_id = self.process.resources.defproc_id(self.custom_definition_handle)
+
+        if self.system.mmu_32_bit:
+            # On 32 bit machines, the variant ID is stored elsewhere
+            return (rsrc_id << 4) | self._variant_id
+        else:
+            # For 24 bit, read it from our window_def_proc bytes in the Mac's memory
+            # in case something's modified it (naughty!)
+            return (rsrc_id << 4) | ((self.window_def_proc >> 24) & 0xF)
+
 
     @property
-    def own_wdef(self) -> bool:
-        """True if windowDefProc is the application's own code (a WDEF
-        resource of its own, or code it put in a handle itself) rather than
-        the System's WDEF 0 or 1, whose frames the host draws."""
-        return self._defproc()[2]
+    def has_custom_definition(self) -> bool:
+        "Does this window have custom definition code?"
 
-    def _defproc(self) -> tuple[int, int, bool]:
-        wdp = self.window_def_proc
-        if self._proc_id is None or self._proc_id[0] != wdp:
-            kind, wdef = self.process.resources.defproc_id(wdp & ADDRESS_MASK)
-            own = bool(wdp & ADDRESS_MASK) and not (kind == "WDEF" and wdef in (0, 1))
-            self._proc_id = (wdp, (wdef << 4) | ((wdp >> 24) & 0xF), own)
-        return self._proc_id
+        # if windowDefProc handle is nil -> no procedure handle is set
+        # so we definitely don't have a custom function
+        if not self.custom_definition_handle:
+            return False
+
+        # The handle is non-zero, so it could either be some random code
+        # in memory, or it could be the System's WDEF 0 or WDEF 1
+        rsrc_type, rsrc_id = self.process.resources.defproc_id(self.custom_definition_handle)
+
+        # If the handle's pointing to a WDEF 0 or WDEF 1 resource
+        # it's not a custom function, just the bog standard system one.
+        if rsrc_type == "WDEF" and rsrc_id in (0,1):
+            return False
+
+        # Otherwise at this point it's not Nil, and not a system resource
+        # so it's custom.
+        return True
+
+    @property
+    def custom_definition_handle(self) -> int:
+        """Return the handle to the custom window definition code."""
+        # On 24 bit systems we need to mask off the variant ID
+        return self.window_def_proc & self.system.addr_mask
 
     @property
     def definition(self) -> Definition:
@@ -392,12 +447,12 @@ class WindowRecord(GrafPort):
     # -- zooming -------------------------------------------------------------
     def _state(self, offset: int) -> Rect | None:
         h = self.data_handle
-        return self.mem.r_rect((self.mem.r32(h) & ADDRESS_MASK) + offset) if h else None
+        return self.mem.r_rect((self.mem.r32(h) & self.system.addr_mask) + offset) if h else None
 
     def _set_state(self, offset: int, r: Rect) -> None:
         h = self.data_handle
         if h:
-            self.mem.w_rect((self.mem.r32(h) & ADDRESS_MASK) + offset, r)
+            self.mem.w_rect((self.mem.r32(h) & self.system.addr_mask) + offset, r)
 
     @property
     def user_state(self) -> Rect | None:
@@ -473,14 +528,14 @@ class WindowList:
         self.world.w32(WINDOW_LIST, addr)
 
     def __iter__(self) -> Iterator[WindowRecord]:
-        addr, seen = self.head & ADDRESS_MASK, set()
+        addr, seen = self.head & self.system.addr_mask, set()
         while addr and addr not in seen:
             rec = self.system.port_at(addr)
             if not isinstance(rec, WindowRecord):
                 return
             seen.add(addr)
             yield rec
-            addr = rec.next_window & ADDRESS_MASK
+            addr = rec.next_window & self.system.addr_mask
 
     def __len__(self) -> int:
         return sum(1 for _ in self)
@@ -513,12 +568,12 @@ class WindowList:
         other.next_window = rec.addr
 
     def remove(self, rec: WindowRecord) -> None:
-        addr = rec.addr & ADDRESS_MASK
-        if self.head & ADDRESS_MASK == addr:
+        addr = rec.addr & self.system.addr_mask
+        if self.head & self.system.addr_mask == addr:
             self.head = rec.next_window
         else:
             for w in self:
-                if w.next_window & ADDRESS_MASK == addr:
+                if w.next_window & self.system.addr_mask == addr:
                     w.next_window = rec.next_window
                     break
         rec.next_window = 0

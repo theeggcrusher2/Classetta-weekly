@@ -6,7 +6,6 @@ let the other applications run while they wait.
 
 from __future__ import annotations
 
-from ..memory import ADDRESS_MASK
 from ..toolbox import constants as k
 from ..toolbox import lowmem
 from ..toolbox.events import MODIFIER_KEYS, tick_count, to_next_tick
@@ -31,15 +30,22 @@ def WaitNextEvent(t, mask, event_p, sleep, mouse_rgn):
     glue_os.respond(t)
     glue_sony.put_back(t)
     sleep = glue_desk.time_wanted(t, max(sleep, 0))
+    if not sleep and t.null_tick == tick_count():
+        sleep = to_next_tick()          # as GetNextEvent does
     patch = t.patches.get(GET_NEXT_EVENT)
     if patch is not None and not t.in_gne_patch:
-        return _through_patch(t, patch, mask, event_p, sleep)
+        got = _through_patch(t, patch, mask, event_p, sleep)
+        if not got:
+            t.null_tick = tick_count()
+        return got
     rgn = _rgn(t, mouse_rgn) if mouse_rgn else None
     _stored_activates(t)
     window_pictures(t)
     _unanswered(t, mask)
     with t.yielding():
         got, ev = t.tb.WaitNextEvent(mask & 0xFFFF, sleep, rgn)
+    if not got:
+        t.null_tick = ev.when
     return _returned(t, event_p, got, ev)
 
 
@@ -110,7 +116,7 @@ def _stored_activates(t) -> None:
     windows that way, behind its palettes.  The deactivate comes first."""
     mem = t.mem
     for addr, active in ((lowmem.CurDeactive, False), (lowmem.CurActivate, True)):
-        p = mem.r32(addr) & ADDRESS_MASK
+        p = mem.r32(addr) & mem.system.addr_mask
         if p:
             mem.w32(addr, 0)
             t.process.events.post_activate(t.window(p) or p, active)

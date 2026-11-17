@@ -10,14 +10,24 @@ vSndEnb, is 0, at the volume in vBufA's low three bits.  Games write the
 buffer themselves, as Dark Castle and Crystal Quest do, at each tick;
 other programs have the Sound Driver fill it.
 
-The Speaker here takes the buffer at each of macrt's ticks, after the VBL
-tasks have run, and sends the frame, at its volume, to where the sound
-goes: the host's sound output (macrt.ui.audio), a WAV file (WaveFile), or
-nowhere.  On a Mac II, what a program writes to the Apple Sound Chip
-(ASC below) goes with it.  macrt's ticks are 60 a second, a Mac's 60.15,
-so the samples go out at 22,200 a second: what the Sound Driver makes
-from waveforms is 4 cents flat.  The alternate sound buffer isn't kept, nor does timer 1 work
-vSndEnb itself.
+The Speaker here takes the buffer at each of macrt's ticks, after the
+VBL tasks have run, and sends the frame, at its volume, to where the
+sound goes: the host's sound output (macrt.ui.audio), a WAV file
+(WaveFile), or nowhere.  A game that writes all of the buffer at each
+tick needn't start at its first sample: it may start further on and go
+round to just before where it started.  Creepy Castle starts at sample
+10, Prince of Persia at 37, Dark Castle at 40, Crystal Quest at 42 and
+Tetris at 140, and each frame taken from the first sample would play the
+end of what they wrote first, a jump in the wave at each tick, and
+another where they started.  So the Speaker takes each frame from where
+they start: twice a second, it watches a tick's stores to the buffer,
+and if they wrote each sample once, round from one of the first few,
+frames start there from then on.  The Sound Driver and the Sound Manager
+write theirs from there too.  On a Mac II, what a program writes to the
+Apple Sound Chip (ASC below) goes with it.  macrt's ticks are 60 a
+second, a Mac's 60.15, so the samples go out at 22,200 a second: what
+the Sound Driver makes from waveforms is 4 cents flat.  The alternate
+sound buffer isn't kept, nor does timer 1 work vSndEnb itself.
 
 The Sound Driver is the device driver '.Sound', reference number -4.  A
 Write (StartSound) starts a sound, or queues it behind the one playing.
@@ -72,7 +82,6 @@ import wave
 from dataclasses import dataclass
 from operator import add
 
-from ..memory import ADDRESS_MASK
 from ..toolbox import lowmem
 from . import glue_devices
 from .hardware import HZ, vBufA, vBufB
@@ -202,7 +211,7 @@ class SoundDriver:
     def call(self, t, w: int) -> bool:
         """Do Device Manager call w, A0 its parameter block, if it's a
         Write, Control or KillIO for the Sound Driver."""
-        pb = t.cpu.a(0) & ADDRESS_MASK
+        pb = t.cpu.a(0) & t.mem.system.addr_mask
         if t.mem.r16s(pb + glue_devices.ioRefNum) != SOUND_DRIVER:
             return False
         n = w & 0xFF
@@ -220,7 +229,7 @@ class SoundDriver:
         m = t.mem
         m.w16(pb + glue_devices.ioTrap, w)
         m.w32(pb + ioActCount, 0)
-        buffer = m.r32(pb + ioBuffer) & ADDRESS_MASK
+        buffer = m.r32(pb + ioBuffer) & t.mem.system.addr_mask
         size = m.r32s(pb + ioReqCount)
         mode = m.r16s(buffer) if size >= 2 else None
         if mode not in (swMode, ffMode, ftMode) or mode != swMode and size < 6:
@@ -327,18 +336,18 @@ class SoundDriver:
     def _follow(self, m) -> None:
         """Take the sounds' parameter blocks from the DCE's queue, where a
         program may have put others."""
-        dce = m.r32(lowmem.SoundDCE) & ADDRESS_MASK
-        pb = m.r32(dce + glue_devices.dCtlQHead) & ADDRESS_MASK if dce else 0
+        dce = m.r32(lowmem.SoundDCE) & m.system.addr_mask
+        pb = m.r32(dce + glue_devices.dCtlQHead) & m.system.addr_mask if dce else 0
         for sound in self._sounds():
             if not pb:
                 break
             sound.pb = pb
-            pb = m.r32(pb + glue_devices.qLink) & ADDRESS_MASK
+            pb = m.r32(pb + glue_devices.qLink) & m.system.addr_mask
 
     def _link(self, m) -> None:
         """Put the sounds' parameter blocks in the DCE's queue, the one
         playing first."""
-        dce = m.r32(lowmem.SoundDCE) & ADDRESS_MASK
+        dce = m.r32(lowmem.SoundDCE) & m.system.addr_mask
         if not dce:
             return
         pbs = [s.pb for s in self._sounds()]
@@ -355,7 +364,7 @@ class SoundDriver:
         m.w8(lowmem.SoundActive, 0)
         if self.active:
             self.active = False
-            fill(m, SILENT_FRAME)
+            self.machine.speaker.fill(SILENT_FRAME)
             self.switch.release(self)
 
     def _done(self, t, sound: _Sound, err: int) -> None:
@@ -391,7 +400,7 @@ class SoundDriver:
                        ffMode: self._free_form}[sound.mode](m, sound)
         if frame is not None:
             self.frame = frame
-            fill(m, frame)
+            self.machine.speaker.fill(frame)
         if done:
             self._follow(m)
             self.playing = None
@@ -416,13 +425,13 @@ class SoundDriver:
                                                sound.position)[0] is None
 
     def _four_tone(self, m, sound: _Sound) -> tuple[bytes | None, bool]:
-        record = m.r32(lowmem.SoundPtr) & ADDRESS_MASK
+        record = m.r32(lowmem.SoundPtr) & m.system.addr_mask
         duration, *fields = struct.unpack(">h12I", m.read(record, FT_SIZE))
         if duration <= 0:
             return None, True
         tones = []
         for i in range(4):
-            at = fields[8 + i] & ADDRESS_MASK
+            at = fields[8 + i] & m.system.addr_mask
             tones.append((fields[2 * i], fields[2 * i + 1],
                           m.read(at, WAVE) if at else SILENT_WAVE))
         frame, phases = four_tone(tones)
@@ -441,14 +450,6 @@ class SoundDriver:
         data = m.read(sound.buffer + 6 + start, end - start)
         frame, sound.position = free_form(data, start, sound.position, count, length)
         return frame, sound.position >> 16 >= length
-
-
-def fill(m, frame: bytes) -> None:
-    """Put a frame in the sound buffer's high bytes."""
-    base = m.r32(lowmem.SoundBase) & ADDRESS_MASK
-    words = bytearray(m.read(base, 2 * FRAME))
-    words[0::2] = frame
-    m.write(base, bytes(words))
 
 
 def _tone(m, buffer: int, size: int, at: int) -> tuple[tuple[int, int, int] | None, int]:
@@ -502,17 +503,44 @@ def mix(frames: list[bytes]) -> bytes:
     return bytes(min(255, max(0, s - off)) for s in map(sum, zip(*frames)))
 
 
+WATCH_EVERY = 30        # ticks from one look at where a program's frames start to the next
+OUT_OF_ORDER = 4        # how far back a sample may be written, from the furthest on yet
+
+
+def _round_from(order: list[int], start: int) -> bool:
+    """Whether order, the samples a tick's stores wrote, is each sample
+    once, round the buffer from start: in order, or near enough, as Dark
+    Castle writes its samples in pairs, the second of each first."""
+    if len(order) != FRAME or len(set(order)) != FRAME:
+        return False
+    furthest = 0
+    for sample in order:
+        at = (sample - start) % FRAME
+        if at < furthest - OUT_OF_ORDER:
+            return False
+        furthest = max(furthest, at)
+    return True
+
+
 class Speaker:
     """The sound buffer, a frame a tick while vSndEnb has the speaker on,
     to each of outputs: anything with a frame(samples) method, given each
     frame's 370 samples, unsigned bytes, at the volume.  With a sound
-    chip, what's written to it is added in."""
+    chip, what's written to it is added in.  With the CPU, it looks now
+    and then at where a program that writes the buffer starts each frame
+    (see _watched)."""
 
-    def __init__(self, mem, via, outputs=(), chip: ASC | None = None):
+    def __init__(self, mem, via, outputs=(), chip: ASC | None = None, cpu=None):
         self.mem = mem
         self.via = via
         self.outputs = list(outputs)
         self.chip = chip
+        self.cpu = cpu
+        self.start = 0                  # the sample in the buffer a frame starts at
+        self._hook: int | None = None   # while a tick's stores to it are watched
+        self._watched_at = 0            # the buffer they're watched in
+        self._stores: list[tuple[int, int]] = []    # their addresses and sizes
+        self._next_watch = 0            # ticks to go until the next tick watched
 
     @property
     def on(self) -> bool:
@@ -526,18 +554,77 @@ class Speaker:
     def retrace(self) -> None:
         frames = []
         if self.on:
-            base = self.mem.r32(lowmem.SoundBase) & ADDRESS_MASK
-            frame = self.mem.read(base, 2 * FRAME)[0::2]
+            base = self.mem.r32(lowmem.SoundBase) & self.mem.system.addr_mask
+            samples = self.mem.read(base, 2 * FRAME)[0::2]
+            if self._hook is not None:
+                self._watched(base, samples)
+            elif self.cpu is not None:
+                self._watch(base)
+            frame = samples[self.start:] + samples[:self.start]
             volume = self.via.regs[vBufA] & VOLUME
             if volume != 7:
                 frame = frame.translate(_VOLUMES[volume])
             frames.append(frame)
+        elif self._hook is not None:
+            self._unwatch()
+            self._stores = []
         if self.chip is not None and (chip := self.chip.frame()) is not None:
             frames.append(chip)
         if frames and self.outputs:
             frame = mix(frames)
             for out in self.outputs:
                 out.frame(frame)
+
+    def fill(self, frame: bytes) -> None:
+        """Put a frame in the sound buffer's high bytes, from where frames
+        start."""
+        base = self.mem.r32(lowmem.SoundBase) & self.mem.system.addr_mask
+        words = bytearray(self.mem.read(base, 2 * FRAME))
+        start = self.start
+        words[2 * start::2] = frame[:FRAME - start]
+        words[:2 * start:2] = frame[FRAME - start:]
+        self.mem.write(base, bytes(words))
+
+    def _watch(self, base: int) -> None:
+        """Every WATCH_EVERY ticks, watch the stores to the buffer until
+        the next."""
+        self._next_watch -= 1
+        if self._next_watch > 0:
+            return
+        self._next_watch = WATCH_EVERY
+        self._watched_at = base
+        self._hook = self.cpu.watch_stores(base, base + 2 * FRAME, self._store)
+
+    def _unwatch(self) -> None:
+        self.cpu.unwatch_stores(self._hook)
+        self._hook = None
+
+    def _store(self, addr: int, size: int) -> None:
+        if len(self._stores) < 2 * FRAME:
+            self._stores.append((addr, size))
+
+    def _watched(self, base: int, samples: bytes) -> None:
+        """A tick's stores have been watched: if they wrote each sample
+        once, round the buffer from one of the first few, frames start
+        there; stores that didn't start them at the first sample again.
+        But silence, the buffer left at one level, sounds the same from
+        anywhere, and says only where frames start if it's somewhere else:
+        a buffer cleared from its first sample says nothing of where a
+        program writes its sound from.  A tick with no stores says
+        nothing either, the Sound Driver's and the Sound Manager's frames
+        being written from here; a buffer moved starts frames at its first
+        sample."""
+        self._unwatch()
+        stores, self._stores = self._stores, []
+        if base != self._watched_at:
+            self.start = 0
+        elif stores:
+            order = [offset >> 1 for addr, size in stores
+                     for offset in range(addr - base, addr - base + size)
+                     if not offset & 1 and 0 <= offset < 2 * FRAME]
+            start = next((n for n in order[:OUT_OF_ORDER] if _round_from(order, n)), 0)
+            if start or samples.count(samples[0]) != FRAME:
+                self.start = start
 
 
 class WaveFile:
@@ -607,8 +694,8 @@ class ASC:
             return taken[0]
         return bytes((a + b) >> 1 for a, b in zip(*taken))
 
-    def map(self, uc) -> None:
-        uc.mmio_map(ASC_BASE, ASC_SIZE, self._bus_read, None, self._bus_write, None)
+    def map(self, uc, base: int = ASC_BASE) -> None:
+        uc.mmio_map(base, ASC_SIZE, self._bus_read, None, self._bus_write, None)
 
     def _bus_read(self, uc, offset: int, size: int, _data) -> int:
         value = 0

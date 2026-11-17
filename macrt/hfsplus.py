@@ -15,7 +15,7 @@ from collections.abc import Iterator
 
 import machfs
 
-from .macfile import OnDisk, _link_aliases
+from .macfile import OnDisk, _link_aliases, _gmt_to_local, _mac_name
 
 HFSX_SIGNATURES = (b"H+", b"HX")
 ROOT_FOLDER_ID, ROOT_PARENT_ID = 2, 1
@@ -185,6 +185,7 @@ def read_hfsplus(data) -> machfs.Volume:
     cnids: dict[int, machfs.Folder | machfs.File] = {}
     children = []
     volume_name = None
+    links: list[tuple[machfs.File, int]] = []
     for rec in _leaf_records(catalog):
         try:
             parent, name, record_type, at = _record(rec)
@@ -217,22 +218,33 @@ def read_hfsplus(data) -> machfs.Volume:
             node.attributes = node.flags & 0x7E
             flags = struct.unpack_from(">H", rec, at + 2)[0]
             node.locked = bool(flags & 0x0001)
+            if (node.type, node.creator) == (b"hlnk", b"hfs+"):
+                links.append((node, struct.unpack_from(">I", rec, at + 44)[0]))
         else:
             continue
         crdate_, moddate_ = struct.unpack_from(">II", rec, at + 12)
         backup_ = struct.unpack_from(">I", rec, at + 28)[0]
-        node.crdate, node.mddate, node.bkdate = crdate_, moddate_, backup_
+        node.crdate, node.mddate, node.bkdate = map(
+            _gmt_to_local, (crdate_, moddate_, backup_))
         cnids[cnid] = node
-        children.append((parent, name, node, bool(fdflags & INVISIBLE)))
-    for parent, name, node, invisible in children:
-        if invisible:
+        children.append((parent, name, cnid, node, bool(fdflags & INVISIBLE)))
+    hidden = next((cnid for parent, name, cnid, node, invisible in children
+                   if parent == ROOT_FOLDER_ID and name == "\0\0\0\0HFS+ Private Data"
+                   and isinstance(node, machfs.Folder)), None)
+    inodes = {name: node for parent, name, cnid, node, invisible in children
+              if hidden is not None and parent == hidden}
+    targets = {id(link): inodes.get(f"iNode{n}", link) for link, n in links}
+    for parent, name, cnid, node, invisible in children:
+        if invisible or cnid == hidden or parent == hidden:
             continue
         if parent != ROOT_PARENT_ID:
             folder = cnids.get(parent)
             if folder is None:
                 raise ValueError(
                     f"its catalog's file {name!r} is in folder {parent}, which it does not hold")
-            folder[name] = node
+            # long names are kept whole (machfs holds them); only names Mac Roman can't
+            # spell, or a folder already has, get cut short and a '#' - node ID
+            folder[_mac_name(name, cnid, folder, 1 << 30)] = targets.get(id(node), node)
     if ROOT_FOLDER_ID not in cnids:
         raise ValueError("its catalog holds no root folder")
     seen, todo = set(), [cnids[ROOT_FOLDER_ID]]
@@ -245,6 +257,8 @@ def read_hfsplus(data) -> machfs.Volume:
     _link_aliases(crdate, cnids)
     vol = machfs.Volume()
     vol.update(cnids[ROOT_FOLDER_ID])
-    vol.crdate, vol.mddate, vol.bkdate = crdate, mddate, bkdate
+    for name in ("Desktop", "Desktop DB", "Desktop DF"):
+        vol.pop(name, None)
+    vol.crdate, vol.mddate, vol.bkdate = crdate, _gmt_to_local(mddate), _gmt_to_local(bkdate)
     vol.name = volume_name or "untitled"
     return vol

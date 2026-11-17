@@ -23,7 +23,7 @@ from __future__ import annotations
 import struct
 from contextlib import contextmanager
 
-from ..memory import ADDRESS_MASK, from_mac
+from ..memory import from_mac
 from ..toolbox import constants as k
 from ..toolbox import intl, lowmem
 from ..toolbox import script as sm
@@ -49,14 +49,14 @@ MAX_CELLS = 0x7FFF // 2     # as many as maxIndex, an INTEGER of 2 bytes a cell,
 # =========================================================================
 def _list(t, h: int) -> ListRec | None:
     """The list a ListHandle is, None for NIL or an empty handle."""
-    h &= ADDRESS_MASK
-    if not h or not t.mem.r32(h) & ADDRESS_MASK:
+    h &= t.mem.system.addr_mask
+    if not h or not t.mem.r32(h) & t.mem.system.addr_mask:
         return None
     return ListRec(t.system, h)
 
 
 def _bars(lst: ListRec) -> list[int]:
-    return [h & ADDRESS_MASK for h in (lst.v_scroll, lst.h_scroll) if h & ADDRESS_MASK]
+    return [h & lst.mem.system.addr_mask for h in (lst.v_scroll, lst.h_scroll) if h & lst.mem.system.addr_mask]
 
 
 def _drawing(lst: ListRec) -> bool:
@@ -78,7 +78,7 @@ def _in_port(t, lst: ListRec, clip: Rect | None = None):
     var = _the_port_var(t)
     saved = t.mem.r32(var)
     t.mem.w32(var, lst.port)
-    port = t.system.port_at(lst.port & ADDRESS_MASK)
+    port = t.system.port_at(lst.port & t.mem.system.addr_mask)
     old_clip = None
     if clip is not None and port is not None and port.clip_rgn:
         old_clip = read_rgn(t.mem, port.clip_rgn)
@@ -97,7 +97,7 @@ def _in_port(t, lst: ListRec, clip: Rect | None = None):
 # =========================================================================
 def _message(t, lst: ListRec, msg: int, select: bool = False, r: Rect = NOWHERE,
              cell: Point = Point(0, 0), offset: int = 0, length: int = 0) -> None:
-    h = lst.def_proc & ADDRESS_MASK
+    h = lst.def_proc & t.mem.system.addr_mask
     if not h:
         return
     with _in_port(t, lst, r if msg in (k.lDrawMsg, k.lHiliteMsg) else None):
@@ -131,7 +131,7 @@ def _standard(t, lst: ListRec, msg: int, select: bool, r: Rect, offset: int,
     elif msg == k.lDrawMsg:
         tb.EraseRect(r)
         if length > 0:
-            data = t.mem.read(t.mem.r32(lst.cells & ADDRESS_MASK) + offset, length)
+            data = t.mem.read(t.mem.r32(lst.cells & t.mem.system.addr_mask) + offset, length)
             ind = lst.indent
             tb.MoveTo(r.left + ind.h, r.top + ind.v)
             tb.DrawString(from_mac(data))
@@ -158,7 +158,7 @@ def _icon_cell(t, lst: ListRec, msg: int, select: bool, r: Rect, offset: int,
         tb.EraseRect(r)
     if length < 4:
         return
-    data = t.mem.read(t.mem.r32(lst.cells & ADDRESS_MASK) + offset, length)
+    data = t.mem.read(t.mem.r32(lst.cells & t.mem.system.addr_mask) + offset, length)
     h = struct.unpack_from(">L", data)[0]
     port = t.system.port_at(lst.port)
     named = length > 4 and port is not None
@@ -174,7 +174,7 @@ def _icon_cell(t, lst: ListRec, msg: int, select: bool, r: Rect, offset: int,
     left = r.left + (r.width - ICON) // 2
     where = Rect(top, left, top + ICON, left + ICON)
     transform = ttSelected if select else ttNone
-    contents = t.tb.contents(h) if h and t.mem.r32(h) & ADDRESS_MASK else b""
+    contents = t.tb.contents(h) if h and t.mem.r32(h) & t.mem.system.addr_mask else b""
     if len(contents) >= 128:
         _plot(t, where, atNone, transform,
               bitmap_icon(contents, LARGE, masked=len(contents) >= 256))
@@ -406,7 +406,7 @@ def LDispose(t, h):
     _message(t, lst, k.lCloseMsg)
     for bar in _bars(lst):
         DisposeControl(t, bar)
-    cells = lst.cells & ADDRESS_MASK
+    cells = lst.cells & t.mem.system.addr_mask
     if cells:
         t.system.heap_of(cells).dispose_handle(cells)
     t.system.heap_of(lst.handle).dispose_handle(lst.handle)
@@ -627,7 +627,7 @@ def LSearch(t, data_ptr, data_len, search_proc, cell_p, h):
         return False
     data_len = max(data_len, 0)
     target = t.mem.read(data_ptr, data_len)
-    cells = lst.cells & ADDRESS_MASK
+    cells = lst.cells & t.mem.system.addr_mask
     heap = t.system.heap_of(cells)
     cell = t.point(cell_p)
     while cell is not None:
@@ -757,7 +757,7 @@ def LSize(t, width, height, h):
     _keep_in_range(lst)
     v_rect, h_rect = _bar_rects(lst, bool(lst.v_scroll), bool(lst.h_scroll))
     for bar, r in ((lst.v_scroll, v_rect), (lst.h_scroll, h_rect)):
-        if bar & ADDRESS_MASK:
+        if bar & t.mem.system.addr_mask:
             MoveControl(t, bar, r.left, r.top)
             SizeControl(t, bar, r.width, r.height)
     _sync_bars(t, lst)
@@ -779,7 +779,7 @@ def LLastClick(t, h):
 
 
 def _mouse(t, lst: ListRec) -> Point:
-    port = t.system.port_at(lst.port & ADDRESS_MASK)
+    port = t.system.port_at(lst.port & t.mem.system.addr_mask)
     pos = t.tb._d.input.mac_pos
     return port.global_to_local(pos) if port is not None else pos
 
@@ -791,7 +791,7 @@ def _clik_loop(t, lst: ListRec) -> bool:
     ctx = cpu.context()
     cpu.sp = cpu.sp - 2
     with _in_port(t, lst):
-        t._jsr(lst.clik_loop & ADDRESS_MASK)
+        t._jsr(lst.clik_loop & cpu.mask)
     go = cpu.d(0) & 0xFF != 0
     cpu.restore(ctx)
     return go
@@ -806,7 +806,7 @@ def _track_bar(t, lst: ListRec, bar: int, pt: Point, part: int) -> None:
     def step(h, part):
         c = _ctl(t, h)
         vis = lst.visible
-        page = max((vis.height if h == lst.v_scroll & ADDRESS_MASK else vis.width) - 1, 1)
+        page = max((vis.height if h == lst.v_scroll & lst.mem.system.addr_mask else vis.width) - 1, 1)
         delta = {k.inUpButton: -1, k.inDownButton: 1, k.inPageUp: -page,
                  k.inPageDown: page}.get(part, 0)
         SetControlValue(t, h, c.value + delta)
@@ -919,7 +919,7 @@ def LClick(t, pt, modifiers, h):
     while True:
         mouse = _mouse(t, lst)
         lst.mouse_loc = mouse
-        if lst.clik_loop & ADDRESS_MASK and not _clik_loop(t, lst):
+        if lst.clik_loop & t.mem.system.addr_mask and not _clik_loop(t, lst):
             break
         _autoscroll(t, lst, mouse)
         cell = lst.cell_at(Point(max(view.top, min(mouse.v, view.bottom - 1)),

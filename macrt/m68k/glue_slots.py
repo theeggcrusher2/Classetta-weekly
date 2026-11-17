@@ -50,7 +50,6 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
-from ..memory import ADDRESS_MASK
 from ..toolbox.gdevice import FIXED_72, RGB_DIRECT, VIDEO_DR_HW, VIDEO_DRIVER, VIDEO_SLOT
 from ..toolbox.memmgr import noErr
 from . import glue_video
@@ -336,7 +335,7 @@ def _kind(t, pb: int) -> tuple:
 def _read(t, card: Card, pb: int, selector: int) -> int:
     """SReadByte to SReadStruct: from the list at spsPointer."""
     m = t.mem
-    sptr = m.r32(pb + spsPointer) & ADDRESS_MASK
+    sptr = m.r32(pb + spsPointer) & t.mem.system.addr_mask
     if not sptr:
         return smsPointerNil
     if not _in_rom(card, sptr):
@@ -395,7 +394,7 @@ def _slot_call(t, card: Card, pb: int, selector: int) -> int:
     slot = m.r8(pb + spSlot)
     if slot != VIDEO_SLOT:
         return smEmptySlot
-    result = m.r32(pb + spResult) & ADDRESS_MASK
+    result = m.r32(pb + spResult) & t.mem.system.addr_mask
     if selector == sReadInfo:
         m.write(result, _sinfo(t, card))
     elif selector == sReadFHeader:
@@ -403,7 +402,7 @@ def _slot_call(t, card: Card, pb: int, selector: int) -> int:
     elif selector == sReadPRAMRec:
         m.write(result, struct.pack(">H", BOARD_ID) + card.pram)
     elif selector == sPutPRAMRec:               # all but the board's ID
-        card.pram = m.read((m.r32(pb + spsPointer) & ADDRESS_MASK) + 2, 6)
+        card.pram = m.read((m.r32(pb + spsPointer) & t.mem.system.addr_mask) + 2, 6)
     elif selector == sCardChanged:
         m.w32(pb + spResult, 0)
     elif selector in (sFindDevBase, sFindBigDevBase):
@@ -479,7 +478,7 @@ def SlotManager(t, pb, selector):
         if entry is None:
             return smNoMoresRsrcs
         name = b"." + _cstring(t, card, _offset(t, entry))[:254]
-        m.write(m.r32(pb + spResult) & ADDRESS_MASK, bytes([len(name)]) + name)
+        m.write(m.r32(pb + spResult) & t.mem.system.addr_mask, bytes([len(name)]) + name)
         return noErr
     elif selector in (sReadInfo, sReadPRAMRec, sPutPRAMRec, sReadFHeader, sCkCardStat,
                       sFindDevBase, sFindBigDevBase, sCardChanged):

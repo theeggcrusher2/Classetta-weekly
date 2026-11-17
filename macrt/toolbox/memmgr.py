@@ -18,8 +18,9 @@ of master pointers it finds there as its table of handles; then it adds
 zcbFree, the free bytes the record counts, to what it could purge, to see
 if it has room to start.
 
-Blocks move to compact the heap only when a program asks, with CompactMem
-or MaxMem.  Otherwise a handle moves only when SetHandleSize can't grow it
+Blocks move to compact the heap when a program asks, with CompactMem or
+MaxMem, and when an allocation doesn't fit otherwise (below).  Otherwise
+a handle moves only when SetHandleSize can't grow it
 in place, when MoveHHi moves it up, or to make room low in the zone, for a
 nonrelocatable block that has no free block to go in or for ResrvMem:
 then the handles in the lowest stretch of the zone that can hold it move
@@ -28,24 +29,41 @@ nonrelocatable blocks stay together at the bottom of the zone, as on a
 Mac (Inside Macintosh II-12, II-39).  The Angelsoft adventures' p-System
 counts on it: it takes the largest free block MaxMem finds to be the one
 that ends the zone.  Mac programs already have to allow for all of
-these.  A Mac's NewPtr, and its Resource Manager when it reads in a
-locked resource, make room low every time, not only when there's no free
-block; here they don't, as Q-Sheet runs code from a resource it hasn't
-locked and crashes when a NewPtr moves it, so handles stay put more often
-than on a Mac.  When an allocation doesn't fit, a zone with room to
-grow (the application heap, up to ApplLimit) grows, as far as it can
-when even that isn't enough; failing that, unlocked purgeable blocks are
-purged, oldest address first, until it does: the master pointer becomes
-NIL and the handle stays valid, as on a Mac.
+these.  A program's NewPtr makes room low that way even when a free
+block higher up would hold it, though it doesn't grow the zone to do it:
+Excel 1.5 jumps from the 128K block it asks for into its first segment
+with 16-bit offsets.  macrt's own nonrelocatable blocks, and a locked
+resource being read in, still go in the first free block that holds
+them, where a Mac's Resource Manager makes room low for a locked
+resource, so handles stay put more often here than on a Mac.  When an
+allocation doesn't fit, a zone with room to grow (the application heap,
+up to ApplLimit) grows, as far as it can
+when even that isn't enough; failing that, the zone is compacted, and if
+that isn't enough either, unlocked purgeable blocks are purged, lowest
+address first, until it does: the master pointer becomes NIL and the
+handle stays valid, as on a Mac.  "The Memory Manager first tries to
+obtain the requested amount of space by compacting the heap; if
+compaction fails to free the required amount of space, the Memory Manager
+then purges the heap" (Inside Macintosh: Memory, "Heap Purging and
+Compaction").  Last, the zone's grow-zone function, if it has one, is
+called with the block's physical size, GZRootHnd holding the handle
+being resized, which it mustn't move or purge (0 for a new block), and
+for as long as it says it freed something the zone is compacted and
+purged again (Inside Macintosh: Memory,
+"MyGrowZone").  Fine Artist installs one with SetGrowZone: at the 1,792K
+its SIZE prefers, on a IIx at 8 bits, its NEXT button needed two calls,
+for blocks of 20,076 and 26,620 bytes, which said they freed 25,966 and
+157,490 bytes.
 """
 
 from __future__ import annotations
 
 import bisect
+import struct
 import threading
 from typing import Callable
 
-from ..memory import ADDRESS_MASK, RAM
+from ..memory import RAM
 
 noErr = 0
 memFullErr = -108
@@ -56,17 +74,24 @@ memLockedErr = -117
 
 HEADER = 8
 MIN_BLOCK = 12
-ZONE_HEADER = 52            # the zone record; bkLim, hFstFree, zcbFree and moreMast are kept
+_LONG = struct.Struct(">I")
+ZONE_HEADER = 52            # the zone record; bkLim, hFstFree, zcbFree, gzProc, moreMast kept
 H_FST_FREE = 8              # hFstFree's offset in the record
 ZCB_FREE = 12               # zcbFree's
+GZ_PROC = 16                # gzProc's
 MORE_MAST = 20              # moreMast's
 MASTERS_PER_BLOCK = 32      # the system heap's moreMast
 APPL_MASTERS = 64           # the application heap's (Inside Macintosh II-22)
 GROW_STEP = 0x1000          # the least a zone grows by
+GROW_ZONE_CALLS = 1024      # the most calls of a grow-zone function for one block
 
 FREE, NONRELOCATABLE, RELOCATABLE = 0, 1, 2
 
-# Flags in a master pointer's high byte (24-bit mode)
+# A handle's flags.  In 24-bit mode they live in the master pointer's
+# high byte, and we do this to maintain compatibility with apps that
+# (inadvisably) look at them directly.
+# In 32-bit mode they can't be there as all bits are used for
+# the address, so we store them separately in _xflags.
 LOCKED = 0x80
 PURGEABLE = 0x40
 RESOURCE = 0x20
@@ -83,11 +108,19 @@ class Heap:
         Memory").  Macintosh Pascal checksums its own code segment to the
         end of its block as a Mac Plus has it."""
         self.mem = mem
+        self.mmu_32_bit = mem.system.mmu_32_bit
+        self._xflags: dict[int, int] = {}     # 32-bit mode: h -> its flags
         self.align = align
         self.start = start
         self.end = end & ~3
         self.limit = self.end if limit is None else max(limit & ~3, self.end)
         self.on_grow = on_grow
+        # Calls the grow-zone function in the zone record's gzProc, for a
+        # block of cbNeeded bytes, the handle it mustn't move or purge (or
+        # 0) given too: (proc, cbNeeded, handle) -> what it says it freed.
+        # The program that installs one sets it.
+        self.grow_zone: Callable[[int, int, int], int] | None = None
+        self._in_grow_zone = False
         self.error = noErr
         self._lock = threading.RLock()
         first = (start + ZONE_HEADER + 3) & ~3
@@ -105,7 +138,7 @@ class Heap:
         self._add_free(first, self.end - first)
 
     def contains(self, addr: int) -> bool:
-        return self.start <= (addr & ADDRESS_MASK) < self.end
+        return self.start <= (addr & self.mem.system.addr_mask) < self.end
 
     def blocks(self) -> dict[int, int]:
         """Each block allocated, by its data's address: its logical size."""
@@ -164,10 +197,14 @@ class Heap:
     # =====================================================================
     # Pointers
     # =====================================================================
-    def new_ptr(self, size: int, clear: bool = False) -> int:
+    def new_ptr(self, size: int, clear: bool = False, low: bool = False) -> int:
         """A nonrelocatable block; clear says the caller needs zeros, as
-        NewPtrClear does, though every new block starts as zeros (_fit)."""
+        NewPtrClear does, though every new block starts as zeros (_fit).
+        low makes room for it as low in the zone as the handles that can
+        move let it go, though a free block higher up would hold it."""
         with self._lock:
+            if low and size >= 0:
+                self._room_low(self._physical(size), may_grow=False)
             return self._result(self._alloc(size, NONRELOCATABLE, self.start))
 
     def dispose_ptr(self, p: int) -> None:
@@ -175,7 +212,7 @@ class Heap:
             if self._kind(p) != NONRELOCATABLE:
                 self.error = memWZErr
                 return
-            self._release(p & ADDRESS_MASK)
+            self._release(p & self.mem.system.addr_mask)
             self.error = noErr
 
     def is_ptr(self, p: int) -> bool:
@@ -188,14 +225,14 @@ class Heap:
                 self.error = memWZErr
                 return 0
             self.error = noErr
-            return self._block(p & ADDRESS_MASK)[1]
+            return self._block(p & self.mem.system.addr_mask)[1]
 
     def set_ptr_size(self, p: int, size: int) -> bool:
         with self._lock:
             if self._kind(p) != NONRELOCATABLE:
                 self.error = memWZErr
                 return False
-            ok = self._resize_in_place(p & ADDRESS_MASK, size)
+            ok = self._resize_in_place(p & self.mem.system.addr_mask, size)
             self.error = noErr if ok else memFullErr
             return ok
 
@@ -236,20 +273,40 @@ class Heap:
             return mp
 
     def is_handle(self, h: int) -> bool:
-        return (h & ADDRESS_MASK) in self._handles
+        return (h & self.mem.system.addr_mask) in self._handles
 
     def deref(self, h: int) -> int:
-        return self.mem.r32(h) & ADDRESS_MASK
+        return self.mem.r32(h) & self.mem.system.addr_mask
+
+    # -- a master pointer's flags ------------------------------------------
+    def _flags(self, h: int) -> int:
+        if self.mmu_32_bit:
+            return self._xflags.get(h, 0)
+        else:
+            return self.mem.r8(h)
+
+    def _put_flags(self, h: int, flags: int) -> None:
+        if self.mmu_32_bit:
+            self._xflags[h] = flags & 0xE0
+        else:
+            self.mem.w8(h, flags & 0xE0)
+
+    def _put_master(self, h: int, flags: int, addr: int) -> None:
+        self.mem.w32(h, addr if self.mmu_32_bit else (flags << 24 | addr))
+
+    def _drop_flags(self, h: int) -> None:
+        self._xflags.pop(h, None)
 
     def dispose_handle(self, h: int) -> None:
         with self._lock:
-            h &= ADDRESS_MASK
+            h &= self.mem.system.addr_mask
             if h not in self._handles:
                 self.error = nilHandleErr if h == 0 else memWZErr
                 return
             data = self.deref(h)
             freed = not data or self._release_if_block(data)
             self._handles.remove(h)
+            self._drop_flags(h)
             self.mem.w32(h, 0)
             if h in self._borrowed:
                 self._borrowed.discard(h)       # the program's, not the zone's to hand out
@@ -261,17 +318,18 @@ class Heap:
         """EmptyHandle: free the block, keep the handle; its master pointer
         becomes NIL."""
         with self._lock:
-            h &= ADDRESS_MASK
+            h &= self.mem.system.addr_mask
             if h not in self._handles:
                 self.error = nilHandleErr if h == 0 else memWZErr
                 return
             data = self.deref(h)
             if data:
-                if self.mem.r8(h) & LOCKED:
+                if self._flags(h) & LOCKED:
                     self.error = memPurErr
                     return
                 self._release(data)
             self.mem.w32(h, 0)
+            self._drop_flags(h)
             self.error = noErr
 
     def realloc_handle(self, h: int, size: int) -> bool:
@@ -281,12 +339,12 @@ class Heap:
         takes any (Microsoft Word 1.0 makes one in its first segment for
         the block it loads the rest of itself into)."""
         with self._lock:
-            h &= ADDRESS_MASK
+            h &= self.mem.system.addr_mask
             borrowed = h not in self._handles
             if borrowed and (not h or h & 1 or not self.contains(h) or self.deref(h)):
                 self.error = nilHandleErr if h == 0 else memWZErr
                 return False
-            flags = self.mem.r8(h)
+            flags = self._flags(h)
             data = self.deref(h)
             if data:
                 if flags & LOCKED:
@@ -298,7 +356,7 @@ class Heap:
             if not new:
                 self.error = memFullErr
                 return False
-            self.mem.w32(h, (flags << 24) | new)
+            self._put_master(h, flags, new)
             if borrowed:
                 self._handles.add(h)
                 self._borrowed.add(h)
@@ -326,14 +384,14 @@ class Heap:
             data = self._handle_data(h)
             if not data:
                 return False
-            flags = self.mem.r8(h)
+            flags = self._flags(h)
             if self._resize_in_place(data, size, clear=bool(flags & LOCKED)):
                 self.error = noErr
                 return True
             if flags & LOCKED:
                 self.error = memFullErr
                 return False
-            link = (h & ADDRESS_MASK) - self.start
+            link = (h & self.mem.system.addr_mask) - self.start
             new = self._fit(size, RELOCATABLE, link)
             if not new and self.room_to_grow():
                 self.grow_for(size)
@@ -345,9 +403,15 @@ class Heap:
             if not new:
                 self.error = memFullErr
                 return False
+            data = self.deref(h)                # moved, if the zone was compacted for new
+            if link + self.start not in self._handles or data not in self._blocks:
+                # A grow-zone function purged or disposed of it after all.
+                self._release(new)
+                self.error = memFullErr
+                return False
             self.mem.move(data, new, min(self._block(data)[1], size))
             self._release(data)
-            self.mem.w32(h, (flags << 24) | new)
+            self._put_master(h, flags, new)
             self.error = noErr
             return True
 
@@ -358,15 +422,14 @@ class Heap:
                 self.error = memWZErr
                 return 0
             self.error = noErr
-            return self.start + self.mem.r32((p & ADDRESS_MASK) - 4)
+            return self.start + self.mem.r32((p & self.mem.system.addr_mask) - 4)
 
     def get_state(self, h: int) -> int:
-        """HGetState: the master pointer's flag byte."""
-        return self.mem.r8(h)
+        return self._flags(h)
 
     def set_state(self, h: int, flags: int) -> None:
         if not self._empty(h):
-            self.mem.w8(h, flags & 0xE0)
+            self._put_flags(h, flags)
 
     def lock(self, h: int) -> None:
         self._set_flag(h, LOCKED, True)
@@ -380,8 +443,8 @@ class Heap:
 
     def _set_flag(self, h: int, flag: int, on: bool) -> None:
         if not self._empty(h):
-            flags = self.mem.r8(h)
-            self.mem.w8(h, (flags | flag) if on else (flags & ~flag))
+            flags = self._flags(h)
+            self._put_flags(h, (flags | flag) if on else (flags & ~flag))
 
     def _empty(self, h: int) -> bool:
         """Whether h's master pointer is NIL, with nilHandleErr if it is:
@@ -401,18 +464,23 @@ class Heap:
         (Stratego moves its pictures up before it draws them into a
         300K pixel map)."""
         with self._lock:
-            h &= ADDRESS_MASK
+            h &= self.mem.system.addr_mask
             data = self.deref(h) if h in self._handles else 0
             if not data or data not in self._blocks:
                 self.error = nilHandleErr
                 return
             self.error = noErr
-            if self.mem.r8(h) & LOCKED:
+            if self._flags(h) & LOCKED:
                 self.error = memLockedErr
                 return
-            self._check_free()
-            spans = self._spans()
-            size = self._blocks[data][1]
+            spans = self._spans_up_from(data)
+            if spans is None:
+                self._check_free()
+                spans = self._spans()
+            block = self._blocks.get(data)
+            if block is None:
+                return
+            size = block[1]
             need = self._physical(size)
             best = None
             for addr, n, what in spans or ():
@@ -423,7 +491,7 @@ class Heap:
             if best is None:
                 return
             addr, n = best
-            i = self._free.index([addr, n])
+            i = bisect.bisect_left(self._free, [addr, 0])
             if n == need:
                 del self._free[i]
             else:
@@ -433,7 +501,7 @@ class Heap:
             at = addr + n - need
             self._write_header(at, RELOCATABLE, need, size, h - self.start)
             self.mem.move(data, at + HEADER, size)
-            self.mem.w32(h, self.mem.r8(h) << 24 | at + HEADER)
+            self._put_master(h, self._flags(h), at + HEADER)
             phys = self._blocks.pop(data)[0]
             self._blocks[at + HEADER] = [need, size, RELOCATABLE]
             self._add_free(data - HEADER, phys)
@@ -453,10 +521,10 @@ class Heap:
                 block, start = self._blocks[data], data - HEADER
                 h = self.start + mem.r32(data - 4)
                 if (block[2] == RELOCATABLE and h in self._handles and self.deref(h) == data
-                        and not mem.r8(h) & LOCKED):
+                        and not self._flags(h) & LOCKED):
                     if to < start:
                         mem.move(start, to, block[0])
-                        mem.w32(h, mem.r8(h) << 24 | to + HEADER)
+                        self._put_master(h, self._flags(h), to + HEADER)
                     start = to
                 elif to < start:
                     gaps.append([to, start - to])
@@ -472,7 +540,7 @@ class Heap:
     def purge(self, h: int) -> None:
         """Purge one handle now, if it may be purged."""
         with self._lock:
-            flags = self.mem.r8(h)
+            flags = self._flags(h)
             if self.is_handle(h) and flags & PURGEABLE and not flags & LOCKED:
                 self.empty_handle(h)
 
@@ -487,6 +555,26 @@ class Heap:
                 self.empty_handle(h)
             return size is None or self.max_block() >= size
 
+    def purge_space(self) -> tuple[int, int]:
+        """PurgeSpace: the space a purge of every unlocked purgeable block
+        would give, counting what's already free and what the zone could
+        still grow by, in all and in one piece, without purging anything
+        (Inside Macintosh IV, Memory Manager)."""
+        with self._lock:
+            self._check_free()
+            runs = sorted([(addr, n) for addr, n in self._free]
+                          + [(self.deref(h) - HEADER, self._blocks[self.deref(h)][0])
+                             for h in self._purgeable(0)])
+            best = run = at = 0
+            for addr, n in runs:
+                run = run + n if addr == at else n
+                at = addr + n
+                best = max(best, run)
+            grow = self.room_to_grow()
+            if grow:
+                best = max(best, (run if at == self.end else 0) + grow)
+            return sum(n for _, n in runs) + grow, max(best - HEADER, 0)
+
     # =====================================================================
     # Internals
     # =====================================================================
@@ -496,7 +584,7 @@ class Heap:
 
     def _kind(self, p: int) -> int | None:
         try:
-            return self._block(p & ADDRESS_MASK)[2]
+            return self._block(p & self.mem.system.addr_mask)[2]
         except KeyError:
             return None
 
@@ -523,13 +611,25 @@ class Heap:
         as programs for the 64K ROM did, with a free block where it ended
         and bkLim and HeapEnd past that."""
         bk_lim = self._bk_lim()
+        r32 = self._longs()
         if ((bk_lim != self.end and bk_lim != self._bk_seen)
-                or any(self.mem.r32(addr) != size for addr, size in self._free)):
+                or any(r32(addr) != size for addr, size in self._free)):
             self._bk_seen = bk_lim
             self._rescan()
 
     def _bk_lim(self) -> int:
-        return self.mem.r32(self.start) & ADDRESS_MASK
+        return self.mem.r32(self.start) & self.mem.system.addr_mask
+
+    def _longs(self) -> Callable[[int], int]:
+        """A reader of the zone's long words, for the checks that read
+        hundreds of its headers at a time: straight from RAM's bytes when
+        the zone is in RAM with no mirror over it, so its addresses are
+        where its bytes are."""
+        mem = self.mem
+        if self.end <= mem.size and (mem.mirror_hi <= self.start or self.end <= mem.mirror_lo):
+            b, unpack = mem._b, _LONG.unpack_from
+            return lambda addr: unpack(b, addr)[0]
+        return mem.r32
 
     def _rescan(self) -> bool:
         """Read the zone's blocks and free space back from their headers.
@@ -577,7 +677,7 @@ class Heap:
         return free, blocks
 
     def _handle_data(self, h: int) -> int:
-        h &= ADDRESS_MASK
+        h &= self.mem.system.addr_mask
         if h not in self._handles:
             self.error = nilHandleErr if h == 0 else memWZErr
             return 0
@@ -609,7 +709,7 @@ class Heap:
         another block when it's empty.  A list a program has written over
         (it stored through a handle it had disposed of) is let go."""
         head = self.start + H_FST_FREE
-        mp = self.mem.r32(head) & ADDRESS_MASK
+        mp = self.mem.r32(head) & self.mem.system.addr_mask
         if mp and not self._may_be_free(mp):
             mp = 0
         if not mp:
@@ -617,7 +717,7 @@ class Heap:
             if not self.more_masters():
                 return 0
             mp = self.mem.r32(head)
-        nxt = self.mem.r32(mp) & ADDRESS_MASK
+        nxt = self.mem.r32(mp) & self.mem.system.addr_mask
         self.mem.w32(head, nxt if self._may_be_free(nxt) else 0)
         return mp
 
@@ -674,25 +774,74 @@ class Heap:
             data = self._fit(size, kind, link)
             if data:
                 return data
-        # Purge until it fits, never the block the space is for.
+        # Compact and purge; then, for as long as the zone's grow-zone
+        # function says it freed something, compact and purge again (one
+        # that always says so is asked only so many times).
+        phys = self._physical(size)
         owner = self.start + link if kind == RELOCATABLE else 0
+        data = self._make_room(size, kind, link, phys, owner)
+        protected = owner if owner in self._handles else 0      # not a new handle's
+        for _ in range(GROW_ZONE_CALLS):
+            if data or not self._call_grow_zone(phys, protected):
+                break
+            data = self._make_room(size, kind, link, phys, owner)
+        return data
+
+    def _make_room(self, size: int, kind: int, link: int, phys: int, owner: int) -> int:
+        """Compact, then purge until a block of size fits, never owner's,
+        compacting again whenever what's purged adds to what's free."""
+        data, compacted = self._compacted_fit(size, kind, link, phys, -1)
+        if data:
+            return data
         for h in self._purgeable(owner):
             self.empty_handle(h)
             data = self._fit(size, kind, link)
+            if not data:
+                data, compacted = self._compacted_fit(size, kind, link, phys, compacted)
             if data:
                 return data
         return 0
 
+    def _call_grow_zone(self, phys: int, protected: int) -> bool:
+        """Ask the zone's grow-zone function, if it has one, for room for a
+        block of phys bytes, the handle protected (or 0) not to be moved or
+        purged: whether it freed any.  Not while it's already running: it
+        isn't to allocate memory itself (Inside Macintosh: Memory,
+        "MyGrowZone"), and one that does gets no second call."""
+        proc = self.mem.r32(self.start + GZ_PROC) & self.mem.system.addr_mask
+        if not proc or self.grow_zone is None or self._in_grow_zone:
+            return False
+        self._in_grow_zone = True
+        try:
+            return self.grow_zone(proc, phys, protected) != 0
+        finally:
+            self._in_grow_zone = False
+
+    def _compacted_fit(self, size: int, kind: int, link: int, phys: int,
+                       compacted: int) -> tuple[int, int]:
+        """A block of size, kind and link, made after compacting the zone,
+        if what's free adds up to its phys bytes and is more than was free
+        when it was last compacted for the block (compacted, or -1); 0 for
+        the block if there's still no room.  And what was free when the
+        zone was last compacted."""
+        free = sum(n for _, n in self._free)
+        if free < phys or free <= compacted:
+            return 0, compacted
+        self.compact()
+        if kind == NONRELOCATABLE:
+            self._room_low(phys, may_grow=False)
+        return self._fit(size, kind, link), free
+
     def _purgeable(self, owner: int) -> list[int]:
         found = []
         for h in self._handles:
-            word = self.mem.r32(h)
-            flags, data = word >> 24, word & ADDRESS_MASK
+            data = self.mem.r32(h) & self.mem.system.addr_mask
+            flags = self._flags(h)
             if data in self._blocks and h != owner and flags & PURGEABLE and not flags & LOCKED:
                 found.append((data, h))
         return [h for _, h in sorted(found)]
 
-    def _room_low(self, phys: int) -> bool:
+    def _room_low(self, phys: int, may_grow: bool = True) -> bool:
         """Make a free block of phys bytes as low in the zone as one can be
         had, by moving the unlocked relocatable blocks in the way up into
         free blocks above, and growing the zone for them if there's no other
@@ -701,14 +850,18 @@ class Heap:
         expanding the zone, or purging blocks from it" (Inside Macintosh
         II-12).  The stretch it takes runs from a block that can't move (or
         the zone's start) over free and movable blocks; the first one whose
-        blocks all find room above it, without growing if any does.  False
-        if there's none."""
+        blocks all find room above it, without growing if any does.  When a
+        free block ends it, it takes only what it needs of that block, and
+        the rest is room for the blocks that move, as are the free blocks
+        past it: Excel 1.5 jumps from the 128K block it asks for into its
+        first segment with 16-bit offsets, so the block has to start within
+        32K of the segment.  False if there's none."""
         self._check_free()
         spans = self._spans()
         if spans is None:
             return False
         for grow in (False, True):
-            if grow and not self.room_to_grow():
+            if grow and not (may_grow and self.room_to_grow()):
                 break
             i = 0
             while i < len(spans):
@@ -722,16 +875,31 @@ class Heap:
                 if total < phys:
                     i = j                   # a block that can't move, or the end
                     continue
-                k = j                       # the free blocks just past it join it
-                while k < len(spans) and spans[k][2] == 0:
-                    k += 1
+                lo, (last, n, what) = spans[i][0], spans[j - 1]
+                cut = max(lo + phys, last + MIN_BLOCK)
+                split = what == 0 and last + n - cut >= MIN_BLOCK
+                if split:
+                    above = [(cut, last + n - cut, 0)] + spans[j:]
+                    hi = cut                # the rest of the free block is above
+                else:
+                    above = spans[j:]
+                    hi = last + n
                 movers = [s for s in spans[i:j] if s[2] > 0]
-                stuck, growth = self._plan(movers, spans[k:], grow)
+                stuck, growth = self._plan(movers, above, grow)
                 if stuck is None:
-                    hi = spans[k][0] if k < len(spans) else self.end
-                    return self._move_up(spans[i][0], hi, movers, growth)
+                    if split:
+                        self._split_free(last, cut)
+                    return self._move_up(lo, hi, movers, growth)
                 i = spans.index(stuck) + 1
         return False
+
+    def _split_free(self, addr: int, at: int) -> None:
+        """Make the free block at addr two, the second starting at at."""
+        i = bisect.bisect_left(self._free, [addr, 0])
+        n = self._free[i][1]
+        self._free[i:i + 1] = [[addr, at - addr], [at, addr + n - at]]
+        self._write_header(addr, FREE, at - addr, 0, 0)
+        self._write_header(at, FREE, addr + n - at, 0, 0)
 
     def _spans(self, rescanned: bool = False) -> list[tuple[int, int, int]] | None:
         """The zone's free and allocated blocks in address order, as
@@ -745,7 +913,7 @@ class Heap:
                 return None if rescanned or not self._rescan() else self._spans(rescanned=True)
             h = self.start + mem.r32(data - 4)
             movable = (kind == RELOCATABLE and h in self._handles and self.deref(h) == data
-                       and not mem.r8(h) & LOCKED)
+                       and not self._flags(h) & LOCKED)
             spans.append((data - HEADER, phys, data if movable else -1))
         spans.sort()
         at = (self.start + ZONE_HEADER + 3) & ~3
@@ -754,6 +922,45 @@ class Heap:
                 return None
             at += n
         return spans if at == self.end else None
+
+    def _spans_up_from(self, data: int) -> list[tuple[int, int, int]] | None:
+        """What _spans gives from the block whose data is at data up to the
+        first block above it that can't move, or the zone's end, read only
+        that far: MoveHHi looks no further, and GolfMaster! moves a handle
+        up some 470 times a second in a zone of 800 blocks.  None if the
+        headers there, or that of the free block just below that the
+        block's room would join, aren't as the zone has them, or bkLim has
+        moved: what _check_free and _spans would find, for the part of the
+        zone MoveHHi uses."""
+        mem, blocks, free = self.mem, self._blocks, self._free
+        bk_lim = self._bk_lim()
+        if bk_lim != self.end and bk_lim != self._bk_seen:
+            return None
+        r32 = self._longs()
+        at = start = data - HEADER
+        f = bisect.bisect_left(free, [at, 0])
+        if f and sum(free[f - 1]) == at and r32(free[f - 1][0]) != free[f - 1][1]:
+            return None
+        spans: list[tuple[int, int, int]] = []
+        while at < self.end:
+            if f < len(free) and free[f][0] == at:
+                n = free[f][1]
+                if r32(at) != n:
+                    return None
+                spans.append((at, n, 0))
+                f += 1
+            else:
+                block, word = blocks.get(at + HEADER), r32(at)
+                if block is None or word & 0xFFFFFF != block[0] or word >> 30 != block[2]:
+                    return None
+                n, h = block[0], self.start + r32(at + 4)
+                movable = (block[2] == RELOCATABLE and h in self._handles
+                           and self.deref(h) == at + HEADER and not mem.r8(h) & LOCKED)
+                spans.append((at, n, at + HEADER if movable else -1))
+                if not movable and at != start:
+                    return spans
+            at += n
+        return spans
 
     def _plan(self, movers: list[tuple[int, int, int]], above: list[tuple[int, int, int]],
               grow: bool) -> tuple[tuple[int, int, int] | None, int]:
@@ -787,13 +994,13 @@ class Heap:
         for _, phys, data in movers:
             size = self._blocks[data][1]
             h = self.start + mem.r32(data - 4)
-            flags = mem.r8(h)
+            flags = self._flags(h)
             new = self._fit(size, RELOCATABLE, h - self.start, above=hi)
             if not new:
                 moved = False
                 break
             mem.move(data, new, size)
-            mem.w32(h, flags << 24 | new)
+            self._put_master(h, flags, new)
             del self._blocks[data]
             held.append([data - HEADER, phys])
         for at, n in held:
@@ -879,7 +1086,7 @@ class Heap:
             if block is None or block[2] != RELOCATABLE:
                 return False
             h = self.start + mem.r32(end + 4)
-            if h not in self._handles or self.deref(h) != data or mem.r8(h) & LOCKED:
+            if h not in self._handles or self.deref(h) != data or self._flags(h) & LOCKED:
                 return False
             in_way.append((data, h))
             end += block[0]
@@ -901,16 +1108,17 @@ class Heap:
         self._counted_free(-sum(n for _, n in held))
         for data, h in in_way:
             phys, size, _ = self._blocks[data]
-            flags = mem.r8(h)
+            flags = self._flags(h)
             new = self._fit(size, RELOCATABLE, h - self.start)
             if not new and self.room_to_grow():
                 self.grow_for(size)
                 new = self._fit(size, RELOCATABLE, h - self.start)
             if new:
                 mem.move(data, new, size)
-                mem.w32(h, flags << 24 | new)
+                self._put_master(h, flags, new)
             elif flags & PURGEABLE:
                 mem.w32(h, 0)
+                self._drop_flags(h)
             else:
                 break
             del self._blocks[data]

@@ -22,9 +22,14 @@ from . import lowmem
 from .constants import (activateEvt, activeFlag, alphaLock, cmdKey, controlKey, everyEvent,
                         event_mask, kHighLevelEvent, mouseMovedMessage, nullEvent, optionKey,
                         osEvt, shiftKey, updateEvt)
-from .types import Point
+from .types import Point, Rect
 
 _T0 = time.monotonic()
+# Where the tick clock starts: a minute in, macrt's own choice, not at 0.
+# TickCount counts from startup, and a program launched as macrt starts
+# would otherwise find it has only just begun: Castles Demo, while it was
+# under 180, ran past the end of a list of its own into its own records.
+STARTUP_TICKS = 60 * 60
 # How often, in seconds, WaitNextEvent looks at where the mouse is while
 # it sleeps with a mouse region
 MOUSE_LOOK = 2 / 60
@@ -32,7 +37,7 @@ MOUSE_LOOK = 2 / 60
 
 def tick_count() -> int:
     """Ticks (1/60 s) since startup, like the TickCount trap."""
-    return int((time.monotonic() - _T0) * 60)
+    return STARTUP_TICKS + int((time.monotonic() - _T0) * 60)
 
 
 def to_next_tick() -> float:
@@ -52,6 +57,9 @@ class EventRecord:
     when: int = 0
     where: Point = field(default_factory=lambda: Point(0, 0))
     modifiers: int = 0
+    # The event queue entry (EvQEl) PPostEvent gave the program for it, in
+    # the 68k's memory: what it puts there is what it gets
+    qel: int = 0
 
 
 # Key codes of the modifier keys, for the KeyMap.
@@ -91,11 +99,17 @@ class InputGlobals:
     `moved` from the pointer: Crystal Quest puts it back in the middle of
     the screen each frame and steers by how far it's got from there.
     With the cursor to be seen, the mouse is back under the pointer when
-    that moves.
+    that moves.  The events posted while it's away from the pointer are
+    where it is, not where the pointer is: Labyrinth of Crete draws its
+    own cursor there and takes its clicks by where they say they are.
+    And a mouse away from the pointer stays on the screen (when there's
+    one to keep it on): it stops at the edge, and what the pointer moves
+    past that is lost, so the mouse comes back from the edge as soon as
+    the pointer does, and the pointer can bring it anywhere.
 
     The Display tells it about input as it comes, on the GUI thread."""
 
-    def __init__(self, mem):
+    def __init__(self, mem, screen: Rect | None = None):
         self._b = mem._b        # straight into the bytes: no code lives in these pages
         self._lock = threading.Lock()
         self._keys: set[int] = set()
@@ -103,6 +117,7 @@ class InputGlobals:
         self._where = Point(0, 0)
         self._raw = Point(*struct.unpack_from(">hh", self._b, lowmem.RawMouse))
         self.moved = Point(0, 0)
+        self._screen = screen
         self._hidden = 0        # the cursor level, below 0 while it's hidden
         self.mouse(Point(0, 0), False)
         self._keymap()
@@ -137,10 +152,23 @@ class InputGlobals:
         return True
 
     def _put_mouse(self) -> None:
+        s = self._screen
+        if s is not None and self.moved != (0, 0):
+            v = min(max(self._where.v + self.moved.v, s.top), s.bottom - 1)
+            h = min(max(self._where.h + self.moved.h, s.left), s.right - 1)
+            self.moved = Point(v - self._where.v, h - self._where.h)
         self._raw = Point(_short(self._where.v + self.moved.v),
                           _short(self._where.h + self.moved.h))
         for addr in (lowmem.RawMouse, lowmem.Mouse):
             struct.pack_into(">hh", self._b, addr, *self._raw)
+
+    @property
+    def position(self) -> Point:
+        """Where the mouse is, for the events it's in: under the pointer,
+        or as far from it as the program has moved it with the cursor hidden."""
+        with self._lock:
+            return Point(_short(self._where.v + self.moved.v),
+                         _short(self._where.h + self.moved.h))
 
     @property
     def hidden(self) -> bool:
@@ -215,6 +243,10 @@ class EventQueue:
         self.timed_at = float("-inf")
         self.waited_at = float("-inf")
         self.waiting = False
+        # The tick and the mouse's place of the last mouse-moved event a
+        # mouse region gave, and whether a null event has followed it
+        self._moved = (-1, None)
+        self._idled = True
 
     def input_state(self) -> tuple[Point, int]:
         """Where the mouse is and which modifier keys are down, now."""
@@ -299,6 +331,11 @@ class EventQueue:
                     kept.append(ev)
             self._input = kept
 
+    def queued(self, ev: EventRecord) -> bool:
+        """Whether ev is still waiting to be got."""
+        with self._cond:
+            return any(queued is ev for queued in self._input)
+
     def discard(self, ev: EventRecord) -> None:
         """Drop an event, if it's still queued."""
         with self._cond:
@@ -321,7 +358,15 @@ class EventQueue:
         """GetNextEvent (timeout 0) / WaitNextEvent (timeout = sleep).  Not
         removing it, the wait for an event to get, which stays queued.
         With mouse_rgn, WaitNextEvent's mouse region, a mouse-moved event
-        when there's nothing else and the mouse is out of it."""
+        when there's nothing else and the mouse is out of it, and a null
+        event between two: asked again after one, it's a null event when
+        the sleep runs out, by the next tick at the latest.  While the
+        mouse stays where it is, that's one a tick, so that asked again in
+        the null event's tick it waits for the next, or for input, first.
+        SimpleText and Darkwood pass an empty region, and ask again as
+        soon as they have the event; The Secret Island of Dr. Quandary
+        passes one it never changes, starts only on a null event, and
+        takes more than a tick to ask again."""
         deadline = time.monotonic() + max(timeout_ticks, 0) / 60
         with self._cond:
             while True:
@@ -334,11 +379,19 @@ class EventQueue:
                 if mouse_rgn is not None:
                     where, mods = self._input_state()
                     if not mouse_rgn.contains(where):
-                        return True, EventRecord(osEvt, mouseMovedMessage << 24, tick_count(),
-                                                 where, mods)
+                        now = tick_count()
+                        if not self._idled:
+                            deadline = min(deadline, time.monotonic() + to_next_tick() / 60)
+                        elif self._moved != (now, where):
+                            self._moved, self._idled = (now, where), False
+                            return True, EventRecord(osEvt, mouseMovedMessage << 24, now,
+                                                     where, mods)
+                        else:
+                            deadline = max(deadline, time.monotonic() + to_next_tick() / 60)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     where, mods = self._input_state()
+                    self._idled = True
                     return False, EventRecord(nullEvent, 0, tick_count(), where, mods)
                 # Moving the mouse posts nothing: look again now and then.
                 self.waiting = True

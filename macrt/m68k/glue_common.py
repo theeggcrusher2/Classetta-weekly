@@ -6,7 +6,6 @@ nothing here.
 
 from __future__ import annotations
 
-from ..memory import ADDRESS_MASK
 from ..toolbox.quickdraw import GrafPort
 
 
@@ -20,11 +19,11 @@ def _noop(name: str):
 
 def _the_port_var(t) -> int:
     """Where the QuickDraw global thePort is: 0(A5) points at it."""
-    return t.mem.r32(t.process.partition.a5) & ADDRESS_MASK
+    return t.mem.r32(t.process.partition.a5) & t.mem.system.addr_mask
 
 
 def _port(t) -> GrafPort | None:
-    p = t.mem.r32(_the_port_var(t)) & ADDRESS_MASK
+    p = t.mem.r32(_the_port_var(t)) & t.mem.system.addr_mask
     return t.system.port_at(p) if p else None
 
 

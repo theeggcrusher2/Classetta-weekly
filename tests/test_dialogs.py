@@ -21,9 +21,9 @@ from macrt.toolbox import textedit as te
 from macrt.toolbox.color import color_table
 from macrt.toolbox.controls import Control
 from macrt.toolbox.dialogs import HIDDEN, Dialog, items, substitute
-from macrt.toolbox.qdraw import rgb_argb
+from macrt.toolbox.qdraw import port_rgb, rgb_argb
 from macrt.toolbox.templates import (
-    btnCtrl, ctrlItem, editText, itemDisable, resCtrl, statText, userItem)
+    btnCtrl, ctrlItem, editText, itemDisable, picItem, resCtrl, statText, userItem)
 from macrt.toolbox.types import Rect
 
 from builders import alrt, ditl, dlog
@@ -101,28 +101,35 @@ def test_the_dialog_is_made_and_drawn(app):
     assert app.proc.runner.unimplemented_calls == {}
 
 
-def test_the_controls_are_drawn_before_the_text(monkeypatch):
-    """DrawDialog draws the controls, then the text, which doesn't erase
-    its rect: Font Mover's help has the last of it run into the OK
-    button.  The controls drawn are the window's, as DrawControls draws
-    them, so one the program added with NewControl is too (Widget
-    Workshop's puzzle list's scroll bar)."""
+def test_the_items_are_drawn_in_drawdialogs_order(monkeypatch):
+    """DrawDialog "draws all dialog items, calls the Control Manager
+    procedure DrawControls to draw all controls, and calls the TextEdit
+    procedure TEUpdate to update all static and editable text items" (IM:
+    Macintosh Toolbox Essentials, Dialog Manager): the pictures and user
+    items, then the controls, then the text, which doesn't erase its rect:
+    Font Mover's help has the last of it run into the OK button.  The
+    controls drawn are the window's, as DrawControls draws them, so one
+    the program added with NewControl is too (Widget Workshop's puzzle
+    list's scroll bar)."""
     ok = SimpleNamespace(number=1, is_control=True, rect=Rect(239, 171, 255, 261))
-    hints = [SimpleNamespace(number=n, is_control=False, rect=Rect(top, 5, bottom, 425))
+    hints = [SimpleNamespace(number=n, is_control=False, type=statText,
+                             rect=Rect(top, 5, bottom, 425))
              for n, top, bottom in ((2, 13, 29), (3, 42, 95), (4, 91, 170), (5, 158, 250))]
+    art = SimpleNamespace(number=6, is_control=False, type=picItem, rect=Rect(0, 0, 270, 440))
+    ring = SimpleNamespace(number=7, is_control=False, type=userItem, rect=Rect(235, 167, 259, 265))
     bar = SimpleNamespace(handle=0x2000, rect=Rect(10, 430, 200, 446))
     button = SimpleNamespace(handle=0x1000, rect=ok.rect)
     drawn = []
-    monkeypatch.setattr(glue_dialogs, "_items", lambda t, w: [ok, *hints])
+    monkeypatch.setattr(glue_dialogs, "_items", lambda t, w: [ok, *hints, art, ring])
     monkeypatch.setattr(glue_dialogs, "_draw_item", lambda t, w, item: drawn.append(item.number))
     monkeypatch.setattr(glue_dialogs, "controls_of", lambda t, w: [bar, button])
     monkeypatch.setattr(glue_dialogs, "Draw1Control", lambda t, h: drawn.append(h))
     w = SimpleNamespace(dialog=SimpleNamespace(icon=-1, outline=False))
     glue_dialogs.draw_dialog(None, w)
-    assert drawn == [0x2000, 0x1000, 2, 3, 4, 5]
+    assert drawn == [6, 7, 0x2000, 0x1000, 2, 3, 4, 5]
     drawn.clear()
     glue_dialogs.draw_dialog(None, w, Rect(240, 0, 260, 200))
-    assert drawn == [0x1000, 5]
+    assert drawn == [6, 7, 0x1000, 5]
 
 
 def test_a_resource_control_is_placed_at_its_item(qapp, monkeypatch):
@@ -326,6 +333,54 @@ def test_dialogs_with_colour_tables_are_colour_ones(qapp, monkeypatch):
         assert g("Alert", 300, 0) == 1
         assert g("Alert", 301, 0) == 1
     assert alerts == [(True, lilac), (False, None), (False, None), (False, None)]
+
+
+def test_item_colour_tables_style_text_and_colour_controls(qapp, monkeypatch):
+    """A colour dialog's 'ictb' of its item list's ID (Inside Macintosh V,
+    the Dialog Manager): its statText and editText items are drawn with the
+    style fields their itemCData says, a font by name too, and its
+    controls get their colour tables.  A dialog without Color QuickDraw
+    has none."""
+    red, blue = (0xFFFF, 0, 0), (0, 0, 0xFFFF)
+    item_list = ditl((ctrlItem + btnCtrl, (70, 230, 90, 290), b"OK"),
+                     (statText, (10, 10, 30, 200), b"Styled"),
+                     (editText, (40, 10, 56, 200), b"abc"),
+                     (statText, (10, 210, 30, 300), b"Plain"))
+    ictb = struct.pack(">8H", 0x10, 0x10, 0x000F, 0x20, 0x8004, 0x34, 0, 0)
+    ictb += color_table([blue])                                     # $10
+    ictb += struct.pack(">hBxh3H3Hh", 3, 1, 9, *red, 0, 0, 0, 0)   # $20: Geneva, bold, 9
+    ictb += struct.pack(">hBxh3H3Hh", 0x48, 0, 10, *red, 0, 0, 0, 0)    # $34: the name's, 10
+    ictb += b"\x06Monaco"                                           # $48
+    resources = [Resource(b"DITL", 310, item_list), Resource(b"ictb", 310, ictb),
+                 Resource(b"DLOG", 310, dlog((40, 40, 140, 340), "", 310)),
+                 Resource(b"dctb", 310, color_table([]))]
+    drawn = []
+
+    def text_box(t, w, data, r):
+        drawn.append((data, w.tx_font, w.tx_face, w.tx_size, port_rgb(w, True)))
+    monkeypatch.setattr(glue_dialogs, "_text_box", text_box)
+    for model in ("ii", "plus"):
+        g = Guest(resources, model=model)
+        g.tb._d = NoDisplay()
+        drawn.clear()
+        w = g("GetNewDialog", 310, 0, -1)
+        assert bool(w.dialog.item_colors) == (model == "ii")
+        g("DrawDialog", w.addr)
+        styled = dict((d[0], d[1:]) for d in drawn)
+        if model == "plus":
+            assert styled[b"Styled"] == styled[b"Plain"]
+            continue
+        assert styled[b"Styled"] == (3, 1, 9, red)
+        assert styled[b"Plain"] == (w.tx_font, 0, 0, (0, 0, 0))
+        assert (w.tx_face, w.tx_size, port_rgb(w, True)) == (0, 0, (0, 0, 0))   # as it was
+        rec = te.TERec(g.mem, g.mem.r32(Dialog(g.mem, w.addr).text_h))
+        assert (rec.tx_font, rec.tx_size) == (4, 10)        # Monaco, by name
+        assert (rec.sel_start, rec.sel_end) == (0, 3)
+        pp = g.ptr(bytes(4))
+        button = items(g.mem, Dialog(g.mem, w.addr).items)[0].handle
+        assert g("GetAuxiliaryControlRecord", button, pp)
+        ct = g.mem.r32(g.mem.r32(g.mem.r32(pp)) + 8)
+        assert g.contents(ct) == color_table([blue])
 
 
 def ditl_dialog(model="plus"):
