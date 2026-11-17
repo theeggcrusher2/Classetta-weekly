@@ -1695,10 +1695,10 @@ class ContainerFolder:
 
 
 class ArchiveFolder:
-    """The contents of a macextract-recognised archive, as the flat
-    folder holding its entries — for a Filer window to list.  raw keeps
-    the archive's own bytes, so Extract… can re-read it with its macextract
-    format, Finder info included."""
+    """The contents of a macextract-recognised archive, as a folder of
+    its entries nested by their paths — for a Filer window to list.
+    raw keeps the archive's own bytes, so Extract… can re-read it with
+    its macextract format, Finder info included."""
 
     def __init__(self, entries: list[MacFile], name: str, raw: bytes):
         self.entries = entries

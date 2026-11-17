@@ -8,7 +8,7 @@ will and will not open.
 
 | Format | Reader | Notes |
 | --- | --- | --- |
-| Raw HFS/MFS/HFS+ volume, Apple partition map, CD-ROM | `macrt.macfile` | Detected from the volume header or partition map. |
+| Raw HFS/MFS/HFS+ volume, Apple partition map, CD-ROM | `macrt.macfile` | Detected from the volume header or partition map; a raw CD image (`.iso`, `.cdr`, `.toast`, or 2352-byte Mode-1 sectors) mounts as a CD-ROM with its HFS/HFS+ contents. |
 | DiskCopy 4.2 (`.dsk`) | `macrt.macfile` | The 84-byte header is stripped. |
 | MOOF/NDIF track images | `macrt.moof` | Tags and tracks are read as stored. |
 | CHD (`.chd`) | `macrt.chd` | Versions 3, 4 and 5; compression none, zlib and LZMA. |
@@ -52,10 +52,25 @@ compress is stored raw (block length `0xffff`) and read the same way.
 These formats are recognised as out of scope for now. They are not opened,
 and a file in one of them will not browse as a volume.
 
+**CD images**
+
+- **BIN/CUE**: not implemented. A disc with one Mode 1/Mode 2 Form 1 data
+  track (plus any number of audio tracks, which hold nothing to browse)
+  opens through the `.mdf`/`.mds` pair instead, and a single-track data
+  disc through a raw `.toast`.
+- **ISO 9660 (with or without Rock Ridge) and UDF filesystems**: not
+  parsed. A CD-ROM's HFS/HFS+ partition (or Apple partition map) is read;
+  an ISO-9660- or UDF-native disc mounts as a CD-ROM, but its files are
+  not browsable. This is by design: HFS and HFS Plus are what composed
+  Mac CDs were mastered as.
+- **Multi-track CD images with audio tracks**: not played or read. The
+  driver answers the audio calls with `paramErr`, and a disc's audio
+  tracks are never exposed to the running program.
+
 **QEMU / virtual machine formats**
 
-- **qcow** (version 1): the predecessor of qcow2. Not implemented; planned
-  as a later batch if capacity allows.
+- **qcow** (version 1): the predecessor of qcow2. Not implemented; declined
+  — the format is rare, and reading it is not worth the effort.
 - **QCOW3 / VHD differencing (type 4)**: refuse by name. A differencing
   VHD depends on a parent image whose bytes live in another file, and qcow
   versions beyond 3 are not read.

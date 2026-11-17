@@ -59,9 +59,10 @@ built-in demo programs instead.
 `pip install -e .` installs all four. unicorn has wheels for Linux, macOS
 and Windows.
 
-- **To unpack Mac archives** (StuffIt, Compact Pro and so on), get The
-  Unarchiver's command-line tool, `unar`: `apt install unar` or `brew
-  install unar`.
+- **To unpack Mac archives the Filer can't list**, get The Unarchiver's
+  command-line tool, `unar`: `apt install unar` or `brew install unar`.
+  The Filer browses almost every format macextract knows itself — see
+  [Archives](#archives).
 - **To run without a display** (a server or CI), set
   `QT_QPA_PLATFORM=offscreen`.
 
@@ -187,9 +188,26 @@ both BMUG PD-ROM discs was mastered like this.
 
 Most Mac software online is in an archive: `.sit` (StuffIt), `.cpt`
 (Compact Pro), `.sea` (self-extracting), `.sit.hqx`, or a `.zip` with a
-`__MACOSX` folder. macrt doesn't unpack archives; it tells you when you've
-given it one. Unpack it with The Unarchiver, which keeps the resource
-forks:
+`__MACOSX` folder. The Filer browses an archive like a folder — double-click
+it, or name it on the command line with `--filer` — no unpacking first:
+
+```sh
+python -m macrt Game.sit --filer      # a Filer window on the archive's contents
+python -m macrt --filer vector-25.hqx  # same for the BinHex of a StuffIt
+```
+
+What it lists is every format macextract knows: MacBinary, BinHex,
+AppleSingle, PackIt, StuffIt (1.5.1 through 5.x), Compact Pro, zip, 7z, rar,
+lha, arc and the rest — including members that are themselves archives, disk
+images, or AppleDouble files. Folder members open in windows of their own,
+as folders on a disk do; a nested archive opens in a window as well.
+File ▸ Extract writes the archive out: resource
+forks beside their data forks as `._name` AppleDoubles, as The Unarchiver
+leaves them. An archive the Filer can't read is refused by name, with the
+`unar` hint, rather than guessed at.
+
+If you would rather unpack on the command line with The Unarchiver, which
+keeps the resource forks:
 
 ```sh
 unar Game.sit.hqx               # decodes the BinHex and unstuffs what's inside
@@ -203,7 +221,8 @@ An application's data fork is usually empty, and then `unar` writes only
 file. On macOS, `unar` writes real resource forks.
 
 Don't use `unzip` on a zip from a Mac: it leaves the resource forks in the
-`__MACOSX` folder, away from their files. `unar` puts them back together.
+`__MACOSX` folder, away from their files. `unar` puts them back together —
+and `macrt Game.zip --filer` lists the zip around them in place.
 
 For example, Vector 2.5, a small program from the Info-Mac archive:
 
@@ -234,9 +253,12 @@ python -m macrt Catalog.dtc                         # a Disk Tracker index, brow
 Disk Tracker's own index files open too: a `.dtc` or `.dt1` file lists
 the disks it indexes in the Filer window's root — one folder per disk,
 each holding that disk's recorded contents — and stays read-only — its
-title bar carries a catalog icon of its own rather than a disk's,
-nothing in it opens, and File ▸ Get Info shows what the index recorded:
-size, type, creator, and creation and modification dates. To build such
+title bar carries a catalog icon of its own rather than a disk's. A
+folder's row in it still browses; a file's row offers Get Info only
+(Open, View, Trace Traps and Display Contents are off), and a double-click
+on a file's row says the item is recorded in the index rather than stored
+in it. File ▸ Get Info shows what the index recorded: size, type, creator,
+and creation and modification dates. To build such
 an index from a list of disk images, see
 [disktracker/README.md](../disktracker/README.md).
 
@@ -272,8 +294,10 @@ the 2048 bytes of data in each (after the header in a mode 1 sector, and
 after 8 more bytes in a mode 2 one) and mounts the result as a CD-ROM,
 whatever the image is called.
 
-macrt can't read compressed images yet: NDIF (DiskCopy 6) and UDIF
-(`.dmg`, `.smi`). Convert them to a raw image first.
+macrt also reads the compressed and container formats — UDIF (`.dmg`),
+NDIF, CHD, qcow2, VHD, VMDK, MDF/MDS, DART and DiskMaker — so converting
+to raw first is no longer needed. The full list, and what each refuses by
+name, is in [Disk image formats](disk-images.md).
 
 #### CD-ROM images
 
@@ -498,8 +522,9 @@ Catalog, Extract, Close, Eject), View (by Icon, by Name, by Date, by Size,
 by Kind), and Special
 (Clean Up Window, Empty Trash, Erase Disk, Set Startup, Restart,
 Shutdown). File ▸ Get Info
-(key I) shows an item's size, type, creator, and its creation and
-modification dates. File ▸ Close (key W) closes the frontmost
+(key I) shows an item's data and resource fork sizes, its type, creator and
+Finder flags, and its creation and modification dates, plus the icon it
+carries and, for a program, its version resource's name and message. File ▸ Close (key W) closes the frontmost
 window: a Get Info, Display Contents or About window while one is
 up, else the Filer window, as Control-W does. File ▸ Save Catalog
 (key S) writes what the
