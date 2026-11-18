@@ -36,6 +36,27 @@ def test_pixmap_and_image_are_cached():
         assert icons.image(kind) is icons.image(kind)
 
 
+def test_every_stand_in_has_large_art():
+    assert set(icons.LARGE) == {"app", "archive", "catalog", "disk", "document",
+                                "folder", "control_panel", "extension",
+                                "desk_accessory", "font", "alias"}
+
+
+def test_every_large_icon_is_square_art_in_palette():
+    for kind, rows in icons.LARGE.items():
+        assert icons._check(rows) == rows          # raises on bad art
+        assert len({len(row) for row in rows}) == 1 and len(rows) == 32
+        image = icons.image_large(kind)
+        assert (image.width(), image.height()) == (32, 32)
+        assert icons.pixmap_large(kind).width() == 32
+
+
+def test_large_pixmap_and_image_are_cached():
+    for kind in icons.LARGE:
+        assert icons.pixmap_large(kind) is icons.pixmap_large(kind)
+        assert icons.image_large(kind) is icons.image_large(kind)
+
+
 def _colours(pm):
     img = pm.toImage().convertToFormat(QImage.Format.Format_ARGB32)
     return tuple(img.pixelColor(x, y).name()
@@ -319,9 +340,9 @@ def test_standin_icon_keeps_1bit_at_depth_2_and_below():
         assert standin_icon("folder", depth).pixmap(16, 16).toImage() == icon("folder").pixmap(16, 16).toImage()
 
 
-def test_standin_icon_without_art_falls_back_to_1bit():
-    assert standin_icon("alias", 8) is icon("alias")
-    assert standin_icon("font", 8) is icon("font")
+def test_standin_icon_for_an_unknown_kind_falls_back_to_1bit():
+    assert standin_icon("mystery", 8).pixmap(16, 16).toImage() == icon("document").pixmap(16, 16).toImage()
+    assert standin_icon("mystery", 8, large=True).pixmap(32, 32).toImage() == icon("document", large=True).pixmap(32, 32).toImage()
 
 
 def test_a_plain_row_shows_the_colour_stand_in_at_depth_8(qapp, harness, monkeypatch):

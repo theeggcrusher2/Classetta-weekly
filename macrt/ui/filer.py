@@ -1669,7 +1669,7 @@ class GetInfoWindow(AboutWindow):
                               rect.top() + 16 + (32 - icon_h) // 2,
                               own, theme.BLACK)
         else:
-            ico = standin_icon(_icon_for(self.item), self._depth)
+            ico = standin_icon(_icon_for(self.item), self._depth, large=True)
             p.drawPixmap(rect.left() + 16, rect.top() + 16, 32, 32,
                          ico.pixmap(32, 32))
 

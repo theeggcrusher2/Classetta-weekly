@@ -296,15 +296,15 @@ def _filled(row: str) -> str:
     return row if a < 0 else "." * a + "#" * (b - a + 1) + "." * (len(row) - b - 1)
 
 
-def icon_from_bitmap(bitmap: list[str]) -> QIcon:
+def icon_from_bitmap(bitmap: list[str], box: int = 16) -> QIcon:
     """Black on white from '#' and '.' rows; inverted, like its name,
     when it's selected."""
     w, h = theme.bitmap_size(bitmap)
-    x, y = (16 - w) // 2, (16 - h) // 2
+    x, y = (box - w) // 2, (box - h) // 2
     out = QIcon()
     for paper, ink, mode in ((theme.WHITE, theme.BLACK, QIcon.Mode.Normal),
                              (theme.BLACK, theme.WHITE, QIcon.Mode.Selected)):
-        pm = QPixmap(16, 16)
+        pm = QPixmap(box, box)
         pm.fill(Qt.GlobalColor.transparent)
         p = QPainter(pm)
         theme.draw_bitmap(p, x, y, [_filled(row) for row in bitmap], paper)
@@ -314,14 +314,32 @@ def icon_from_bitmap(bitmap: list[str]) -> QIcon:
     return out
 
 
+def _double(rows: list[str]) -> list[str]:
+    """A 1-bit icon doubled: every row and column twice."""
+    out = []
+    for row in rows:
+        row2 = "".join(ch * 2 for ch in row)
+        out.append(row2)
+        out.append(row2)
+    return out
+
+
+ICONS_LARGE = {kind: _double(rows) for kind, rows in ICONS.items()}
+
+
 @cache
-def icon(kind: str) -> QIcon:
+def icon(kind: str, large: bool = False) -> QIcon:
     """Black on white; inverted, like its name, when it's selected."""
+    if large:
+        return icon_from_bitmap(ICONS_LARGE[kind], box=32)
     return icon_from_bitmap(ICONS[kind])
 
 
 _COLOUR_STANDINS = {"folder": "folder", "document": "document", "volume": "disk",
-                    "application": "app", "archive": "archive", "catalog": "catalog"}
+                    "application": "app", "archive": "archive", "catalog": "catalog",
+                    "control_panel": "control_panel", "extension": "extension",
+                    "desk_accessory": "desk_accessory", "font": "font",
+                    "alias": "alias"}
 
 
 def display_depth(display) -> int:
@@ -336,16 +354,16 @@ def display_depth(display) -> int:
 
 
 @cache
-def standin_icon(kind: str, depth: int) -> QIcon:
+def standin_icon(kind: str, depth: int, large: bool = False) -> QIcon:
     """The system's stand-in for a kind of item: Classetta's colour art at
     depth > 2 for the kinds it has, the 1-bit icon otherwise.  At depth > 2 a
     colour stand-in is not inverted on selection; the 1-bit icon still is."""
     key = _COLOUR_STANDINS.get(kind)
     if key is not None and depth > 2:
         q = QIcon()
-        q.addPixmap(icons.pixmap(key))
+        q.addPixmap(icons.pixmap_large(key) if large else icons.pixmap(key))
         return q
-    return icon(kind)
+    return icon(kind, large=large) if kind in ICONS else icon("document", large=large)
 
 
 STYLE = """
