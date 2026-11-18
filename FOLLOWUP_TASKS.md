@@ -274,7 +274,7 @@ Subtasks:
       the tracker gets. Note in a comment that HFS+ dates arrive local,
       not raw GMT (see 4.5). *Blocked by 4.1 only insofar as 4.1 is
       trivial; may proceed in parallel.*
-- [ ] **4.3** Rewrite `_read_fs` to:
+- [x] **4.3** Rewrite `_read_fs` to:
       - HFS: `macrt.macfile._read_hfs(data)` — it scans for the MDB
         itself. If it raises, try HFS Plus (today's order: a hybrid disc's
         Mac view is its HFS one). The embedded HFS+-in-an-HFS-wrapper
