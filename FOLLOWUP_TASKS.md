@@ -386,13 +386,13 @@ Subtasks:
       options cost (licensing, draw-time mapping, generated art), which
       icons it covers (generic disk, folder, archive, document, catalog),
       and a recommendation. No code. Blocks 5.2–5.4.
-- [ ] **5.2** Filer window titles: at depth > 2, titles carry colour
+- [x] **5.2** Filer window titles: at depth > 2, titles carry colour
       icons — the container's own colour icon where it has one (as Get
       Info's title does, via `item_icon_qicon` / `_fork_color_icon`), and
       colour stand-ins for the generic disk, folder, archive, document
       and catalog icons; 1-bit at depth ≤ 2, and when colour can't be
       built, with no other behavior changed. `macrt/ui/filer.py` line 577.
-      *Blocked by 5.1.*
+      *Blocked by 5.1.* Done in `d76e634`.
 - [ ] **5.3** The About Classetta app list: the System row draws in
       colour at depth > 2 like the application rows do — art source per
       the System-row decision. `macrt/ui/filer.py` lines 1198 and 1642 and
