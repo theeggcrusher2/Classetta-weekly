@@ -148,10 +148,10 @@ Subtasks:
       discovers its sibling `.bin` (and nested pairs of the `_mdf_pair`
       kind), mounts the data track through the CD-ROM path. *Blocked by
       2.1, 2.2 and the open questions above.*
-- [ ] **2.4** Fixtures are generated — an HFS volume as the data track,
+- [x] **2.4** Fixtures are generated — an HFS volume as the data track,
       plus one silent audio track, in a pair written by the test tooling;
       refusal cases tested by name. *Blocked by 2.3.*
-- [ ] **2.5** `docs/disk-images.md` moves BIN/CUE from the Unsupported
+- [x] **2.5** `docs/disk-images.md` moves BIN/CUE from the Unsupported
       list to the supported table, with the refusal list spelled out as
       `.mdf`'s is. *Blocked by 2.3.*
 
