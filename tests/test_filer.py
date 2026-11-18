@@ -1504,11 +1504,14 @@ def test_a_disk_tracker_catalog_is_read_only(harness, tmp_path, monkeypatch):
     assert menu_enabled(4) is False            # View off
     assert menu_enabled(5) is False            # Trace Traps off
 
+    import disktracker.recorded as recorded
+    monkeypatch.setattr(recorded, "resolve_recorded_media",
+                        lambda *a, **kw: recorded.RecordedResolution(volume_name="Alpha CD"))
     launched = []
     monkeypatch.setattr(h.d, "launch", lambda *a, **kw: launched.append((a, kw)))
     _dblclick(folder, "Game", h.settle)
     assert launched == []                       # nothing launches
-    assert any("recorded in the index" in a.text() for a in h.d._alerts)
+    assert any("Disk Not Available" in a.windowTitle() for a in h.d._alerts)
 
     # Get Info still opens for the recorded file, showing the index's record
     lines = _get_info_lines(h, folder, "Game")

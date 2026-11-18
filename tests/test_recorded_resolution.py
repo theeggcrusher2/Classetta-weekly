@@ -428,12 +428,14 @@ def test_stub_reports_unresolved_and_shows_the_prompt(harness, tmp_path,
 
 def test_stub_passes_a_found_resolution_through(harness, tmp_path,
                                                 monkeypatch):
+    """A found resolution opens the media; the prompt is not shown."""
     import disktracker.recorded as recorded
+    vol_dir = tmp_path / "mounted-volume"
+    vol_dir.mkdir()
     h = harness(disks=[])
     folder = _open_recorded_folder(h, tmp_path)
     item = folder.entries["notes.txt"]
-    fake = RecordedResolution(path=Path("/somewhere/recorded.toast"),
-                              kind="image", source="suffix-image",
+    fake = RecordedResolution(path=vol_dir, kind="volume", source="volume-name",
                               volume_name="Alpha CD",
                               image_basename="recorded.toast")
     monkeypatch.setattr(recorded, "resolve_recorded_media",
@@ -445,6 +447,8 @@ def test_stub_passes_a_found_resolution_through(harness, tmp_path,
     assert item.recorded_resolution is fake
     assert item.recorded_image_basename == "recorded.toast"
     assert prompts == []                        # the prompt is the failure path
+    opened = [w for w in h.d.filer_windows if w.volume is not folder.volume]
+    assert len(opened) == 1                    # the volume was browsed, not mounted
 
 
 def test_picker_offers_recorded_basename_as_filter(harness, tmp_path,

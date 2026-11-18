@@ -142,9 +142,10 @@ def test_cancel_button_does_nothing(harness, tmp_path, monkeypatch):
     assert h.d._alerts == []                          # dismissed; nothing else raised
 
 
-def test_double_click_message_path_is_unchanged(harness, tmp_path, monkeypatch):
-    """1.3 does not rewire double-click: the recorded-item message is
-    what a double-click says until 1.2 lands."""
+def test_double_click_on_an_item_with_the_media_missing_shows_the_prompt(harness, tmp_path,
+                                                                          monkeypatch):
+    """Since 1.2/1.4 a double-click attempts the recorded media (and its
+    1.3 prompt) rather than saying nothing opens."""
     cat, _ = _catalog(tmp_path)
     h = harness(disks=[])
     folder = _open_recorded_folder(h, cat)
@@ -152,7 +153,8 @@ def test_double_click_message_path_is_unchanged(harness, tmp_path, monkeypatch):
     monkeypatch.setattr(h.d, "launch", lambda *a, **kw: launched.append((a, kw)))
     _dblclick(folder, "notes.txt", h.settle)
     assert launched == []
-    assert any("recorded in the index" in a.text() for a in h.d._alerts)
+    assert any("notes.txt" in a.text() and "Disk Not Available" in a.windowTitle()
+               for a in h.d._alerts)
 
 
 def test_get_info_is_unchanged_for_recorded_items(harness, tmp_path):

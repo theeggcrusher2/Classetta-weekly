@@ -142,6 +142,13 @@ class FilerOptions:
     writable: bool = False
 
 
+def _normalise_name(name) -> str:
+    """The comparison form for a recorded volume name: colons and
+    slashes are both separators, case and whitespace differences do
+    not disqualify."""
+    return " ".join(str(name or "").replace(":", "/").casefold().split())
+
+
 def _kind(f: MacFile) -> str:
     if f.type == FOLDER:
         return "folder"
@@ -786,8 +793,7 @@ class FilerWindow(_Hosted):
         """Open f, following alias files to what they point at first."""
         from disktracker.filer_adapter import DiskTrackerVolume
         if isinstance(self.volume, DiskTrackerVolume) and f.type != FOLDER:
-            self._say(f"“{f.name}” is recorded in the index, not stored in it — "
-                      "nothing in a Disk Tracker catalog opens yet.")
+            self._resolve_recorded(f)
             return
         for _ in range(8):
             if not is_alias(f):
@@ -815,12 +821,15 @@ class FilerWindow(_Hosted):
     def _resolve_recorded(self, f: MacFile) -> bool:
         """Locate the media the index recorded for f (subtask 1.2): the
         recorded suffix, then the disk's volume name against known mount
-        points.  The resolution is stashed on f as recorded_resolution
-        (and recorded_image_basename) for 1.4 to act on — mounting is
-        not this subtask's job.  Returns True when the media was
-        located; otherwise shows the prompt and returns False, with its
-        Insert Disk → re-resolve and Choose Image → _open_picked_image
-        paths unchanged."""
+        points — and when the media is located, opens it as though the
+        disk had been there all along (subtask 1.4): kind 'volume' browses
+        the directory as an already-mounted volume (no mounting); kind
+        'image' mounts the image file through the disk-image path.
+        The resolution is stashed on f as recorded_resolution (and
+        recorded_image_basename) for verification.  Returns True when
+        the media was located and opened; otherwise shows the prompt
+        and returns False, with its Insert Disk → re-resolve and Choose
+        Image → _open_picked_image paths."""
         import logging
         from disktracker.recorded import resolve_recorded_media
         suffix = getattr(f, "suffix", b"") or b""
@@ -833,7 +842,11 @@ class FilerWindow(_Hosted):
                 "recorded media unresolved for %r (disk %r)", f.name, disk)
             self._recorded_unavailable(f)
             return False
-        return True
+        if res.kind == "volume":
+            # An already-mounted volume: browse it as a host folder.
+            self.display.open_filer(HostFolder(str(res.path)), (), self.options)
+            return True
+        return self._open_picked_image(f, str(res.path))
 
     def _recorded_unavailable(self, f: MacFile,
                               on_insert: Callable[[], None] | None = None,
@@ -883,11 +896,60 @@ class FilerWindow(_Hosted):
             return                      # cancelled: nothing changes
         on_picked(path)
 
-    def _open_picked_image(self, f: MacFile, image_path: str) -> None:
-        """Stub for mounting the picked image (subtask 1.4): verify it
-        against the record, mount it, and open the item the
-        double-click was on.  Deliberately a no-op until 1.4 lands; the
-        catalog is not written to either way."""
+    def _open_picked_image(self, f: MacFile, image_path: str) -> bool:
+        """Mount the image the picker chose and open the recorded item on
+        it, as though the disk had been there all along (subtask 1.4).
+
+        The image is verified against the record before it opens: the
+        volume it mounts as must carry the recorded volume name, or the
+        picked file must carry the recorded image basename — either one
+        is enough.  When the record says nothing, it opens without a
+        check (a weak fallback: nothing to verify against).  A picked
+        image that does not open, or that fails both checks, changes
+        nothing: the catalog stays untouched and the prompt is shown
+        again.  Returns True when the volume opened."""
+        path = Path(image_path)
+        resolution = getattr(f, "recorded_resolution", None)
+        want_volume = getattr(resolution, "volume_name", None) if resolution is not None else None
+        want_base = getattr(f, "recorded_image_basename", None)
+        if want_base is None and resolution is not None:
+            want_base = getattr(resolution, "image_basename", None)
+        try:
+            picked = MacFile(path.name, key=image_path)
+            volume = run_busy(self, f"Mounting {path.name}",
+                              f"“{path.name}” is a disk image; its volume is read now, "
+                              "and the Filer stays usable while it runs.",
+                              lambda: image_volume(picked))
+        except (OSError, ValueError):
+            volume, failed = None, True
+        else:
+            failed = False
+        if volume is None:
+            # Not an image macrt opens, or it does not match the record:
+            # the catalog is a read-only record and stays untouched.
+            if failed:
+                self._recorded_unavailable(f)
+            return False                        # stopped waiting, or the prompt is up
+        if not self._recorded_verified(want_volume, want_base, volume, path):
+            self._recorded_unavailable(f)
+            return False
+        system = getattr(self.display, "system", None)
+        if system is not None and isinstance(volume, machfs.Volume):
+            # Mounted, so aliases into it resolve, as for --disk.
+            system.files.mount_folder(VolumeFolder(volume))
+        self.display.open_filer(volume, (), self.options)
+        return True
+
+    def _recorded_verified(self, want_volume, want_base, volume, path) -> bool:
+        """Whether the mounted volume matches the record: its volume name,
+        or the recorded basename of the image file.  Matching either one
+        is enough; with nothing recorded, the check passes."""
+        if not want_volume and not want_base:
+            return True
+        if want_volume and _normalise_name(want_volume) == _normalise_name(
+                getattr(volume, "name", "")):
+            return True
+        return bool(want_base) and path.name == want_base
 
     def get_info(self) -> None:
         """Open a Get Info window for the currently selected item."""
