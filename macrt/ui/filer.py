@@ -1841,9 +1841,21 @@ class AboutClassettaWindow(AboutWindow):
         # the application heap are not among them).
         depth = _depth(display)
         sys_heap = system.sys_heap
+        # The System row's colour icon at depth > 2: the running System
+        # file's own, through the same path the application rows use; the
+        # bundled stand-in when it has none (the built-in empty System
+        # always takes the stand-in).
+        sys_pixmap = None
+        if depth > 2:
+            sys_file = display.running_system_file
+            if sys_file is not None and bytes(sys_file.rsrc):
+                q = _fork_color_icon(bytes(sys_file.rsrc), False, depth, (128,))
+                sys_pixmap = q.pixmap(16, 16) if q is not None else None
+            if sys_pixmap is None:
+                sys_pixmap = icons.pixmap('app')
         processes = [("System", (sys_heap.limit - sys_heap.start) // 1024,
                       (sys_heap.end - sys_heap.start) // 1024,
-                      theme.GENERIC_APP_ICON, None)]
+                      theme.GENERIC_APP_ICON, sys_pixmap)]
         for proc in display.processes:
             if proc.name not in ("System", "Filer"):
                 partition_size = (proc.partition.end - proc.partition.start) // 1024

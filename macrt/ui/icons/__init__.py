@@ -116,6 +116,26 @@ ART = {
         "................",
         "................",
     ],
+    # A cut gem: the generic application diamond, highlight up the
+    # middle; the colour counterpart of theme.GENERIC_APP_ICON.
+    'app': [
+        "................",
+        ".......KK.......",
+        "......KbbK......",
+        ".....KbWWbK.....",
+        "....KbbWbbbK....",
+        "...KbbWWWWbbK...",
+        "..KbBBWWWWBBbK..",
+        ".KbBBBBWWBBBBbK.",
+        ".KbBBBBBBBBBBbK.",
+        "..KbBBWWWWBBbK..",
+        "...KbbWWWWbbK...",
+        "....KbbWbbbK....",
+        ".....KbWWbK.....",
+        "......KbbK......",
+        ".......KK.......",
+        "................",
+    ],
     # A slate card box with white cards and blue rules; the Disk Tracker
     # catalog icon.
     'catalog': [

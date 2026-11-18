@@ -260,6 +260,9 @@ class Display(QObject):
         has_global_bar = self.config.menu_bar == "global"
         disks = self.config.disks
         disk_system = system_on(disks[0]) if disks else None
+        # The System file the emulator runs: the one asked for, or the
+        # disk's, or none when macrt's own built-in stands in for it.
+        self.running_system_file = self.config.system_file or disk_system
         self.sound = self._sound_outputs()
         self.system = System(self.size, desk_top=theme.MENU_BAR_HEIGHT if has_global_bar else 0,
                              menu_bar_height=theme.MENU_BAR_HEIGHT,

@@ -1,7 +1,7 @@
 """The in-repo colour icons: well-formed art, the module's caching, and
 the chrome surface that hands them out at depth > 2 — the Filer
-window's title (task 5.2; the other surfaces get their own as 5.3 and
-5.4 land)."""
+window's title (task 5.2) and the About Classetta app list's System row
+(task 5.3; the large machine logo gets its own as 5.4 lands)."""
 
 import machfs
 import pytest
@@ -120,3 +120,67 @@ def test_the_filer_title_keeps_1bit_at_depth_1(qapp, harness, monkeypatch):
     win = h.d.open_filer(h.d.config.disks[0])
     assert win.frame().title_pixmap is None
     h.d.close_filer(win)
+
+
+def _system_disk(colour: bool) -> machfs.Volume:
+    """A disk whose top level holds a System file whose fork either
+    carries a colour family or holds no icon at all."""
+    v = machfs.Volume()
+    v.name = 'Boot'
+    f = machfs.File()
+    f.type, f.creator, f.flags = b'zsys', b'macs', 0
+    f.data = b'body'
+    f.rsrc = bytearray(build_fork([
+        Resource(b'ics#', 128, b'\xcc' * 32 + b'\xff' * 32),
+        Resource(b'ics8', 128, b'\xd7' * 256)])) if colour else bytearray()
+    v['System'] = f
+    return v
+
+
+def _about(h):
+    about = h.d.show_about_classetta()
+    h.settle()
+    assert about._processes[0][0] == "System"
+    return about
+
+
+def test_the_about_system_row_is_the_stand_in_at_depth_8_without_a_system_file(qapp, harness, monkeypatch):
+    v = _volume()                                   # the built-in empty System
+    h = harness(disks=[v])
+    monkeypatch.setattr(filer_mod, "_depth", lambda display: 8)
+    about = _about(h)
+    assert about._processes[0][4] is icons.pixmap('app')
+    about.close()
+    h.settle()
+
+
+def test_the_about_system_row_uses_the_running_system_files_own_icon_at_depth_8(qapp, harness, monkeypatch):
+    v = _system_disk(colour=True)
+    h = harness(disks=[v])
+    monkeypatch.setattr(filer_mod, "_depth", lambda display: 8)
+    about = _about(h)
+    row_pixmap = about._processes[0][4]
+    assert row_pixmap is not None and row_pixmap.width() == 16
+    assert _colours(row_pixmap) != _colours(icons.pixmap('app'))
+    about.close()
+    h.settle()
+
+
+def test_the_about_system_row_falls_back_to_the_stand_in_at_depth_8_without_a_colour_icon(qapp, harness, monkeypatch):
+    v = _system_disk(colour=False)
+    h = harness(disks=[v])
+    monkeypatch.setattr(filer_mod, "_depth", lambda display: 8)
+    about = _about(h)
+    assert about._processes[0][4] is icons.pixmap('app')
+    about.close()
+    h.settle()
+
+
+def test_the_about_system_row_keeps_1bit_at_depth_1(qapp, harness, monkeypatch):
+    v = _system_disk(colour=True)
+    h = harness(disks=[v])
+    monkeypatch.setattr(filer_mod, "_depth", lambda display: 1)
+    about = _about(h)
+    assert about._processes[0][4] is None
+    about.close()
+    h.settle()
