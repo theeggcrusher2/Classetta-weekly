@@ -347,6 +347,15 @@ class _VolumeFile(MacFile):
         self._node, self._forks = node, {}
         super().__init__(*args, **kw)
 
+    def __getattr__(self, name: str):
+        """What the volume's node carries that this wrapper doesn't:
+        catalog fields like the Disk Tracker's suffix and disk name ride
+        on the node, and the Filer asks the file it shows."""
+        node = self.__dict__.get("_node")
+        if node is None:
+            raise AttributeError(name)
+        return getattr(node, name)
+
     def _get(self, fork: str) -> bytes:
         if self._forks.get(fork) is None:
             self._forks[fork] = bytes(getattr(self._node, fork))
