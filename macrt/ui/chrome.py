@@ -324,6 +324,20 @@ def _paint_document(p: QPainter, f: Frame, w: int, h: int, pal: _Palette) -> Non
     if title_box is not None:
         _paint_title(p, f, title_box, pal.text)
 
+    if f.grow:
+        c = content_rect(f, w, h)
+        g = theme.GROW_BOX
+        gx, gy = c.x() + c.width() - g, c.y() + c.height() - g
+        p.fillRect(gx, gy, g, g, pal.content)
+        frame_rect(p, gx, gy, g, g, pal.frame)
+        if f.hilited:
+            for bx, by, bs in ((gx + 3, gy + 3, 6), (gx + 5, gy + 5, 8)):
+                p.fillRect(bx, by, bs, bs, pal.content)
+                p.fillRect(bx, by, bs, 1, pal.frame)
+                p.fillRect(bx, by + bs - 1, bs, 1, pal.frame)
+                p.fillRect(bx, by, 1, bs, pal.frame)
+                p.fillRect(bx + bs - 1, by, 1, bs, pal.frame)
+
 
 def _title_text_rect(f: Frame, w: int, tr: QRect, cb, zb) -> QRect | None:
     """Where the icon and title go together, centred as one block."""
