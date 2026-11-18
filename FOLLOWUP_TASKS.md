@@ -73,7 +73,7 @@ Subtasks:
       decode what `suffix` holds in real catalogs, and record findings for
       the user. If `dt2/` is absent, say so and stop. Does not decide
       anything; feeds 1.2.
-- [ ] **1.2** Define the resolution order in the Filer adapter
+- [x] **1.2** Define the resolution order in the Filer adapter
       (`disktracker/filer_adapter.py`): the recorded suffix (if 1.1
       verifies it) → the disk's volume name matched against known mount
       points → ask the user. *Blocked by 1.1.*
