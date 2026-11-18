@@ -292,3 +292,46 @@ def test_parse_v1_generated_catalog():
     assert recs[2].size == 42
     assert recs[2].type == b'TEXT'
 
+
+def test_long_name_writer_roundtrip():
+    long_name = 'A Rather Long Rock Ridge Name That Does Not Fit In Sixty Three Bytes At All'
+    items = [
+        Item(kind='disk', name='Synth Disk', created=1000000, modified=2000000),
+        Item(kind='file', name=long_name, depth=1, size=5,
+             type=b'TEXT', creator=b'ttxt'),
+        Item(kind='file', name='after.txt', depth=1, size=3),
+    ]
+    recs = parse_dtc(write_dtc(items))
+    assert [r.name for r in recs] == ['Synth Disk', long_name, 'after.txt']
+
+
+def test_colon_in_a_name_roundtrips_via_long_name_variant():
+    items = [
+        Item(kind='disk', name='Synth Disk', created=1000000, modified=2000000),
+        Item(kind='file', name='a:b.txt', depth=1, size=5,
+             type=b'TEXT', creator=b'ttxt'),
+        Item(kind='file', name='after.txt', depth=1, size=3),
+    ]
+    recs = parse_dtc(write_dtc(items))
+    assert [r.name for r in recs] == ['Synth Disk', 'a:b.txt', 'after.txt']
+
+
+def test_a_name_over_255_bytes_is_refused_by_name():
+    items = [Item(kind='disk', name='Synth Disk', created=1000000, modified=2000000),
+             Item(kind='file', name='界' * 90, depth=1, size=5)]
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match='too long for a Disk Tracker catalog'):
+        write_dtc(items)
+
+
+def test_a_long_disk_name_is_truncated_at_a_codepoint_boundary():
+    items = [Item(kind='disk', name='D' * 100, created=1000000, modified=2000000),
+             Item(kind='file', name='f.txt', depth=1, size=3)]
+    recs = parse_dtc(write_dtc(items))
+    assert recs[0].kind == 'disk'
+    assert recs[0].name == 'D' * (0x52 - 0x19)
+
+
+def test_utf8_prefix_cuts_at_a_codepoint_boundary():
+    from disktracker.writer import _utf8_prefix
+    assert _utf8_prefix('界' * 40, 63) == '界'.encode('utf-8') * 21   # 63 bytes = 21 CJK chars
