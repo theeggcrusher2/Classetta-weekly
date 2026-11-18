@@ -231,3 +231,58 @@ def test_no_models_entry_grows_without_an_about_logo():
             "(theme.MAC_LOGO_ICONS)")
         assert model_id in icons.ART, (
             f"MODELS entry {model_id!r} has no colour About logo (icons.ART)")
+
+
+def test_about_classetta_opens_on_every_model(qapp, harness):
+    from macrt.toolbox.system import MODELS
+    for model_id in MODELS:
+        v = _volume()
+        h = harness(disks=[v], model=model_id)
+        about = h.d.show_about_classetta()
+        h.settle()
+        assert len(h.d.about_windows) == 1
+        assert about.isVisible()
+        about.close()
+        h.settle()
+
+
+def test_the_about_window_paints_at_depth_8(qapp, harness, monkeypatch):
+    for model_id in ("ii", "iix", "iici"):
+        v = _volume()
+        h = harness(disks=[v], model=model_id)
+        monkeypatch.setattr(filer_mod, "_depth", lambda display: 8)
+        about = h.d.show_about_classetta()
+        h.settle()
+        img = about.grab().toImage()
+        assert not img.isNull()
+        assert img.width() > 0 and img.height() > 0
+        about.close()
+        h.settle()
+
+
+def test_the_filer_title_paints_at_depth_8(qapp, harness, monkeypatch):
+    v = _volume()
+    h = harness(disks=[v])
+    monkeypatch.setattr(filer_mod, "_depth", lambda display: 8)
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    img = win.grab().toImage()
+    assert not img.isNull()
+    assert win.frame().title_pixmap is not None
+    h.d.close_filer(win)
+
+
+def test_the_colour_surfaces_keep_1bit_at_depth_1(qapp, harness, monkeypatch):
+    # Depth 1 is unchanged everywhere colour art could draw.
+    v = _volume()
+    h = harness(disks=[v], model="iix")
+    monkeypatch.setattr(filer_mod, "_depth", lambda display: 1)
+    win = h.d.open_filer(h.d.config.disks[0])
+    assert win.frame().title_pixmap is None
+    h.d.close_filer(win)
+    about = h.d.show_about_classetta()
+    h.settle()
+    assert about._logo_pixmap is None
+    assert all(row[4] is None for row in about._processes)
+    about.close()
+    h.settle()
