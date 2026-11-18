@@ -813,15 +813,27 @@ class FilerWindow(_Hosted):
         self._open(f, view, trace)
 
     def _resolve_recorded(self, f: MacFile) -> bool:
-        """Stub for the resolution order (subtask 1.2): the recorded
-        suffix, then the disk's volume name against known mount points.
-        Neither exists yet, so no recorded item resolves and this
-        reports the failure through the prompt — which is the call site
-        reachable when resolution fails.  Returns True when f was
-        opened; 1.2 replaces the body and passes the real resolution
-        through, and 1.4 replaces _open_picked_image with the mount."""
-        self._recorded_unavailable(f)
-        return False
+        """Locate the media the index recorded for f (subtask 1.2): the
+        recorded suffix, then the disk's volume name against known mount
+        points.  The resolution is stashed on f as recorded_resolution
+        (and recorded_image_basename) for 1.4 to act on — mounting is
+        not this subtask's job.  Returns True when the media was
+        located; otherwise shows the prompt and returns False, with its
+        Insert Disk → re-resolve and Choose Image → _open_picked_image
+        paths unchanged."""
+        import logging
+        from disktracker.recorded import resolve_recorded_media
+        suffix = getattr(f, "suffix", b"") or b""
+        disk = getattr(f, "disk", None)
+        res = resolve_recorded_media(suffix, disk_name=disk)
+        f.recorded_resolution = res
+        f.recorded_image_basename = res.image_basename
+        if res.path is None:
+            logging.getLogger("macrt.filer").debug(
+                "recorded media unresolved for %r (disk %r)", f.name, disk)
+            self._recorded_unavailable(f)
+            return False
+        return True
 
     def _recorded_unavailable(self, f: MacFile,
                               on_insert: Callable[[], None] | None = None,
@@ -855,9 +867,18 @@ class FilerWindow(_Hosted):
     def _pick_recorded_image(self, f: MacFile, disk: str,
                              on_picked: Callable[[str], None]) -> None:
         """The file picker for the original image: `on_picked` gets the
-        chosen path.  Cancelling the picker does nothing."""
+        chosen path.  Cancelling the picker does nothing.  When the
+        record named a source image, its basename is offered as the
+        dialog's filter hint."""
+        basename = getattr(f, "recorded_image_basename", None)
+        if basename is None:
+            from disktracker.recorded import source_hint
+            _, basename = source_hint(getattr(f, "suffix", b"") or b"",
+                                      getattr(f, "disk", None))
+        name_filter = f"Recorded image ({basename});;All files (*)" \
+            if basename else "All files (*)"
         path, _ = QFileDialog.getOpenFileName(
-            self, f"Choose the image recorded as “{disk}”")
+            self, f"Choose the image recorded as “{disk}”", "", name_filter)
         if not path:
             return                      # cancelled: nothing changes
         on_picked(path)

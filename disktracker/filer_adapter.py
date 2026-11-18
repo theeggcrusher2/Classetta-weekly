@@ -9,9 +9,12 @@ class CatalogFile(machfs.File):
 
     `disk` is the name of the disk record the item was cataloged on,
     for prompts that have to say which disk to go looking for; None for
-    items that precede the first disk record (a malformed catalog)."""
+    items that precede the first disk record (a malformed catalog).
+    `suffix` is the record's raw suffix bytes (DT2 only; DT1 writes
+    none) for the recorded-media resolver — kept raw here on purpose;
+    disktracker.recorded does the parsing."""
     def __init__(self, type=b'????', creator=b'????', size=0, crdate=0, mddate=0,
-                 disk: str | None = None):
+                 disk: str | None = None, suffix: bytes = b''):
         super().__init__()
         self.type = type[:4] if len(type) >= 4 else b'????'
         self.creator = creator[:4] if len(creator) >= 4 else b'????'
@@ -19,6 +22,7 @@ class CatalogFile(machfs.File):
         self.crdate = crdate
         self.mddate = mddate
         self.disk = disk
+        self.suffix = suffix
 
     def sizes(self):
         return (self._catalog_size, 0)
@@ -46,10 +50,12 @@ class DiskTrackerVolume(machfs.Volume):
         used = set()
         stack = [self]  # folders the current item can hang off, by depth
         disk_name: str | None = None     # the disk record the items belong to
+        disk_suffix = b''                # its DT2 suffix (empty on DT1)
         for item in items:
             if item.kind == 'disk':
                 name = item.name
                 disk_name = name
+                disk_suffix = item.suffix or b''
                 count = counts.get(name, 0) + 1
                 while True:
                     display = name if count == 1 else f'{name} ({count})'
@@ -93,7 +99,8 @@ class DiskTrackerVolume(machfs.Volume):
                     size=item.size,
                     crdate=item.created,
                     mddate=item.modified,
-                    disk=disk_name
+                    disk=disk_name,
+                    suffix=disk_suffix,
                 )
                 try:
                     parent[item.name] = f
