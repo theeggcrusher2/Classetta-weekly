@@ -31,6 +31,7 @@ from __future__ import annotations
 import binascii
 import copy
 import io
+import logging
 import mmap
 import os
 import struct
@@ -44,7 +45,7 @@ import machfs
 import machfs.main
 from machfs.btree import unpack_extent_record
 
-from . import chd, dmg, dart, mdf, moof, qcow2, vhd, vmdk
+from . import bin, cue, chd, dmg, dart, mdf, moof, qcow2, vhd, vmdk
 from .util import member_segments
 from .resfork import (
     InvalidForkError, is_fork, open_fork, vers_messages)
@@ -71,6 +72,8 @@ CD_IMAGES = (".iso", ".cdr", ".toast")  # the names an image macrt mounts as a C
 ISO_9660_AT = 16 * 2048 + 1             # the first volume descriptor's "CD001" (ECMA-119)
 CD_SECTOR, CD_DATA = 2352, 2048         # a CD sector whole, and the data in it (ECMA-130)
 CD_SYNC = b"\x00" + b"\xff" * 10 + b"\x00"  # what each whole sector starts with
+
+log = logging.getLogger("macrt.macfile")
 
 
 @dataclass(eq=False)
@@ -1006,6 +1009,74 @@ def _image(path: Path) -> bytes | mmap.mmap:
         return mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_COPY)
 
 
+# the reader's mode and the sector size for each mode a sheet may name;
+# a mode the sheet doesn't know is refused by the parser before this
+_CUE_TRACK = {
+    cue.TrackType.AUDIO: (bin.MODE_AUDIO, CD_SECTOR),
+    cue.TrackType.MODE1_2048: (bin.MODE_1, 2048),
+    cue.TrackType.MODE1_2352: (bin.MODE_1, CD_SECTOR),
+    cue.TrackType.MODE2_2048: (bin.MODE_2_FORM1, 2048),
+    cue.TrackType.MODE2_2352: (bin.MODE_2_FORM1, CD_SECTOR),
+    cue.TrackType.MODE2_2336: (bin.MODE_2_FORM2, 2336),
+}
+
+
+def _cue_tracks(sheet: cue.CueSheet, cue_name: str) -> list[bin.BinTrack]:
+    """The sheet's tracks as macrt.bin wants them: each track's frame from
+    its INDEX 01 — the frame its data starts at — and its byte offset at
+    that frame, its sector size from its mode."""
+    tracks = []
+    for t in sheet.tracks:
+        index01 = next((i for i in t.indexes if i.number == 1), None)
+        if index01 is None:
+            raise ValueError(f"{cue_name}: track {t.number:02d} has no INDEX 01")
+        mode, sector_size = _CUE_TRACK[t.type]
+        tracks.append(bin.BinTrack(t.number, index01.time.frames * sector_size,
+                                   sector_size, mode))
+    return tracks
+
+
+def _cue_plan(cue_bytes: bytes, cue_name: str) -> tuple[str, list[bin.BinTrack]]:
+    """The one file a sheet names, and its tracks as macrt.bin wants them.
+
+    A sheet keeping one file per track is refused, with a warning
+    recommending the files be merged into a single .bin first: images of
+    that shape are unsupported, and no pieces of them are opened."""
+    try:
+        sheet = cue.parse_cue(cue_bytes)
+    except cue.CueError as e:
+        raise ValueError(f"{cue_name}: {e}") from None
+    if len(sheet.files) > 1:
+        names = ", ".join(f.name for f in sheet.files)
+        log.warning("%s: it keeps one file per track (%s); "
+                    "merge them into a single .bin first", cue_name, names)
+        raise ValueError(f"{cue_name}: it keeps one file per track ({names}); "
+                         f"merge them into a single .bin first")
+    return sheet.files[0].name, _cue_tracks(sheet, cue_name)
+
+
+def _cue_bin_image(path: Path) -> bytes | None:
+    """The stream a .cue sheet and the .bin it names hold: the data track's
+    user sectors, the form a raw CD image takes.  For a bare .bin with no
+    sheet beside it, None — it opens as it always has, with a warning that
+    it is unknown what disc this is."""
+    low = path.suffix.lower()
+    cue_path = path if low == ".cue" else path.with_suffix(".cue")
+    if not cue_path.is_file():
+        if low == ".cue":
+            raise ValueError(f"{path.name}: it has no .cue sheet beside it")
+        log.warning("%s: it is unknown what disc this is; "
+                    "convert it to a known image format first", path.name)
+        return None
+    with cue_path.open("rb") as f:
+        cue_bytes = f.read()
+    name, tracks = _cue_plan(cue_bytes, cue_path.name)
+    bin_path = cue_path.parent / name
+    if not bin_path.is_file():
+        raise ValueError(f"{cue_path.name}: {bin_path.name} is missing")
+    return bin.read_image(_image(bin_path), tracks)
+
+
 def _mdf_image(path: Path) -> bytes:
     """The stream an .mdf/.mds pair holds: the data track's user sectors,
     the form a raw CD image takes."""
@@ -1029,6 +1100,10 @@ def load_volume(source: str | os.PathLike | bytes | mmap.mmap) -> machfs.Volume:
     data = source if isinstance(source, (bytes, bytearray, mmap.mmap)) else _image(Path(source))
     if path is not None and Path(path).suffix.lower() in (".mds", ".mdf"):
         data = _mdf_image(Path(path))
+    if path is not None and Path(path).suffix.lower() in (".cue", ".bin"):
+        cue_data = _cue_bin_image(Path(path))
+        if cue_data is not None:
+            data = cue_data
     if isinstance(source, (bytes, bytearray, mmap.mmap)) and mdf.is_mds(data):
         raise ValueError("an .mds descriptor has to sit beside its .mdf; open it by its path")
     if dmg.is_udif(data):
@@ -1478,6 +1553,18 @@ def archive_name(f: MacFile) -> str | None:
     return archive_name_on(d)
 
 
+def _cue_beside(f: MacFile) -> bool:
+    """Whether a .bin file has a .cue sheet beside it in its folder —
+    the only case its name says "BIN/CUE CD image"."""
+    folder = f.folder
+    if folder is None:
+        return False
+    try:
+        return bool(folder.find(f.name[:-4] + ".cue"))
+    except Exception:
+        return False
+
+
 def image_kind(f: MacFile) -> str | None:
     """The name of the disk image f is, if it's one macrt opens: from its
     first half-megabyte, so a big image isn't read whole for a listing."""
@@ -1517,6 +1604,10 @@ def image_kind(f: MacFile) -> str | None:
         return "MDF/MDS CD image"
     if f.key.lower().endswith((".mds", ".mdf")):
         return "MDF/MDS CD image"
+    if f.key.lower().endswith(".cue"):
+        return "BIN/CUE CD image"
+    if f.key.lower().endswith(".bin") and _cue_beside(f):
+        return "BIN/CUE CD image"
     if dart.is_dart(d):
         return "DART disk image"
     if len(d) > DISKCOPY_HEADER and d[82:84] == b"\x01\x00" and d[0] < 64:
@@ -1798,6 +1889,29 @@ def launch_target(f: MacFile) -> MacFile:
     return made
 
 
+def _cue_member(f: MacFile) -> bytes | None:
+    """The (.cue, .bin) pair among an archive's members that f is one half
+    of: the sheet is f or its .cue member beside it, and the .bin is the
+    member the sheet names.  None for a bare .bin member with no sheet
+    beside it — it opens as it always has, with the warning."""
+    low = f.name.lower()
+    if low.endswith(".cue"):
+        cue_f = f
+    else:
+        folder = f.folder
+        cue_f = folder.find(f.name[:-4] + ".cue") if folder is not None else None
+        if cue_f is None:
+            log.warning("%s: it is unknown what disc this is; "
+                        "convert it to a known image format first", f.name)
+            return None
+    name, tracks = _cue_plan(cue_f.data, cue_f.name)
+    folder = cue_f.folder
+    bin_f = folder.find(name) if folder is not None else None
+    if bin_f is None:
+        raise ValueError(f"{cue_f.name}: {name} is missing")
+    return bin.read_image(bin_f.data, tracks)
+
+
 def _mdf_pair(f: MacFile) -> tuple[MacFile, MacFile] | None:
     """The (.mds, .mdf) pair f is one half of, when both sit in the same
     folder — an archive's members — else None."""
@@ -1824,6 +1938,11 @@ def image_volume(f: MacFile) -> machfs.Volume:
     if p.is_file():
         return open_container(p)
     low = f.name.lower()
+    if low.endswith((".cue", ".bin")):
+        stream = _cue_member(f)
+        if stream is not None:
+            return load_volume(stream)
+        return load_volume(f.data)
     if low.endswith((".mds", ".mdf")):
         pair = _mdf_pair(f)
         if pair is None:
@@ -1906,10 +2025,19 @@ def _volume_or_file(path: str | os.PathLike, *,
         except Exception as e:
             raise ValueError(f"{path.name}: could not load Disk Tracker catalog: {e}")
     raw = _image(path) if path.exists() else b""          # app with only app.rsrc
+    low = path.suffix.lower()
+    cue_bin = low == ".cue" or (low == ".bin" and path.with_suffix(".cue").is_file())
     volume, problem = None, None
-    if is_disk_image(raw):
+    if cue_bin:
+        # a .cue sheet and its .bin (or either alone, to refuse by name):
+        # the data track is extracted, not the file's bytes mounted whole
         try:
-            volume = load_volume(raw)
+            volume = load_volume(path)
+        except ValueError as e:
+            problem = e
+    elif is_disk_image(raw):
+        try:
+            volume = load_volume(path if low == ".bin" else raw)
         except ValueError as e:
             problem = e
     if volume is None and not is_disk_image(raw) and path.exists():
@@ -1924,17 +2052,17 @@ def _volume_or_file(path: str | os.PathLike, *,
                 volume = load_volume(dmg.read_ndif(probe.data, probe.rsrc))
             except (OSError, ValueError) as e:
                 problem = e
-    if volume is None and path.exists() and path.suffix.lower() in (".mds", ".mdf"):
+    if volume is None and path.exists() and path.suffix.lower() in (".mds", ".mdf", ".cue"):
         try:
             volume = load_volume(path)
         except ValueError as e:
             problem = e
     if volume is not None:
-        volume.cdrom = path.suffix.lower() in CD_IMAGES or _raw_cd(raw)
+        volume.cdrom = low in CD_IMAGES or _raw_cd(raw) or cue_bin
         return volume, None
     f = load_file(path)
     if problem is not None and (not f.rsrc or dmg.is_ndif_fork(f.rsrc)
-                                or path.suffix.lower() in (".mds", ".mdf")):
+                                or path.suffix.lower() in (".mds", ".mdf", ".cue")):
         raise ValueError(f"{path.name}: {problem}")     # an image, but one that can't be read
     kind = archive_kind(f)
     # An archive an encoding's payload turned out to hold is browsable
