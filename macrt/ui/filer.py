@@ -1885,11 +1885,14 @@ class AboutClassettaWindow(AboutWindow):
         ]
         super().__init__(display, title, lines, content_size=(400, 500),
                          parent=parent)
+        model_id = display.config.model
         self._processes = processes
         self._total_memory = total_memory
         self._largest_free = largest_free
-        self._logo_icon = (theme.MAC_II_ICON if model_name == "Macintosh II"
-                           else theme.MAC_PLUS_ICON)
+        # The machine's logo, by model id: the 1-bit constant, plus its
+        # colour sibling at depth > 2 (the fallback everywhere else).
+        self._logo_icon = theme.MAC_LOGO_ICONS[model_id]
+        self._logo_pixmap = icons.pixmap(model_id) if depth > 2 else None
 
         # The command line's environment flags have no menu items — model,
         # depth and their kin only set up how it runs — so they live here,
@@ -1941,7 +1944,11 @@ class AboutClassettaWindow(AboutWindow):
         # model name and Total Memory), and the right-hand text (version,
         # build, and Largest Unused Block) which the rows' bars sit under.
         icon_bitmap = self._logo_icon
-        icon_w, icon_h = theme.bitmap_size(icon_bitmap)
+        logo_pixmap = self._logo_pixmap
+        if logo_pixmap is not None:
+            icon_w, icon_h = logo_pixmap.width(), logo_pixmap.height()
+        else:
+            icon_w, icon_h = theme.bitmap_size(icon_bitmap)
         col1_x = cx + 6
         col2_x = col1_x + icon_w + 8
         col3_x = cx + cw - 8 - max(bm.horizontalAdvance(line)
@@ -1956,7 +1963,10 @@ class AboutClassettaWindow(AboutWindow):
 
         # The logo spans both lines: line 1 beside it is the blank area
         # the model name goes underneath, with the version on the right.
-        theme.draw_bitmap(p, col1_x, y_top, icon_bitmap, theme.BLACK)
+        if logo_pixmap is not None:
+            p.drawPixmap(col1_x, y_top, logo_pixmap)
+        else:
+            theme.draw_bitmap(p, col1_x, y_top, icon_bitmap, theme.BLACK)
         p.setFont(body)
         p.drawText(col3_x, y_top + tm.ascent(), self._lines[2])
 

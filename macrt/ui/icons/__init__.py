@@ -1,8 +1,10 @@
-"""Original 16x16 colour icons for Classetta's chrome, drawn in-repo.
+"""Original colour icons for Classetta's chrome, drawn in-repo.
 
-The art is plain pixel data: each icon is a list of sixteen rows, one
-character per pixel, looked up in PALETTE; '.' is transparent.  Nothing
-else is read at draw time and no external asset ships.
+The art is plain pixel data: each icon is a list of rows, one character
+per pixel, looked up in PALETTE; '.' is transparent.  The icons for
+title bars and row lists are 16x16; the About Classetta logos, one per
+display model, are 32x32.  Nothing else is read at draw time and no
+external asset ships.
 
 Artwork and the licence that covers it live together here; see
 LICENSE.txt in this directory.
@@ -156,15 +158,163 @@ ART = {
         "................",
         "................",
     ],
+    # The About window's large logo for a Mac Plus, a compact
+    # all-in-one with a smiley on its screen.
+    'plus': [
+        "................................",
+        "................................",
+        ".......KKKKKKKKKKKKKKKKKK.......",
+        ".......KMMMMMMMMMMMMMMMMK.......",
+        ".......KLMMMMMMMMMMMMMMLK.......",
+        ".......KMMKKKKKKKKKKKKMMK.......",
+        ".......KMMKWW....WW..KMMK.......",
+        ".......KMMK..........KMMK.......",
+        ".......KMMK..........KMMK.......",
+        ".......KMMKW........WKMMK.......",
+        ".......KMMK..WWWWWW..KMMK.......",
+        ".......KMMK..........KMMK.......",
+        ".......KMMK..........KMMK.......",
+        ".......KMMKKKKKKKKKKKKMMK.......",
+        ".......KMMMMMMMMMMMMMMMMK.......",
+        ".......KMMMMMMMMMMMMMMMMK.......",
+        ".......KMMMMMMMMMMMMMMMMK.......",
+        ".......KSSSSSSSSSSSSSSSSK.......",
+        ".......KMMMMMMMMMMMMMMMMK.......",
+        ".......KMMMMMMMMMMMMMMMMK.......",
+        ".......KMMMMMMMMMMMMMMMMK.......",
+        ".......KMMMMMMMMMMMMMMMMK.......",
+        ".......KMMMMMMMMMMMMMMMMK.......",
+        ".......KMMMMMMMMMMMMMMMMK.......",
+        ".......KMMMMMMMMMMMMMMMMK.......",
+        ".......KSSSSSSSSSSSSSSSSK.......",
+        ".......KSSSSSSSSSSSSSSSSK.......",
+        ".......KKKKKKKKKKKKKKKKKK.......",
+        "................................",
+        "................................",
+        "................................",
+        "................................",
+    ],
+    # The About window's large logo for a Macintosh II, a separate
+    # monitor on the desktop case, twin bays for floppies and a
+    # hard drive.
+    'ii': [
+        "................................",
+        "................................",
+        ".....KKKKKKKKKKKKKKKKKKKKKK.....",
+        ".....KMMMMMMMMMMMMMMMMMMMMK.....",
+        ".....KMLLLLLLLLLLLLLLLLLLMK.....",
+        ".....KMMMMMMMMMMMMMMMMMMMMK.....",
+        ".....KMKKKKKKKKKKKKKKKKKKMK.....",
+        ".....KMKLLLLLLLLLLLLLLLLKMK.....",
+        ".....KMKDDDDDDDDDDDDDDDDKMK.....",
+        ".....KMKLLLLLDDDDDDDDDDDKMK.....",
+        ".....KMKDDDDDDDDDDDDDDDDKMK.....",
+        ".....KMKLLLLLLLLDDDDDDDDKMK.....",
+        ".....KMKDDDDDDDDDDDDDDDDKMK.....",
+        ".....KMKLLLLLLLDDDDDDDDDKMK.....",
+        ".....KMKDDDDDDDDDDDDDDDDKMK.....",
+        ".....KMKDDDDDDDDDDDDDDDDKMK.....",
+        ".....KMKKKKKKKKKKKKKKKKKKMK.....",
+        ".....KKKKKKKKKKKKKKKKKKKKKK.....",
+        ".............KKKK...............",
+        "..KKKKKKKKKKKKKKKKKKKKKKKKKKKK..",
+        "..KMMMMMMMMMMMMMMMMMMMMMMMMMMK..",
+        "..KMLLLLLLLLLLLLLLLLLLLLLLLLMK..",
+        "..KMMMDDDDMMMMMMMMMMMMDDDDDDDK..",
+        "..KMMMDDDDMMMMMMMMMMMMDDDDDDDK..",
+        "..KMMMDDDDMMMMMMMMMMMMMMMMMMMK..",
+        "..KMMMDDDDMMMMMMMMMMMMDDDDDDDK..",
+        "..KMMMMMMMMMMMMMMMDDDDDDDMMMMK..",
+        "..KMMMMMMMMMMMMMMMMMMMMMMMMMMK..",
+        "..KSSSSSSSSSSSSSSSSSSSSSSSSSSK..",
+        "..KKKKKKKKKKKKKKKKKKKKKKKKKKKK..",
+        "................................",
+        "................................",
+    ],
+    # The About window's large logo for a Macintosh IIx, the same
+    # desktop case, its screen a window with a blue title bar, twin
+    # floppy bays.
+    'iix': [
+        "................................",
+        "................................",
+        ".....KKKKKKKKKKKKKKKKKKKKKK.....",
+        ".....KMMMMMMMMMMMMMMMMMMMMK.....",
+        ".....KMLLLLLLLLLLLLLLLLLLMK.....",
+        ".....KMMMMMMMMMMMMMMMMMMMMK.....",
+        ".....KMKKKKKKKKKKKKKKKKKKMK.....",
+        ".....KMKDDDDDDDDDDDDDDDDKMK.....",
+        ".....KMKBBBBBBBBBBBBBBBBKMK.....",
+        ".....KMKBWWBBBBBBBBBBBBBKMK.....",
+        ".....KMKBBBBBBBBBBBBBBBBKMK.....",
+        ".....KMKDDLLLLLDDDDDDDDDKMK.....",
+        ".....KMKDDDDDDDDDDDDDDDDKMK.....",
+        ".....KMKDDDLLLLLLDDDDDDDKMK.....",
+        ".....KMKDDDDDDDDDDDDDDDDKMK.....",
+        ".....KMKDDDDDDDDDDDDDDDDKMK.....",
+        ".....KMKKKKKKKKKKKKKKKKKKMK.....",
+        ".....KKKKKKKKKKKKKKKKKKKKKK.....",
+        ".............KKKK...............",
+        "..KKKKKKKKKKKKKKKKKKKKKKKKKKKK..",
+        "..KMMMMMMMMMMMMMMMMMMMMMMMMMMK..",
+        "..KMLLLLLLLLLLLLLLLLLLLLLLLLMK..",
+        "..KMMMDDDDMMMMMMMMMMMMDDDDMMMK..",
+        "..KMMMDDDDMMMMMMMMMMMMDDDDMMMK..",
+        "..KMMMDDDDMMMMMMMMMMMMDDDDMMMK..",
+        "..KMMMDDDDMMMMMMMMMMMMDDDDMMMK..",
+        "..KMMMDDDDMMMMMMMMMMMMDDDDMMMK..",
+        "..KMMMMMMMMMMMMMMMMMMMMMMMMMMK..",
+        "..KSSSSSSSSSSSSSSSSSSSSSSSSSSK..",
+        "..KKKKKKKKKKKKKKKKKKKKKKKKKKKK..",
+        "................................",
+        "................................",
+    ],
+    # The About window's large logo for a Macintosh IIci, the same
+    # desktop case, its screen a two-pane window, a cleaner front
+    # with a single floppy slot and a power key.
+    'iici': [
+        "................................",
+        "................................",
+        ".....KKKKKKKKKKKKKKKKKKKKKK.....",
+        ".....KMMMMMMMMMMMMMMMMMMMMK.....",
+        ".....KMLLLLLLLLLLLLLLLLLLMK.....",
+        ".....KMMMMMMMMMMMMMMMMMMMMK.....",
+        ".....KMKKKKKKKKKKKKKKKKKKMK.....",
+        ".....KMKLLLLLLLLLLLLLLLLKMK.....",
+        ".....KMKBBBBLLLLBBBBBBBBKMK.....",
+        ".....KMKBBBBBBBBBBBBBBBBKMK.....",
+        ".....KMKDDDDDDDMMDDDDDDDKMK.....",
+        ".....KMKLLLDDDDMMDDLLLLDKMK.....",
+        ".....KMKDDDDDDDMMDDDDDDDKMK.....",
+        ".....KMKLLLDDDDMMDDDLLLLKMK.....",
+        ".....KMKDDDDDDDMMDDDDDDDKMK.....",
+        ".....KMKDDDDDDDDDDDDDDDDKMK.....",
+        ".....KMKKKKKKKKKKKKKKKKKKMK.....",
+        ".....KKKKKKKKKKKKKKKKKKKKKK.....",
+        ".............KKKK...............",
+        "..KKKKKKKKKKKKKKKKKKKKKKKKKKKK..",
+        "..KMMMMMMMMMMMMMMMMMMMMMMMMMMK..",
+        "..KMLLLLLLLLLLLLLLLLLLLLLLLLMK..",
+        "..KMMMDDDDMMMMMMMMMMMMMMMMMMMK..",
+        "..KMMMMMMMMMMMMMMMMMMMMMMMMMMK..",
+        "..KMMMMMMMMMMMMMMDDDMMMMMMMMMK..",
+        "..KMMMMMMMMMMMMMMDDDMMMMMMMMMK..",
+        "..KMMMMMMMMMMMMMMMMMMMMMMMMMMK..",
+        "..KMMMMMMMMMMMMMMMMMMMMMMMMMMK..",
+        "..KSSSSSSSSSSSSSSSSSSSSSSSSSSK..",
+        "..KKKKKKKKKKKKKKKKKKKKKKKKKKKK..",
+        "................................",
+        "................................",
+    ],
 }
 
 
 def _check(rows: list[str]) -> list[str]:
-    if len(rows) != 16:
-        raise ValueError(f"a colour icon's art is 16 rows, not {len(rows)}")
+    size = len(rows)
+    if size not in (16, 32):
+        raise ValueError(f"a colour icon's art is 16 or 32 rows, not {size}")
     for i, row in enumerate(rows):
-        if len(row) != 16:
-            raise ValueError(f"row {i} is {len(row)} pixels wide, not 16")
+        if len(row) != size:
+            raise ValueError(f"row {i} is {len(row)} pixels wide, not {size}")
         for ch in row:
             if ch not in PALETTE:
                 raise ValueError(f"row {i} uses {ch!r}, which is not in PALETTE")
@@ -173,9 +323,10 @@ def _check(rows: list[str]) -> list[str]:
 
 @cache
 def image(kind: str) -> QImage:
-    """The icon as a 16x16 ARGB image; transparency where the art says '.'"""
+    """The icon as a square ARGB image; transparency where the art says '.'"""
     rows = _check(ART[kind])
-    img = QImage(16, 16, QImage.Format.Format_ARGB32)
+    size = len(rows)
+    img = QImage(size, size, QImage.Format.Format_ARGB32)
     img.fill(Qt.GlobalColor.transparent)
     for y, row in enumerate(rows):
         for x, ch in enumerate(row):
@@ -187,5 +338,5 @@ def image(kind: str) -> QImage:
 
 @cache
 def pixmap(kind: str) -> QPixmap:
-    """The icon as a 16x16 pixmap, for title bars and row icons."""
+    """The icon as a pixmap: 16x16 for titles and rows, 32x32 for logos."""
     return QPixmap.fromImage(image(kind))

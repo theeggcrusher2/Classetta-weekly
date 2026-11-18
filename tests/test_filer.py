@@ -608,7 +608,7 @@ def test_about_classetta_appears(harness):
     assert any("Classetta" in line for line in about._lines)
     assert any(line.startswith("Total Memory") for line in about._lines)
     assert any(line.startswith("Largest Unused Block") for line in about._lines)
-    assert about._logo_icon in (theme.MAC_II_ICON, theme.MAC_PLUS_ICON)
+    assert about._logo_icon is theme.MAC_LOGO_ICONS[h.d.config.model]
     assert about._processes[0][0] == "System"      # the System heap is listed
     about.close()
     h.settle()

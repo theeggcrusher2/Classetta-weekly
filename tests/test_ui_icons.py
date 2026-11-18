@@ -1,7 +1,7 @@
 """The in-repo colour icons: well-formed art, the module's caching, and
 the chrome surface that hands them out at depth > 2 — the Filer
-window's title (task 5.2) and the About Classetta app list's System row
-(task 5.3; the large machine logo gets its own as 5.4 lands)."""
+window's title (task 5.2), the About Classetta app list's System row
+(task 5.3) and the About window's machine logo (task 5.4)."""
 
 import machfs
 import pytest
@@ -9,7 +9,7 @@ from PyQt6.QtGui import QImage
 
 from macrt.resfork import Resource, build_fork
 from macrt.ui import filer as filer_mod
-from macrt.ui import icons
+from macrt.ui import icons, theme
 from macrt.ui.filer import _container_pixmap
 
 
@@ -19,13 +19,14 @@ def _app(qapp):
     return qapp
 
 
-def test_every_icon_is_16_rows_by_16_columns_in_palette():
+def test_every_icon_is_square_art_in_palette():
     for kind, rows in icons.ART.items():
         assert icons._check(rows) == rows          # raises on bad art
-    for kind in icons.ART:
+        assert len({len(row) for row in rows}) == 1 and len(rows) == len(rows[0])
+    for kind, rows in icons.ART.items():
         image = icons.image(kind)
-        assert (image.width(), image.height()) == (16, 16)
-        assert icons.pixmap(kind).width() == 16
+        assert (image.width(), image.height()) == (len(rows), len(rows))
+        assert icons.pixmap(kind).width() == len(rows)
 
 
 def test_pixmap_and_image_are_cached():
@@ -184,3 +185,37 @@ def test_the_about_system_row_keeps_1bit_at_depth_1(qapp, harness, monkeypatch):
     assert about._processes[0][4] is None
     about.close()
     h.settle()
+
+
+def test_the_about_logo_is_selected_by_model_id(qapp, harness, monkeypatch):
+    from macrt.toolbox.system import MODELS
+    for model_id in MODELS:
+        v = _volume()
+        h = harness(disks=[v], model=model_id)
+        monkeypatch.setattr(filer_mod, "_depth", lambda display: 8)
+        about = h.d.show_about_classetta()
+        h.settle()
+        assert about._logo_icon is theme.MAC_LOGO_ICONS[model_id]
+        assert about._logo_pixmap is icons.pixmap(model_id)
+        about.close()
+        h.settle()
+
+
+def test_the_about_logo_keeps_1bit_at_depth_1(qapp, harness, monkeypatch):
+    v = _volume()
+    h = harness(disks=[v], model="iix")
+    monkeypatch.setattr(filer_mod, "_depth", lambda display: 1)
+    about = h.d.show_about_classetta()
+    h.settle()
+    assert about._logo_pixmap is None
+    assert about._logo_icon is theme.MAC_IIX_ICON
+    about.close()
+    h.settle()
+
+
+def test_the_iix_and_iici_logos_are_their_own_art():
+    logos = {model_id: theme.MAC_LOGO_ICONS[model_id]
+             for model_id in ("plus", "ii", "iix", "iici")}
+    assert len({tuple(icon) for icon in logos.values()}) == 4
+    for model_id in ("iix", "iici"):
+        assert icons.pixmap(model_id).width() == 32
