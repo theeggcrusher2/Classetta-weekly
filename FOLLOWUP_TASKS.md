@@ -81,12 +81,12 @@ Subtasks:
       exist or does not open, offer to insert the disk or pick the
       original image (a file picker). Cancelling does nothing; the index
       stays untouched. Independent of 1.1; can run alongside.
-- [ ] **1.4** Mounting: a picked image that verifies against the record
+- [x] **1.4** Mounting: a picked image that verifies against the record
       mounts as though the disk had been there all along, and opens the
       same item the double-click was on. Uses
       `macrt.macfile.image_volume`/`open_targets`. *Blocked by 1.2 and
       1.3.*
-- [ ] **1.5** Tests: a catalog built from a generated image, with the
+- [x] **1.5** Tests: a catalog built from a generated image, with the
       image moved away → the prompt appears; the picked image → opens;
       Get Info unchanged. *Blocked by 1.4.*
 
