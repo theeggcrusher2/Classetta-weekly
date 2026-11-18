@@ -55,8 +55,8 @@ from ..viewer import describe, viewer_main
 from . import chrome, icons, theme
 from .busy import run_busy
 from .stdfile import (CATALOG_ICON, CONTROL_PANEL_ICON, DESK_ACCESSORY_ICON, DISK_ICON,
-                      DOCUMENT_ICON, EXTENSION_ICON, FONT_ICON, FOLDER_ICON, icon,
-                      icon_from_bitmap)
+                      DOCUMENT_ICON, EXTENSION_ICON, FONT_ICON, FOLDER_ICON,
+                      icon_from_bitmap, standin_icon)
 from .tracking import BoxTracker, DragTracker
 from .window import _Hosted
 
@@ -619,8 +619,9 @@ class FilerWindow(_Hosted):
         except Exception:
             size = "--"
         item = QTreeWidgetItem([name, size, _kind(f)])
-        item.setIcon(0, item_icon_qicon(f, depth=_depth(self.display))
-                     or icon(_icon_for(f)))
+        depth = _depth(self.display)
+        item.setIcon(0, item_icon_qicon(f, depth=depth)
+                     or standin_icon(_icon_for(f), depth))
         item.setData(0, Qt.ItemDataRole.UserRole, f)
         return item
 
@@ -630,11 +631,12 @@ class FilerWindow(_Hosted):
         files.  A folder of members expands in place to show what's
         inside, and double-clicking it opens its own window, as a
         folder of a disk image's does."""
+        depth = _depth(self.display)
         for key in sorted(node, key=lambda k: (not isinstance(node[k], dict), k.lower())):
             folder = isinstance(node[key], dict)
             if folder:
                 item = QTreeWidgetItem([key, "--", "folder"])
-                item.setIcon(0, icon("folder"))
+                item.setIcon(0, standin_icon("folder", depth))
                 item.setData(0, Qt.ItemDataRole.UserRole, path + (key,))
             else:
                 item = self._row(node[key], key)
@@ -1030,10 +1032,8 @@ class FilerWindow(_Hosted):
         win = GetInfoWindow(self.display, item, name=shown)
         self.display.info_windows.append(win)
         self.display.front_aux_window = win
-        # Center the info window over the Filer window.
-        fr = self.frameGeometry()
-        win.move(fr.center().x() - win.width() // 2,
-                 fr.center().y() - win.height() // 2)
+        # Center the info window over the Filer window, below the bar.
+        self.display.place_aux_window(win, self)
         win.show()
         win.raise_()
         win.activateWindow()
@@ -1052,9 +1052,7 @@ class FilerWindow(_Hosted):
         win = ContentViewerWindow(self.display, item)
         self.display.viewer_windows.append(win)
         self.display.front_aux_window = win
-        fr = self.frameGeometry()
-        win.move(fr.center().x() - win.width() // 2,
-                 fr.center().y() - win.height() // 2)
+        self.display.place_aux_window(win, self)
         win.show()
         win.raise_()
         win.activateWindow()
@@ -1632,7 +1630,9 @@ class GetInfoWindow(AboutWindow):
         title_pixmap = None
         if depth > 2:
             q = item_icon_qicon(item, depth=depth)
-            title_pixmap = q.pixmap(16, 16) if q is not None else None
+            if q is None:
+                q = standin_icon(_icon_for(item), depth)
+            title_pixmap = q.pixmap(16, 16)
         super().__init__(display, f"{shown} Info", lines,
                          title_icon=item_icon(item) or _generic_icon(item),
                          # room for the two version lines when there are any
@@ -1641,6 +1641,7 @@ class GetInfoWindow(AboutWindow):
                          parent=parent,
                          title_pixmap=title_pixmap)
         self.item = item
+        self._depth = depth
         # The item's own icon at its full size, for the box; None keeps
         # the generic one for what it is.
         self._own_icon = item_icon(item, large=True)
@@ -1668,7 +1669,7 @@ class GetInfoWindow(AboutWindow):
                               rect.top() + 16 + (32 - icon_h) // 2,
                               own, theme.BLACK)
         else:
-            ico = icon(_icon_for(self.item))
+            ico = standin_icon(_icon_for(self.item), self._depth)
             p.drawPixmap(rect.left() + 16, rect.top() + 16, 32, 32,
                          ico.pixmap(32, 32))
 
@@ -1695,7 +1696,9 @@ class ContentViewerWindow(AboutWindow):
         title_pixmap = None
         if depth > 2:
             q = item_icon_qicon(item, depth=depth)
-            title_pixmap = q.pixmap(16, 16) if q is not None else None
+            if q is None:
+                q = standin_icon(_icon_for(item), depth)
+            title_pixmap = q.pixmap(16, 16)
         super().__init__(display, item.name, [],
                          title_icon=item_icon(item) or _generic_icon(item),
                          content_size=(720, 480), parent=None,

@@ -11,6 +11,7 @@ from macrt.resfork import Resource, build_fork
 from macrt.ui import filer as filer_mod
 from macrt.ui import icons, theme
 from macrt.ui.filer import _container_pixmap
+from macrt.ui.stdfile import icon, standin_icon
 
 
 @pytest.fixture(autouse=True)
@@ -286,3 +287,73 @@ def test_the_colour_surfaces_keep_1bit_at_depth_1(qapp, harness, monkeypatch):
     assert all(row[4] is None for row in about._processes)
     about.close()
     h.settle()
+
+# -- the 1-bit stand-ins draw colour at depth > 2, everywhere --
+
+def _volume_with_items():
+    v = _volume()
+    doc = machfs.File()
+    doc.type, doc.creator, doc.data = b"TEXT", b"TEST", b"hello"
+    v["Letter"] = doc
+    v["Docs"] = machfs.Folder()
+    return v
+
+
+def _row(win, name):
+    for i in range(win.tree.topLevelItemCount()):
+        item = win.tree.topLevelItem(i)
+        if item.text(0) == name:
+            return item
+    raise KeyError(name)
+
+
+def test_standin_icon_picks_colour_art_at_depth_8():
+    assert standin_icon("folder", 8).pixmap(16, 16).toImage() == icons.pixmap("folder").toImage()
+    assert standin_icon("document", 8).pixmap(16, 16).toImage() == icons.pixmap("document").toImage()
+    assert standin_icon("volume", 8).pixmap(16, 16).toImage() == icons.pixmap("disk").toImage()
+    assert standin_icon("application", 8).pixmap(16, 16).toImage() == icons.pixmap("app").toImage()
+
+
+def test_standin_icon_keeps_1bit_at_depth_2_and_below():
+    for depth in (1, 2):
+        assert standin_icon("folder", depth).pixmap(16, 16).toImage() == icon("folder").pixmap(16, 16).toImage()
+
+
+def test_standin_icon_without_art_falls_back_to_1bit():
+    assert standin_icon("alias", 8) is icon("alias")
+    assert standin_icon("font", 8) is icon("font")
+
+
+def test_a_plain_row_shows_the_colour_stand_in_at_depth_8(qapp, harness, monkeypatch):
+    h = harness(disks=[_volume_with_items()], menu_bar="global")
+    monkeypatch.setattr(filer_mod, "_depth", lambda display: 8)
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    assert _row(win, "Docs").icon(0).pixmap(16, 16).toImage() == icons.pixmap("folder").toImage()
+    assert _row(win, "Letter").icon(0).pixmap(16, 16).toImage() == icons.pixmap("document").toImage()
+    h.d.close_filer(win)
+
+
+def test_a_plain_row_keeps_1bit_at_depth_1(qapp, harness, monkeypatch):
+    h = harness(disks=[_volume_with_items()], menu_bar="global")
+    monkeypatch.setattr(filer_mod, "_depth", lambda display: 1)
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    assert _row(win, "Docs").icon(0).pixmap(16, 16).toImage() == icon("folder").pixmap(16, 16).toImage()
+    h.d.close_filer(win)
+
+
+def test_get_info_title_picks_the_colour_stand_in_at_depth_8(qapp, harness, monkeypatch):
+    h = harness(disks=[_volume_with_items()], menu_bar="global")
+    monkeypatch.setattr(filer_mod, "_depth", lambda display: 8)
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    win.tree.setCurrentItem(_row(win, "Letter"))
+    h.settle()
+    win.get_info()
+    h.settle()
+    info = h.d.info_windows[0]
+    assert info.frame().title_pixmap is not None
+    assert info.frame().title_pixmap.toImage() == icons.pixmap("document").toImage()
+    info.close()
+    h.d.close_filer(win)

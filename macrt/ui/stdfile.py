@@ -46,7 +46,7 @@ from PyQt6.QtWidgets import (QAbstractButton, QCheckBox, QComboBox, QDialog, QFr
                              QListWidgetItem, QMessageBox, QPushButton, QRadioButton, QVBoxLayout,
                              QWidget)
 
-from . import theme
+from . import icons, theme
 
 if TYPE_CHECKING:
     from ..process import Process
@@ -320,6 +320,34 @@ def icon(kind: str) -> QIcon:
     return icon_from_bitmap(ICONS[kind])
 
 
+_COLOUR_STANDINS = {"folder": "folder", "document": "document", "volume": "disk",
+                    "application": "app", "archive": "archive", "catalog": "catalog"}
+
+
+def display_depth(display) -> int:
+    """The depth to make colour decisions by: the running System's, as the
+    guest sees it; the configured depth; then 1."""
+    system = getattr(display, "system", None)
+    depth = getattr(system, "depth", None)
+    if depth is None:
+        config = getattr(display, "config", None)
+        depth = getattr(config, "depth", None) if config is not None else None
+    return depth if depth is not None else 1
+
+
+@cache
+def standin_icon(kind: str, depth: int) -> QIcon:
+    """The system's stand-in for a kind of item: Classetta's colour art at
+    depth > 2 for the kinds it has, the 1-bit icon otherwise.  At depth > 2 a
+    colour stand-in is not inverted on selection; the 1-bit icon still is."""
+    key = _COLOUR_STANDINS.get(kind)
+    if key is not None and depth > 2:
+        q = QIcon()
+        q.addPixmap(icons.pixmap(key))
+        return q
+    return icon(kind)
+
+
 STYLE = """
 QDialog { background: white; }
 QLabel { color: black; }
@@ -351,6 +379,7 @@ class StandardFileDialog(QDialog):
         parent = display.host_window if display is not None else None
         super().__init__(parent)
         self.display = display
+        self._depth = display_depth(display) if display is not None else 1
         self.put = put
         self.ok_title = ok or ("Save" if put else "Open")
         self.place = Place([])
@@ -378,12 +407,12 @@ class StandardFileDialog(QDialog):
 
         self.disk = QLabel()
         self.disk_icon = QLabel()
-        self.disk_icon.setPixmap(icon("volume").pixmap(16, 16))
+        self.disk_icon.setPixmap(standin_icon("volume", self._depth).pixmap(16, 16))
         self.eject = QPushButton("Eject")
         self.eject.setEnabled(False)                # nothing here is removable
         self.desk = QPushButton("Desktop")
         self.desk.clicked.connect(lambda: self._act("desktop"))
-        self.new_folder = QPushButton(icon("folder"), "New")
+        self.new_folder = QPushButton(standin_icon("folder", self._depth), "New")
         self.new_folder.clicked.connect(self._ask_new_folder)
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.clicked.connect(self.cancel)
@@ -460,13 +489,13 @@ class StandardFileDialog(QDialog):
         self.popup.clear()
         for i, folder in enumerate(place.path):
             kind = "volume" if i == len(place.path) - 1 else "folder"
-            self.popup.addItem(icon(kind), folder)
-        self.popup.addItem(icon("desktop"), "Desktop")
+            self.popup.addItem(standin_icon(kind, self._depth), folder)
+        self.popup.addItem(standin_icon("desktop", self._depth), "Desktop")
         self.popup.setCurrentIndex(0)
         self.popup.blockSignals(False)
         self.list.clear()
         for item in place.items:
-            w = QListWidgetItem(icon(item.kind), item.name)
+            w = QListWidgetItem(standin_icon(item.kind, self._depth), item.name)
             if not item.enabled:
                 w.setFlags(w.flags() & ~Qt.ItemFlag.ItemIsEnabled)
             self.list.addItem(w)
@@ -479,7 +508,8 @@ class StandardFileDialog(QDialog):
         self._told = -2                     # new to the application
         self._reporting, self._pending = False, None    # a step in the last list is no step
         self.disk.setText(place.volume or "Desktop")
-        self.disk_icon.setPixmap(icon("volume" if place.volume else "desktop").pixmap(16, 16))
+        self.disk_icon.setPixmap(standin_icon("volume" if place.volume else "desktop",
+                                              self._depth).pixmap(16, 16))
         self.message.setText(place.message)
         self.message.setVisible(bool(place.message))
         fut = self._future = Future()
