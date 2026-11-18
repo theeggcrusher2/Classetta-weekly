@@ -393,11 +393,11 @@ Subtasks:
       and catalog icons; 1-bit at depth ≤ 2, and when colour can't be
       built, with no other behavior changed. `macrt/ui/filer.py` line 577.
       *Blocked by 5.1.* Done in `d76e634`.
-- [ ] **5.3** The About Classetta app list: the System row draws in
+- [x] **5.3** The About Classetta app list: the System row draws in
       colour at depth > 2 like the application rows do — art source per
       the System-row decision. `macrt/ui/filer.py` lines 1198 and 1642 and
       `theme.GENERIC_APP_ICON`. *Blocked by 5.1 and the System-row
-      decision.*
+      decision.* Done in `ae6a373`.
 - [ ] **5.4** The About Classetta logo: one colour logo per `MODELS`
       entry (`plus`, `ii`, `iix`, `iici`, in
       `macrt/toolbox/system.py`), selected by model id, not by name
