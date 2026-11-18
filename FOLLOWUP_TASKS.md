@@ -308,7 +308,7 @@ Subtasks:
       - a file's `size` is the sum of its forks, without reading them;
       - names match the Filer's view (HFS+: `_mac_name`'s result).
       *Blocked by 4.4.*
-- [ ] **4.7** Acceptance sweep: `disktracker/index.py` contains no copy
+- [x] **4.7** Acceptance sweep: `disktracker/index.py` contains no copy
       of either catalog walk; `macrt/macfile.py` contains no
       `_read_hfs_plus`; `disktracker/tests/test_index.py` passes with the
       4.6 assertions (the HFS+ fixture's expected dates change by the
