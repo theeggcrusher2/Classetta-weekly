@@ -482,3 +482,23 @@ def test_udf_hidden_and_deleted_fids_are_left_out():
     vol = read_udf(img)
     assert "Plain.txt" not in vol
     assert "Subdir" in vol
+
+def test_udf_disc_opens_through_load_volume(tmp_path):
+    # Task 3.4 wiring: the UDF reader sits at the end of the load_volume
+    # fallback chain (HFS, HFS+, ISO, then UDF).
+    from macrt.macfile import load_volume
+    path = tmp_path / 'disc.iso'
+    path.write_bytes(bytes(udf_image()))
+    vol = load_volume(path)
+    assert vol.name == "Logical Test Disk"
+    assert "Plain.txt" in vol
+
+
+def test_udf_2_disc_is_refused_by_name_through_load_volume(tmp_path):
+    from macrt.macfile import load_volume
+    path = tmp_path / 'disc.iso'
+    path.write_bytes(bytes(udf_image(revision=0x0200)))
+    with pytest.raises(ValueError, match=r"unsupported \(it carries UDF 2\.00\)"):
+        load_volume(path)
+
+

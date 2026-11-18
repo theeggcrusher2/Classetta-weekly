@@ -1188,7 +1188,15 @@ def load_volume(source: str | os.PathLike | bytes | mmap.mmap) -> machfs.Volume:
                         folder[child['name']] = f
             populate(root, vol)
         except Exception as e2:
-            raise ValueError(f"the disk image is damaged ({type(hfs_e).__name__}: {hfs_e})") from None
+            try:
+                from .udf import read_udf
+                vol = read_udf(bytes(data))
+            except Exception as e3:
+                # A named UDF refusal (2.x, a virtual allocation table, …) is
+                # worth surfacing; otherwise keep today's damaged-disc error.
+                if isinstance(e3, ValueError) and str(e3).startswith("the UDF disc"):
+                    raise e3 from None
+                raise ValueError(f"the disk image is damaged ({type(hfs_e).__name__}: {hfs_e})") from None
     vol.size = len(data)                # the disk's: whether it's a floppy's
     vol.startup, vol.disk, vol.allocation = startup, disk, allocation
     return vol
