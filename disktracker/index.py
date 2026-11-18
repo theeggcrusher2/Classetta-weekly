@@ -20,6 +20,11 @@ from typing import Iterator
 import machfs
 
 from macrt.iso9660 import _read_iso
+from macrt.hfsplus import read_hfsplus
+# macrt.macfile._read_hfs, not the tracker's copy above (task 4.4 deletes
+# that one): the canonical reader, imported under an alias so it does not
+# clash with the local definition until 4.4 lands.
+from macrt.macfile import _read_hfs as _macrt_read_hfs
 
 from .disktracker import HEADER_SIZE, Item, _decode_mac_roman
 from .writer import write_dtc
@@ -421,13 +426,25 @@ def _leaf_records(tree: bytes) -> Iterator[bytes]:
 def _read_fs(data: bytes, stem: str):
     """The image's filesystem as (name, created, modified, root tree):
     HFS first (a hybrid disc's Mac view is the HFS one), then
-    HFS Plus, then ISO 9660."""
-    at = _find_hfs(data)
-    if at is not None:
-        return _read_hfs(data, at)
+    HFS Plus, then ISO 9660.  The HFS and HFS Plus readers are
+    macrt's canonical ones; MFS is recognized and refused.
+
+    Note on dates: HFS+ catalog entries come back with LOCAL dates —
+    macrt.hfsplus.read_hfsplus applies _gmt_to_local to the catalog's
+    crdate/mddate (and to vol.mddate), so the catalog's dates are the
+    local ones the Filer's Get Info shows, not the raw GMT the tracker's
+    own reader used to produce.  vol.crdate is the exception: read_hfsplus
+    leaves it raw GMT.  Whether that asymmetry stands is task 4.5's
+    open question, not settled here."""
+    try:
+        vol = _macrt_read_hfs(data)     # scans for the MDB itself
+        return _volume_tree(vol)
+    except Exception:
+        pass                            # no HFS volume on it: try HFS Plus
     at = _find_hfsplus(data)
     if at is not None:
-        return _read_hfsplus(data, at)
+        vol = read_hfsplus(data[at:])   # expects the volume from offset 0
+        return _volume_tree(vol)
     if len(data) >= 1026 and data[1024:1026] == b'\xd2\xd7':
         raise ValueError("MFS volumes are not supported (their folders "
                          "live in the Finder's Desktop file)")
