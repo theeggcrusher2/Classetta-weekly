@@ -18,6 +18,7 @@ will and will not open.
 | UDIF (`.dmg`, `.smi`) | `macrt.dmg` | Uncompressed, zlib, ADC and sparse chunks; single-partition images; the `koly` trailer at the file's end, or at offset 0 in early ones. |
 | NDIF (Disk Copy 6, `.img`/`.smi`) | `macrt.dmg` | Raw, ADC and zero chunks, single-partition images whose chunk map lives in the `bcem` resource 128. |
 | MDF/MDS (Alcohol 1200, `.mds` + `.mdf`) | `macrt.mdf` | Mode 1 and Mode 2 Form 1 data tracks; 2352-byte stride, or 2448 with interleaved subchannel; the data track's 2048-byte user sectors are extracted into a raw CD volume. |
+| BIN/CUE (`.cue` + `.bin`) | `macrt.cue` / `macrt.bin` | Single-file multi-track sheets: Mode 1 and Mode 2 Form 1 data tracks, 2048- and 2352-byte strides (2448-byte interleaved subchannel cannot be expressed in a cue sheet and is `.mdf` only). The sheet is required: it names the `.bin` and its tracks, the data track's 2048-byte user sectors mount as a CD-ROM, and any audio tracks are present in the sheet but never exposed to the running program. A bare `.bin` with no sheet opens through the raw-CD path with a warning that it is unknown what disc this is and to convert it first. A one-file-per-track layout (separate `.bin` files per audio track) is not supported — merge the tracks into a single image and convert it. Refused by name: DVD structure, Mode 2 Form 2 (raw 2336-byte sectors), more than one data track, an audio-only or empty sheet, a missing or mismatching `.bin`, and a sheet whose offsets don't line up with its image. |
 | DART / DiskMaker (`DMdf`/`DskM`, `DMd*`/`DART`) | `macrt.dart` | 'Fast' RLE and stored chunks; the 12-byte Apple II tag-RAM bytes are stripped; Mac 400K (MFS), 800K and 1440K (HFS) disks. |
 
 All of these are read in full into memory before the volume readers see
@@ -37,6 +38,17 @@ stem on the host. The filename the `.mds` footer names is ignored. The
 same holds for a pair nested in an archive: opening either member finds
 the other member with the same stem in the same archive.
 
+A BIN/CUE pair is detected from the sheet: an `.cue` names the `.bin`
+track file(s) a single-file multi-track sheet describes, and a `.bin`
+with a `.cue` beside it finds its sheet. The sheet is the source of
+truth for track order, modes and offsets; it names the `.bin` it reads.
+A `.cue` naming a `.bin` that is not there, a one-file-per-track
+layout, or offsets that don't line up with the image are refused with
+the reason. The same holds for a pair nested in an archive: opening
+the archive member named `.cue` finds the `.bin` member it names. A
+bare `.bin` keeps the raw-CD fallback behaviour, now with a warning
+that its contents are unknown until it is converted to a known format.
+
 A DART or DiskMaker image is detected from its header and chunk-length
 table, not its name; Apple used it for the guided-tour disks on its
 Developer CDs (`DMdf`/`DskM`), and DART (`DMd*`/`DART`) is the same file
@@ -54,14 +66,6 @@ and a file in one of them will not browse as a volume.
 
 **CD images**
 
-- **BIN/CUE**: the `.cue` sheet is never read; the `.bin` half opens
-  through the raw-CD path when it keeps 2352-byte sectors whole (one
-  data track starting at 00:02:00, as a data-first mixed-mode disc is —
-  its audio tracks are never played), or as a plain 2048-byte data
-  image (HFS/ISO). Nothing about the sheet is parsed or validated: a
-  one-file-per-track layout, interleaved subchannel at 2448 bytes a
-  sector (`.mdf` supports it), Mode 2 Form 2, multiple data tracks and
-  DVDs are all unsupported — and none are refused by name.
 - **Rock Ridge extensions and UDF**: not parsed. ISO 9660 itself is read:
   a disc with no Mac volume opens with the files its directories hold
   (via the `disktracker.index` ISO reader, the same one the Disk Tracker

@@ -296,9 +296,9 @@ after 8 more bytes in a mode 2 one) and mounts the result as a CD-ROM,
 whatever the image is called.
 
 macrt also reads the compressed and container formats — UDIF (`.dmg`),
-NDIF, CHD, qcow2, VHD, VMDK, MDF/MDS, DART and DiskMaker — so converting
-to raw first is no longer needed. The full list, and what each refuses by
-name, is in [Disk image formats](disk-images.md).
+NDIF, CHD, qcow2, VHD, VMDK, MDF/MDS, BIN/CUE, DART and DiskMaker — so
+converting to raw first is no longer needed. The full list, and what
+each refuses by name, is in [Disk image formats](disk-images.md).
 
 #### CD-ROM images
 
