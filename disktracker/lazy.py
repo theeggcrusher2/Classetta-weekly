@@ -17,7 +17,7 @@ from typing import Optional, List, Dict, Iterator, Union, Any
 from dataclasses import dataclass, field
 import struct
 
-from .disktracker import Item, Disk, HEADER_SIZE, ITEM_FRONT, _decode_mac_roman
+from .disktracker import Item, Disk, HEADER_SIZE, ITEM_FRONT, _decode_mac_roman, _find_first_item
 from .index import build_dtc
 from .writer import write_dtc
 
@@ -218,13 +218,20 @@ class LazyDtcCatalog:
             if off + 0x52 + 1 + nlen > len(data):
                 break
             after = off + 0x52 + 1 + nlen
+            # Suffix length varies; locate the first item the same way
+            # parse_dtc does.  Fall back to the historical 308-byte
+            # assumption when the scan finds nothing (damaged catalog)
+            # rather than crash.
+            first_item = _find_first_item(data, after) if count > 0 else None
+            if first_item is None:
+                first_item = after + 308
             disk_record = Item(kind='disk', name=_decode_mac_roman(data[off + 0x53:off + 0x53 + nlen]),
                                offset=off, items=count,
                                created=struct.unpack('>I', data[off + 6:off + 10])[0],
                                modified=struct.unpack('>I', data[off + 10:off + 14])[0],
-                               suffix=data[after:after + 308])
+                               suffix=data[after:first_item])
             self._item_offsets.append(off)
-            off = after + 308
+            off = first_item
             
             # Track archive items for lazy loading
             for _ in range(count):
@@ -297,10 +304,16 @@ class LazyDtcCatalog:
             count = struct.unpack('>I', data[off + 0x14:off + 0x18])[0]
             nlen = data[off + 0x52]
             name = _decode_mac_roman(data[off + 0x53:off + 0x53 + nlen])
+            after = off + 0x52 + 1 + nlen
+            # Same variable-suffix handling as the offset walk and
+            # parse_dtc; fall back to 308 bytes if the scan fails.
+            first_item = _find_first_item(data, after) if count > 0 else None
+            if first_item is None:
+                first_item = after + 308
             item = Item(kind='disk', name=name, offset=off, items=count,
                        created=struct.unpack('>I', data[off + 6:off + 10])[0],
                        modified=struct.unpack('>I', data[off + 10:off + 14])[0],
-                       suffix=data[off + 0x52 + 1 + nlen:off + 0x52 + 1 + nlen + 308])
+                       suffix=data[after:first_item])
             self._cache[index] = item
             return item
         
