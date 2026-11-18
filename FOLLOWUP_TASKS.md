@@ -405,9 +405,9 @@ Subtasks:
       ≤ 2 and as the fallback; each 1-bit constant gains its colour
       sibling rather than being replaced. Blocks 5.5.
       *Blocked by 5.1.* Done in `6c788a3`.
-- [ ] **5.5** Machine icon rule, as a test: nothing may grow `MODELS`
+- [x] **5.5** Machine icon rule, as a test: nothing may grow `MODELS`
       without a logo — a test that fails when a `MODELS` entry has no
-      About logo. *Blocked by 5.4.*
+      About logo. *Blocked by 5.4.* Done in `eff4624`.
 - [ ] **5.6** Tests: paint smoke tests at depth 8 for each surface (a
       pixmap is handed to chrome, or the rows draw one); depth 1
       unchanged; About opens on every model in `MODELS`.
