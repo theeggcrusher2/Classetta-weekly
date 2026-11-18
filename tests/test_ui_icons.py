@@ -219,3 +219,15 @@ def test_the_iix_and_iici_logos_are_their_own_art():
     assert len({tuple(icon) for icon in logos.values()}) == 4
     for model_id in ("iix", "iici"):
         assert icons.pixmap(model_id).width() == 32
+
+
+def test_no_models_entry_grows_without_an_about_logo():
+    # Task 5.5's rule: adding to MODELS without an About logo (the 1-bit
+    # constant and its colour sibling) fails here.
+    from macrt.toolbox.system import MODELS
+    for model_id in MODELS:
+        assert model_id in theme.MAC_LOGO_ICONS, (
+            f"MODELS entry {model_id!r} has no 1-bit About logo "
+            "(theme.MAC_LOGO_ICONS)")
+        assert model_id in icons.ART, (
+            f"MODELS entry {model_id!r} has no colour About logo (icons.ART)")
