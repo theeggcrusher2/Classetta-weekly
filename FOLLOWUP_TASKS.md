@@ -203,7 +203,7 @@ Subtasks:
       `_read_iso`/`_iso_children` into macrt (shared location or
       `macrt/macfile.py`), both callers importing downward. *Blocked by
       the joint task-3/4 decision; coordinate with 4.3.*
-- [ ] **3.2** SUSP parsing in the ISO reader: an NM entry gives the
+- [x] **3.2** SUSP parsing in the ISO reader: an NM entry gives the
       entry's real name (case and long names kept), falling back to the
       ISO 9660 name field when a record carries none. CL/PL/RE parsing
       included only if the open question settles that way. *Blocked by

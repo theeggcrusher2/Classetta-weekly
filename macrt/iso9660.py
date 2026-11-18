@@ -4,10 +4,12 @@ The one ISO 9660 reader, shared by the running emulator
 Mac volumes are unreadable) and the Disk Tracker (disktracker.index,
 whose catalogues index ISO 9660 discs).
 
-Names are latin-1 with the ";1" version suffix stripped, the way the
-tracker has always written them to its catalogues.  No SUSP/Rock
-Ridge: an ISO 9660 view is read exactly as the basic 9660 directory
-records describe it.
+Names are the Rock Ridge "NM" entry's payload when the record carries
+one — case and long names kept — otherwise the ISO 9660 name field,
+latin-1 with the ";1" version suffix stripped, the way the tracker has
+always written them to its catalogues. SUSP is scanned tolerantly:
+well-formed entries are walked by their length byte wherever they sit
+in the record's System Use Area, and "CL"/"PL"/"RE" are ignored.
 """
 import struct
 from datetime import datetime, timezone
@@ -40,6 +42,58 @@ def _iso_dir_date(raw: bytes) -> int:
     return int(when.timestamp()) + MAC_EPOCH
 
 
+NM_FLAG_CONTINUE = 0x01               # this NM continues the record's name
+NM_FLAG_CURRENT = 0x02                # the entry is a directory's "."
+NM_FLAG_PARENT = 0x04                 # the entry is a directory's ".."
+
+
+def _susp_entries(rec: bytes):
+    """Yield (signature, version, body) SUSP entries from a directory
+    record's System Use Area, walking by each entry's length byte.
+    Tolerant: SP (or anything unknown) is skipped the same way, NUL
+    padding is stepped over, and a malformed entry ends the scan —
+    nothing raises."""
+    if len(rec) < 33:
+        return
+    nlen = rec[32]
+    at = 33 + nlen + (1 if nlen % 2 == 0 else 0)
+    while at + 4 <= len(rec):
+        sig = bytes(rec[at:at + 2])
+        length = rec[at + 2]
+        if rec[at] == 0:
+            at += 1                   # zero fill inside the area
+            continue
+        if length < 4 or at + length > len(rec):
+            break                     # malformed — trust the area no further
+        yield sig, rec[at + 3], rec[at + 4:at + length]
+        at += length
+
+
+def _rock_ridge_name(rec: bytes):
+    """The record's Rock Ridge name, or None when it carries none.
+    All of the record's NM entries concatenate in order (0x01 marks a
+    split entry, not a separate name). An NM entry flagged 0x02 or
+    0x04 makes the record a directory's "." or "..", which has no name
+    of its own. Decoded as UTF-8, falling back to latin-1 — NM holds
+    both on real discs."""
+    name = bytearray()
+    saw_nm = False
+    for sig, version, body in _susp_entries(rec):
+        if sig != b'NM' or version != 1 or len(body) < 1:
+            continue
+        flags, payload = body[0], body[1:]
+        if flags & (NM_FLAG_CURRENT | NM_FLAG_PARENT):
+            return None
+        saw_nm = True
+        name += payload
+    if not saw_nm or not name:
+        return None
+    try:
+        return bytes(name).decode('utf-8')
+    except UnicodeDecodeError:
+        return bytes(name).decode('latin-1')
+
+
 def _iso_children(data: bytes, lba: int, length: int, depth: int) -> list[dict]:
     """One directory's entries as nodes: files with their size and
     dates, folders with their own children read recursively."""
@@ -56,7 +110,8 @@ def _iso_children(data: bytes, lba: int, length: int, depth: int) -> list[dict]:
         nlen = rec[32]
         if len(rec) < 33 + nlen:
             break
-        name = bytes(rec[33:33 + nlen]).split(b';')[0].decode('latin-1', 'replace')
+        iso_name = bytes(rec[33:33 + nlen]).split(b';')[0].decode('latin-1', 'replace')
+        name = _rock_ridge_name(rec) or iso_name
         child_lba, = struct.unpack_from('>I', rec, 2)
         size, = struct.unpack_from('>I', rec, 10)
         date = _iso_dir_date(bytes(rec[18:25]))
