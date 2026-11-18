@@ -398,13 +398,13 @@ Subtasks:
       the System-row decision. `macrt/ui/filer.py` lines 1198 and 1642 and
       `theme.GENERIC_APP_ICON`. *Blocked by 5.1 and the System-row
       decision.* Done in `ae6a373`.
-- [ ] **5.4** The About Classetta logo: one colour logo per `MODELS`
+- [x] **5.4** The About Classetta logo: one colour logo per `MODELS`
       entry (`plus`, `ii`, `iix`, `iici`, in
       `macrt/toolbox/system.py`), selected by model id, not by name
       substring; IIx and IIci get their own art; 1-bit stays at depth
       ≤ 2 and as the fallback; each 1-bit constant gains its colour
       sibling rather than being replaced. Blocks 5.5.
-      *Blocked by 5.1.*
+      *Blocked by 5.1.* Done in `6c788a3`.
 - [ ] **5.5** Machine icon rule, as a test: nothing may grow `MODELS`
       without a logo — a test that fails when a `MODELS` entry has no
       About logo. *Blocked by 5.4.*
