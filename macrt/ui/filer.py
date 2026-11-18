@@ -658,7 +658,7 @@ class FilerWindow(_Hosted):
             title = self.path[-1] if self.path else self.volume.name
         return chrome.Frame(kind=WindowKind.DOCUMENT, title=title,
                             title_icon=self._title_icon, title_pixmap=self._title_pixmap,
-                            hilited=self._hilited, go_away=True, pressed=self._pressed)
+                            hilited=self._hilited, go_away=True, zoom=True, grow=True, pressed=self._pressed)
 
     def content_size(self) -> tuple[int, int]:
         return (getattr(self, '_content_width', CONTENT[0]), CONTENT[1])
