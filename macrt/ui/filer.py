@@ -52,7 +52,7 @@ from ..toolbox.icons import LARGE, MINI, SMALL, Icon, bitmap_icon, color_suite_i
 from ..toolbox.menus import Menu, parse_menu_items
 from ..toolbox.windows import WindowKind
 from ..viewer import describe, viewer_main
-from . import chrome, theme
+from . import chrome, icons, theme
 from .busy import run_busy
 from .stdfile import (CATALOG_ICON, CONTROL_PANEL_ICON, DESK_ACCESSORY_ICON, DISK_ICON,
                       DOCUMENT_ICON, EXTENSION_ICON, FONT_ICON, FOLDER_ICON, icon,
@@ -312,6 +312,56 @@ def item_icon(f: MacFile, *, large: bool = False) -> list[str] | None:
     return None
 
 
+def _container_color_icon(node: machfs.Volume | machfs.Folder | machfs.File,
+                          depth: int) -> QPixmap | None:
+    """A container's own colour icon as a 16-pixel pixmap: a file's when
+    its Finder flags say it has one, or a folder's or volume's Icon
+    file — the colour counterpart of _custom_icon.  None when the
+    container has no colour icon of its own."""
+    try:
+        if isinstance(node, machfs.File):
+            if not node.flags & HAS_CUSTOM_ICON:
+                return None
+            rsrc = bytes(node.rsrc)
+        else:
+            icon_file = next((f for name, f in node.items()
+                              if name.lower() == ICON_FILE.lower()), None)
+            if not isinstance(icon_file, machfs.File):
+                return None
+            rsrc = bytes(icon_file.rsrc)
+        q = _fork_color_icon(rsrc, False, depth, (128,))
+        return q.pixmap(16, 16) if q is not None else None
+    except Exception:
+        return None
+
+
+def _container_pixmap(volume: machfs.Volume | HostFolder | ContainerFolder | ArchiveFolder,
+                      path: tuple[str, ...], depth: int) -> QPixmap | None:
+    """What a filled title bar wears at depth > 2: the container's own
+    colour icon when it has one, else a colour stand-in for what the
+    container is — the volume's disk, a folder, an archive, a file, a
+    Disk Tracker catalog.  None when colour can't be built, so the
+    caller falls back to the 1-bit icon."""
+    try:
+        node = volume
+        for part in path:
+            node = node[part]
+        own = _container_color_icon(node, depth)
+        if own is not None:
+            return own
+        from disktracker.filer_adapter import DiskTrackerVolume
+        if isinstance(node, DiskTrackerVolume):
+            return icons.pixmap('catalog')
+        kind = ("volume" if isinstance(node, machfs.Volume)
+                else "folder" if isinstance(node, machfs.Folder)
+                else "archive" if isinstance(node, ArchiveFolder) or archive_kind(node)
+                else "document")
+        return icons.pixmap({"volume": "disk", "folder": "folder",
+                             "archive": "archive", "document": "document"}[kind])
+    except Exception:
+        return None
+
+
 def _generic_icon(f: MacFile) -> list[str]:
     """A stand-in for an item with no icon of its own, by what it is."""
     if f.type == FOLDER:
@@ -478,6 +528,21 @@ class FilerWindow(_Hosted):
         else:
             self._title_icon = _container_icon(volume, path)
             self.setWindowTitle(self.path[-1] if self.path else self.volume.name)
+        # The colour title icon at depth > 2, drawn instead of the 1-bit
+        # one; None keeps the 1-bit icon (depth <= 2, or colour couldn't
+        # be built).
+        depth = _depth(display)
+        self._title_pixmap = None
+        if depth > 2:
+            try:
+                if isinstance(volume, HostFolder):
+                    self._title_pixmap = icons.pixmap('folder')
+                elif isinstance(volume, (ArchiveFolder, ContainerFolder)):
+                    self._title_pixmap = icons.pixmap('archive')
+                else:
+                    self._title_pixmap = _container_pixmap(volume, path, depth)
+            except Exception:
+                self._title_pixmap = None
         self._hilited = True
         self._pressed = k.wNoHit
         self._last_name: str | None = None
@@ -589,8 +654,8 @@ class FilerWindow(_Hosted):
         else:
             title = self.path[-1] if self.path else self.volume.name
         return chrome.Frame(kind=WindowKind.DOCUMENT, title=title,
-                            title_icon=self._title_icon, hilited=self._hilited,
-                            go_away=True, pressed=self._pressed)
+                            title_icon=self._title_icon, title_pixmap=self._title_pixmap,
+                            hilited=self._hilited, go_away=True, pressed=self._pressed)
 
     def content_size(self) -> tuple[int, int]:
         return (getattr(self, '_content_width', CONTENT[0]), CONTENT[1])

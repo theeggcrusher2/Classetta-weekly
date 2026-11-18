@@ -22,7 +22,7 @@ disktracker = "disktracker.__main__:main"
 include = ["macrt*", "disktracker*"]
 
 [tool.setuptools.package-data]
-"macrt.ui" = ["fonts/*"]
+"macrt.ui" = ["fonts/*", "icons/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
