@@ -370,3 +370,67 @@ def test_a_bin_with_a_cue_sidecar_lists_from_the_directory(iso_image: Path,
     hello = files['TESTISO:HELLO.TXT']
     assert hello._node._read == {}
     assert hello.data[:1] != b'h'
+
+# -- The 4.6 invariants ------------------------------------------------------
+
+def test_index_hfs_desktop_files_are_left_out(tmp_path: Path):
+    v = machfs.Volume()
+    v.name = 'DesktopDisk'
+    for name in ('Desktop', 'Desktop DB', 'Desktop DF'):
+        f = machfs.File()
+        f.data = b'desktop'
+        v[name] = f
+    keep = machfs.File()
+    keep.data = b'hello'
+    keep.rsrc = b'world!'
+    keep.crdate, keep.mddate = 1000000, 2000000
+    v['readme.txt'] = keep
+    path = tmp_path / 'desktop.hfs'
+    path.write_bytes(v.write(800 * 1024))
+    items = index_image(path)
+    names = {i.name for i in items[1:]}
+    assert 'Desktop' not in names
+    assert 'Desktop DB' not in names
+    assert 'Desktop DF' not in names
+    readme = next(i for i in items if i.name == 'readme.txt')
+    assert readme.size == len(b'hello') + len(b'world!')
+
+
+def test_index_hfsplus_invariants(tmp_path: Path):
+    import unicodedata
+    from macrt.macfile import load_volume
+    entries = [
+        {'kind': 'file', 'name': 'readme.txt', 'type': b'TEXT', 'creator': b'ttxt',
+         'data': b'hello', 'rsrc': b'1234567'},
+        {'kind': 'file', 'name': 'Desktop', 'data': b'D', 'rsrc': b''},
+        {'kind': 'file', 'name': 'Desktop DB', 'data': b'DB', 'rsrc': b''},
+        {'kind': 'file', 'name': 'Desktop DF', 'data': b'DF', 'rsrc': b''},
+        {'kind': 'file', 'name': '.DS_Store', 'data': b's', 'fdflags': 0x4000},
+        {'kind': 'folder', 'name': '.Trashes', 'frflags': 0x4000},
+        {'kind': 'file', 'name': 'Hidden', 'parent': '.Trashes', 'data': b'h'},
+        {'kind': 'file', 'name': unicodedata.normalize('NFD', 'Café au lait.txt'),
+         'data': b'x'},
+        {'kind': 'file', 'name': '🎉 party.txt', 'data': b'y'},
+    ]
+    path = tmp_path / 'invariants.hfs+'
+    path.write_bytes(_hfsplus_image('Invariants', entries))
+    items = index_image(path)
+    names = [i.name for i in items[1:]]
+    for gone in ('Desktop', 'Desktop DB', 'Desktop DF', '.DS_Store', '.Trashes', 'Hidden'):
+        assert gone not in names
+    readme = next(i for i in items if i.name == 'readme.txt')
+    assert readme.size == 5 + 7            # both forks, no fork read
+
+    # The catalog's names are the ones the Filer lists: both views come
+    # from the same reader, so NFD names, unencodable names and the
+    # visibility rules all agree.
+    vol = load_volume(path)
+    def walk(node):
+        out = []
+        for n, child in node.items():
+            out.append(n)
+            if isinstance(child, machfs.Folder):
+                out.extend(walk(child))
+        return out
+    from collections import Counter
+    assert Counter(walk(vol)) == Counter(names)

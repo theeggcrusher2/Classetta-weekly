@@ -301,7 +301,7 @@ Subtasks:
       4.2 carries the note. If any caller of `build_dtc` depends on raw
       GMT, this must be an adapter-side decision, not an accident — check
       before landing 4.3.
-- [ ] **4.6** Invariants test, in `disktracker/tests/test_index.py`, on
+- [x] **4.6** Invariants test, in `disktracker/tests/test_index.py`, on
       the generated fixtures, asserting:
       - catalog contains no invisible entries and no `Desktop`,
         `Desktop DB` or `Desktop DF` (HFS and HFS+ images both);
