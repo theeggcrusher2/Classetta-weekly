@@ -425,10 +425,10 @@ item with `_find_first_item` and handles variable suffixes.
 
 Subtasks:
 
-- [ ] **6.1** Make `lazy.py`'s disk-record walk use the same
+- [x] **6.1** Make `lazy.py`'s disk-record walk use the same
       `_find_first_item` logic as `parse_dtc` (import it or factor a
       shared helper), so the suffix length varies per record.
-- [ ] **6.2** Test: hand-written catalog bytes with a disk record whose
+- [x] **6.2** Test: hand-written catalog bytes with a disk record whose
       suffix is larger than 308 bytes (an image-sourced record), built
       inline in the test; assert the suffix round-trips intact and the
       items after it parse. Also assert the physical-media size (308)
