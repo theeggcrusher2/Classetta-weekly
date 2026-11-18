@@ -408,10 +408,10 @@ Subtasks:
 - [x] **5.5** Machine icon rule, as a test: nothing may grow `MODELS`
       without a logo — a test that fails when a `MODELS` entry has no
       About logo. *Blocked by 5.4.* Done in `eff4624`.
-- [ ] **5.6** Tests: paint smoke tests at depth 8 for each surface (a
+- [x] **5.6** Tests: paint smoke tests at depth 8 for each surface (a
       pixmap is handed to chrome, or the rows draw one); depth 1
       unchanged; About opens on every model in `MODELS`.
-      *Blocked by 5.2, 5.3, 5.4, 5.5.*
+      *Blocked by 5.2, 5.3, 5.4, 5.5.* Done in `bcd67f9`.
 
 ## 6. lazy.py parses the disk-record suffix with a hardcoded 308 bytes
 
