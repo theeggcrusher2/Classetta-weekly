@@ -357,20 +357,24 @@ surfaces still draw 1-bit:
   and IIci fall back to the Plus logo, and both constants are the only
   two logos that exist.
 
-Open questions, to settle before 5.2 — stop and ask for 5.1's report
-first:
+Settled (all Recommended, user, via 5.1):
 
-- Where the colour generic art comes from: new bundled assets with
-  recorded licensing (like `fonts/`), a colour map applied to the 1-bit
-  art at draw time, or runtime-generated art. The generic disk, folder,
-  archive, document and catalog icons have no colour counterparts
-  anywhere today. (5.1 reports; the user decides.)
-- The System row's colour source: the running System file's own icon —
-  it is a Mac file with an icon, like any other — or a bundled stand-in.
-  Decide with 5.3.
-- Whether Disk Tracker catalog titles (`CATALOG_ICON`) get colour art on
-  the same rule, and whether the viewer windows' 16-pixel pixmaps set
-  the size for all of this.
+- The colour generic art is original in-repo art under `macrt/ui/icons/`,
+  native 16/32 pairs. No colour map on 1-bit at draw time, no
+  runtime-generated art.
+- The new art carries a licence file next to it, the way `fonts/` carries
+  `OFL-1.1.txt` — scope: the art only, not a project-wide relicence.
+- The About Classetta System row colours come from the running System
+  file's own icon through the same `_fork_color_icon` path the
+  application rows use; a bundled stand-in is drawn when there is none
+  (the built-in empty System always takes the stand-in).
+- `CATALOG_ICON` gets colour art on the same rule as the other container
+  icons, and the viewer windows' 16-pixel pixmaps set the size for all
+  of this (16x16 for titles/rows; the About logo stays 32x32).
+- IIx and IIci get their own art, 1-bit and colour both, drawn
+  in-repo — the Plus-logo 1-bit fallback at depth <= 2 ends.
+- `GENERIC_APP_ICON` gains a native 16x16 colour sibling (slight art
+  redraw for the even width); the 1-bit 15x15 stays untouched.
 
 Note: `AboutClassettaWindow` is built with no title icon ("Build the
 window - no title icon"); that stays as it is unless the work says
