@@ -5,7 +5,9 @@ Classic Mac OS was monochrome.  Every widget pulls from here so that
 restyling the whole runtime is a single-file change.
 
 Drop Chicago/Geneva lookalikes (e.g. ChicagoFLF) as .ttf/.otf files into
-macrt/ui/fonts/ and they are picked up automatically.
+macrt/ui/fonts/ and they are picked up automatically.  Chicago stand-ins
+serve the places the Mac draws in Chicago; where the Mac uses Geneva and
+no Geneva lookalike is bundled, the Helvetica fallback is used instead.
 """
 
 from __future__ import annotations
@@ -109,7 +111,9 @@ def _try_font(preferences: list[tuple[str, int]], fallback: tuple[str, int],
 
 
 SYSTEM_FONTS = [("Chicago", 12), ("ChicagoFLF", 12), ("Charcoal", 12)]
-APP_FONTS = [("Geneva", 12), ("Chicago", 12), ("ChicagoFLF", 12)]
+# Where the Mac uses Geneva, a Chicago lookalike must not stand in: the
+# Helvetica fallback is used instead.
+APP_FONTS = [("Geneva", 12)]
 FALLBACK_FONT = ("Helvetica", 13)
 
 
