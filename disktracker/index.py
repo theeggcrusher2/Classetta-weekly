@@ -124,10 +124,22 @@ def _read_fs(data: bytes, stem: str):
     if len(data) >= 1026 and data[1024:1026] == b'\xd2\xd7':
         raise ValueError("MFS volumes are not supported (their folders "
                          "live in the Finder's Desktop file)")
-    if len(data) > 16 * ISO_SECTOR and data[16 * ISO_SECTOR] == 1 \
-            and data[16 * ISO_SECTOR + 1:16 * ISO_SECTOR + 6] == b'CD001':
-        return _read_iso(data, stem)
-    raise ValueError("unsupported disk image (it is neither HFS, HFS Plus nor ISO 9660)")
+    try:
+        iso_ok = len(data) > 16 * ISO_SECTOR and data[16 * ISO_SECTOR] == 1 \
+            and data[16 * ISO_SECTOR + 1:16 * ISO_SECTOR + 6] == b'CD001'
+        if iso_ok:
+            try:
+                return _read_iso(data, stem)
+            except Exception:
+                pass                            # an ISO this reader can't read: try UDF
+        from macrt.udf import read_udf
+        return _volume_tree(read_udf(bytes(data)))
+    except Exception as e:
+        # A named UDF refusal (2.x, a virtual allocation table, …) reaches
+        # the caller; anything else is not a disc this tracker reads.
+        if isinstance(e, ValueError) and str(e).startswith("the UDF disc"):
+            raise
+        raise ValueError("unsupported disk image (it is neither HFS, HFS Plus, ISO 9660 nor UDF)") from None
 
 
 def _emit(node: dict, depth: int) -> list[Item]:

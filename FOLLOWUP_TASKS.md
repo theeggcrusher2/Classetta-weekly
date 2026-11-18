@@ -208,15 +208,15 @@ Subtasks:
       ISO 9660 name field when a record carries none. CL/PL/RE parsing
       included only if the open question settles that way. *Blocked by
       the SUSP open question.*
-- [ ] **3.3** The names flow to both readers: the Filer's fallback and
+- [x] **3.3** The names flow to both readers: the Filer's fallback and
       the Disk Tracker's catalogs get Rock Ridge names from the one
       reader. *Blocked by 3.2.*
-- [ ] **3.4** `macrt/udf.py`: volume descriptors, file set, directory
+- [x] **3.4** `macrt/udf.py`: volume descriptors, file set, directory
       tree, presented as a machfs view — names, sizes, dates, files read
       on demand; UDF versions past the decided ladder refused by name;
       packed-sector DVDs refused by name if out of scope. *Blocked by the
       UDF open question.*
-- [ ] **3.5** Fixtures and tests: the ISO side byte-by-byte like
+- [x] **3.5** Fixtures and tests: the ISO side byte-by-byte like
       `disktracker/tests/test_index.py`'s generated fixture; the UDF side
       built the same way; both Filer-and-tracker listing checks.
       *Blocked by 3.3 and 3.4.*
