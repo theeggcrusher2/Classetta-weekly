@@ -220,7 +220,7 @@ Subtasks:
       `disktracker/tests/test_index.py`'s generated fixture; the UDF side
       built the same way; both Filer-and-tracker listing checks.
       *Blocked by 3.3 and 3.4.*
-- [ ] **3.6** `docs/disk-images.md` updated for whatever lands, fixing
+- [x] **3.6** `docs/disk-images.md` updated for whatever lands, fixing
       its stale claim that ISO 9660 is "not parsed" in the same pass.
       *Blocked by 3.3 and 3.4.*
 

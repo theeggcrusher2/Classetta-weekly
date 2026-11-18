@@ -305,8 +305,9 @@ can read them in its own way.
   dates made local, hard links made the files they link to, and names
   HFS can't hold cut short and given their catalog node ID. A disc with
   no Mac volume but an ISO 9660 one opens as a mount holding the files
-  its directories list — as ISO 9660 (latin-1 names, `;1` stripped),
-  through the same ISO reader the Disk Tracker uses, not Rock Ridge. A MOOF image
+  its directories list, through `macrt.iso9660` — ISO 9660 names, or
+  Rock Ridge `NM` names when the disc carries them — and a UDF 1.0x
+  disc opens the same way through `macrt.udf`. A MOOF image
   of a floppy's tracks is decoded to its sectors first (`macrt.moof`):
   the GCR bytes found in each track's bits, and each sector's three bytes
   to four of them, unmixed from the checksum that runs through them. The

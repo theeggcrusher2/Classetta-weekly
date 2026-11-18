@@ -8,7 +8,7 @@ will and will not open.
 
 | Format | Reader | Notes |
 | --- | --- | --- |
-| Raw HFS/MFS/HFS+ volume, Apple partition map, CD-ROM | `macrt.macfile` | Detected from the volume header or partition map; a raw CD image (`.iso`, `.cdr`, `.toast`, or 2352-byte Mode-1 sectors) mounts as a CD-ROM: its HFS/HFS+ contents, or — for a disc with no Mac volume — its ISO 9660 files, read through the `disktracker.index` ISO reader (ISO names, not Rock Ridge's). |
+| Raw HFS/MFS/HFS+ volume, Apple partition map, CD-ROM | `macrt.macfile` | Detected from the volume header or partition map; a raw CD image (`.iso`, `.cdr`, `.toast`, or 2352-byte Mode-1 sectors) mounts as a CD-ROM: its HFS/HFS+ contents, or — for a disc with no Mac volume — its ISO 9660 files, read through `macrt.iso9660` (Rock Ridge NM names when the disc carries them), or its UDF 1.x files, read through `macrt.udf`. |
 | DiskCopy 4.2 (`.dsk`) | `macrt.macfile` | The 84-byte header is stripped. |
 | MOOF/NDIF track images | `macrt.moof` | Tags and tracks are read as stored. |
 | CHD (`.chd`) | `macrt.chd` | Versions 3, 4 and 5; compression none, zlib and LZMA. |
@@ -23,6 +23,16 @@ will and will not open.
 
 All of these are read in full into memory before the volume readers see
 them; files inside a volume are still read on demand.
+
+A CD-ROM with no Mac volume opens either way it is mastered: through
+`macrt.iso9660` as ISO 9660 — names in latin-1 with `;1` stripped — or
+through `macrt.udf` as UDF 1.01–1.02 (ECMA-167 / ISO/IEC 13346): names,
+sizes, dates, files read on demand. Rock Ridge is honoured in part: a
+directory record's SUSP entries are scanned tolerantly and an `NM` entry
+gives the entry's real name — case and long names kept — falling back to
+the ISO 9660 name field when a record carries none; split `NM` entries
+concatenate. Both readers also feed the Disk Tracker's catalogs, so the
+Filer and the tracker list the same names.
 
 NDIF images are detected through their resource fork, not their data fork
 or name: the chunk map lives in the `bcem` resource 128. The image opens
@@ -62,17 +72,21 @@ compress is stored raw (block length `0xffff`) and read the same way.
 ## Unsupported
 
 These formats are recognised as out of scope for now. They are not opened,
-and a file in one of them will not browse as a volume.
+or — where noted — only in part, and a file in one of them will not
+browse as a volume.
 
 **CD images**
 
-- **Rock Ridge extensions and UDF**: not parsed. ISO 9660 itself is read:
-  a disc with no Mac volume opens with the files its directories hold
-  (via the `disktracker.index` ISO reader, the same one the Disk Tracker
-  uses), but as ISO 9660 — names in latin-1 with `;1` stripped, no
-  Rock Ridge NM entries, so a disc mastered with them shows its ISO
-  names. UDF (ECMA-167), which common DVDs with no Mac volume carry, is
-  not read at all; such a disc mounts with nothing to browse.
+- **Rock Ridge extensions, in part**: only `NM` entries are parsed. A
+  disc mastered with relocated directory hierarchies (`CL`/`PL`/`RE`)
+  shows those entries under their ISO 9660 names, and any other SUSP
+  entry is ignored.
+- **UDF, past the 1.0x baseline**: refused by name. The reader implements
+  ECMA-167 / ISO/IEC 13346 1.01–1.02 only; a UDF 2.00 or later revision,
+  a virtual allocation table, sparable and metadata partition maps, any
+  other type 2 partition map, an ICB strategy other than 4, sparse or
+  allocation-extent descriptors, and anything on a packed-sector disc
+  are each refused with their own message.
 - **Multi-track CD images with audio tracks**: not played or read. The
   driver answers the audio calls with `paramErr`, and a disc's audio
   tracks are never exposed to the running program.
