@@ -199,7 +199,7 @@ Open questions, to settle before implementing:
 
 Subtasks:
 
-- [ ] **3.1** *Decide and move `_read_iso`.* Move `disktracker.index`'s
+- [x] **3.1** *Decide and move `_read_iso`.* Move `disktracker.index`'s
       `_read_iso`/`_iso_children` into macrt (shared location or
       `macrt/macfile.py`), both callers importing downward. *Blocked by
       the joint task-3/4 decision; coordinate with 4.3.*
