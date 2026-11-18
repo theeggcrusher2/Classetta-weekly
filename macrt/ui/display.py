@@ -608,6 +608,26 @@ class Display(QObject):
         w, h = self.size
         return Rect(self.desk_top + t + 3, l + 3, h - b - s - 3, w - r - s - 3)
 
+    def place_aux_window(self, win, over: FilerWindow | None = None) -> None:
+        """Centre `win` on `over` in Mac coordinates — or on the screen when
+        there is none — and keep it on the screen: its top is never behind
+        the menu bar, and a window too tall for the space below the bar
+        keeps its bottom while that keeps the top below the bar."""
+        screen = self.screen_bounds
+        if over is not None:
+            o = over.mac_origin()
+            v = o.v + (over.height() - win.height()) // 2
+            h = o.h + (over.width() - win.width()) // 2
+        else:
+            v = self.desk_top + (screen.bottom - self.desk_top - win.height()) // 2
+            h = (screen.right - win.width()) // 2
+        bottom_keep = screen.bottom - 8 - win.height()
+        # A window taller than the desk clips at the bottom; one taller than
+        # the screen clips at the bottom too — never at the bar.
+        v = min(max(v, self.desk_top), max(self.desk_top, bottom_keep))
+        h = min(max(h, 4), max(4, screen.right - 8 - win.width()))
+        win.place(Point(v, h))
+
     # =====================================================================
     # Processes
     # =====================================================================
@@ -1041,6 +1061,7 @@ class Display(QObject):
         win = AboutClassettaWindow(self)
         self.about_windows.append(win)
         self.front_aux_window = win
+        self.place_aux_window(win, self.front_filer)
         win.show()
         win.raise_()
         win.activateWindow()
@@ -1284,19 +1305,22 @@ class Display(QObject):
         self.system.input.modifiers(self.input.modifiers)
 
     def mouse_down(self, obj: QWidget) -> None:
-        self.front_aux_window = None
         gpos = self.input.global_pos
         if self.tracker is not None:
+            # A press in a menu that is down belongs to the menu, not to a
+            # window: the auxiliary window in front stays front.
             self.tracker.press(gpos)
             return
         owner, widget = self._owner(obj)
         if owner is self.filer_menus:
             # The Filer's menus, which no process waits on: the Display pulls
             # them down and takes the pick itself, as it does the Application
-            # menu's.
+            # menu's.  The bar is not a place a window comes forward, so an
+            # auxiliary window in front stays front.
             self._start_tracker(MenuTracker(self, widget, Future(),
                                             self.config.sticky_menus))
             return
+        self.front_aux_window = None
         if owner is not None and owner not in self.processes:
             # A window of an app that has quit, not yet gone from the screen.
             self._swallow_release = True

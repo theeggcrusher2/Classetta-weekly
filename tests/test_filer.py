@@ -710,6 +710,28 @@ def test_file_close_closes_the_front_about_window(harness):
     assert win in h.d.filer_windows             # the Filer stays up
 
 
+def test_pressing_the_menu_bar_keeps_the_about_window_front(harness):
+    """A press on the bar opens the menu; it is not a place a window comes
+    forward, so a Filer-menu press must not drop the auxiliary window
+    behind the Filer — File > Close then closes the About window."""
+    h = harness(disks=[_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    about = h.d.show_about_classetta()
+    h.settle()
+    bar = h.d.global_bar
+    assert bar is not None and bar.process is h.d.filer_menus
+    h.d.mouse_down(bar)
+    assert h.d.front_aux_window is about
+    h.d.mouse_up()
+    h.settle()
+    h.d.filer_menu_choice(FILE_MENU_ID, 13)     # File > Close
+    h.settle()
+    assert about not in h.d.about_windows
+    assert h.d.front_aux_window is None
+    assert win in h.d.filer_windows             # the Filer stays up
+
+
 def test_file_close_closes_the_front_get_info_window(harness):
     h = harness(disks=[_volume()])
     win = h.d.open_filer(h.d.config.disks[0])
