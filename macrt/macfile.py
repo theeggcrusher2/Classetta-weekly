@@ -1165,7 +1165,7 @@ def load_volume(source: str | os.PathLike | bytes | mmap.mmap) -> machfs.Volume:
             vol = _read_hfs(data)
     except Exception as hfs_e:
         try:
-            from disktracker.index import _read_iso
+            from .iso9660 import _read_iso
             vol_name, cr, md, root = _read_iso(bytes(data), stem)
             vol = machfs.Volume()
             vol.name = vol_name
