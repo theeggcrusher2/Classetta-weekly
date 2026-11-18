@@ -144,7 +144,7 @@ Subtasks:
       track's 2048-byte user sectors, Mode 1 and Mode 2 Form 1; refuse
       DVD structure, Mode 2 Form 2 / raw sectors, and multiple data
       tracks by name, the way `.mdf` refuses its cases today.
-- [ ] **2.3** Detection and wiring in `macrt/macfile.py`: a `.cue` sheet
+- [x] **2.3** Detection and wiring in `macrt/macfile.py`: a `.cue` sheet
       discovers its sibling `.bin` (and nested pairs of the `_mdf_pair`
       kind), mounts the data track through the CD-ROM path. *Blocked by
       2.1, 2.2 and the open questions above.*
