@@ -287,14 +287,14 @@ Subtasks:
       - ISO 9660: as decided with task 3 (3.1); until then `_read_iso`
         stays untouched here.
       *Blocked by 4.2 and the joint `_read_iso` decision.*
-- [ ] **4.4** Delete the tracker's copies (`_read_hfs`, `_read_hfsplus`,
+- [x] **4.4** Delete the tracker's copies (`_read_hfs`, `_read_hfsplus`,
       `_hfsplus_*`, `_extent_pairs`, `_records`, `_node`, `_leaf_records`)
       and `_find_hfs` if unused after 4.3. Rewrite `index.py`'s "Standard
       library only" header note ("MFS volumes are recognized and refused")
       to say what DT now depends on: `machfs` and `macrt.hfsplus` —
       `machfs` is already a hard dependency of the emulator, both live in
       this project. *Blocked by 4.3.*
-- [ ] **4.5** Dates: `read_hfsplus` applies `_gmt_to_local`, so
+- [x] **4.5** Dates: `read_hfsplus` applies `_gmt_to_local`, so
       created/modified in HFS+-sourced catalogs move from raw GMT (today)
       to local time — the same values the Filer's Get Info shows, and
       what a real Mac displays. Accept this; the adapter's comment from
