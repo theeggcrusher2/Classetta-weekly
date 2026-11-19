@@ -163,6 +163,30 @@ def _n_volume() -> machfs.Volume:
     return v
 
 
+def _many_volume(n: int = 40) -> machfs.Volume:
+    """A disk with more files than a short window can show at once."""
+    v = machfs.Volume()
+    v.name = "Browse"
+    for i in range(n):
+        f = machfs.File()
+        f.type, f.creator, f.data = b"TEXT", b"TEST", b"hi"
+        v[f"File{i:02d}"] = f
+    return v
+
+
+def _drag_to(h, box, target) -> None:
+    """Move the mouse to the absolute Mac point target = (h, v).
+
+    Unlike dragging in box-local coordinates the box's own live move
+    during the resize does not shift what it maps to, so the deltas
+    accumulate like a real pointer's."""
+    from macrt.toolbox.types import Point
+
+    origin = box.mapToGlobal(QPoint(0, 0))
+    g = h.d.global_from_mac(Point(target[1], target[0]))
+    QTest.mouseMove(box, g - origin)
+
+
 # -- what the command line asks for ---------------------------------------
 def test_browse_leaves_every_application_to_the_window(tmp_path):
     apps, disks = open_disks([_disk(tmp_path)], browse=True)
@@ -386,21 +410,139 @@ def test_the_zoom_box_sizes_the_window_to_its_contents_and_back(harness):
 
 
 def test_dragging_the_size_box_resizes_the_window(harness):
-    h = harness(disks=[_n_volume()])
+    # a wide desk gives room for the drag: the window launches near the
+    # right edge of the default screen, which caps the growth
+    h = harness(disks=[_n_volume()], screen_size=(1200, 800))
     win = h.d.open_filer(h.d.config.disks[0])
     h.settle()
     before = (win.width(), win.height())
+    pos = win.pos()
     box = win._grow_box
     c = box.rect().center()
+    press = h.mac(box, c)
     QTest.mousePress(box, LB, NO_MODS, c)
-    QTest.mouseMove(box, c + QPoint(60, 40))
+    _drag_to(h, box, (press[0] + 60, press[1] + 40))
     # the box moved with the window, so its own centre is now the
     # dragged corner: releasing there is releasing on the size box
     QTest.mouseRelease(box, LB, NO_MODS, box.rect().center())
     h.settle()
     assert (win.width(), win.height()) == (before[0] + 60, before[1] + 40)
+    assert win.pos() == pos                     # the top left is the anchor
     # Name followed the width: the viewport minus the fixed Size and Kind
     assert win.tree.columnWidth(0) == win.tree.viewport().width() - 140
+
+
+def test_the_size_box_ignores_a_shrink_past_the_minimum(harness):
+    h = harness(disks=[_n_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    box = win._grow_box
+    c = box.rect().center()
+    press = h.mac(box, c)
+    QTest.mousePress(box, LB, NO_MODS, c)
+    _drag_to(h, box, (press[0] - 4000, press[1] - 4000))   # far past the minimum
+    QTest.mouseRelease(box, LB, NO_MODS, box.rect().center())
+    h.settle()
+    assert win._content_width == 200          # the minimum width is ignored below it
+    assert win._content_height == 100         # and so is the minimum height
+
+
+def test_the_size_box_stops_at_the_screens_right_and_bottom_edges(harness):
+    h = harness(disks=[_n_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    box = win._grow_box
+    c = box.rect().center()
+    press = h.mac(box, c)
+    QTest.mousePress(box, LB, NO_MODS, c)
+    _drag_to(h, box, (press[0] + 4000, press[1] + 4000))   # far past the screen edge
+    QTest.mouseRelease(box, LB, NO_MODS, box.rect().center())
+    h.settle()
+    origin = win.mac_origin()
+    f = win.frame()
+    overhead_h, overhead_v = chrome.structure_size(f, 0, 0)
+    bottom = origin.v + overhead_v + win._content_height + chrome.shadow(f)
+    right = origin.h + overhead_h + win._content_width + chrome.shadow(f)
+    assert right <= h.d.size[0]                # the window never draws past the right edge
+    assert bottom <= h.d.size[1]               # or past the bottom edge
+
+
+def test_a_twitch_on_the_size_box_keeps_the_standard_state(harness):
+    h = harness(disks=[_many_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    opened = (win._content_width, win._content_height)
+    zb = chrome.zoom_box_rect(win.frame(), win.width() - chrome.shadow(win.frame()))
+    h.click(*h.mac(win, zb.center()))
+    h.settle()
+    assert win._zoomed
+    box = win._grow_box
+    c = box.rect().center()
+    press = h.mac(box, c)
+    QTest.mousePress(box, LB, NO_MODS, c)
+    # a sub-seven-pixel drag does not change the user state
+    for target in ((press[0] + 1, press[1]),
+                   (press[0] + 4, press[1]),
+                   (press[0] + 6, press[1]),
+                   (press[0] + 6, press[1] + 3)):
+        _drag_to(h, box, target)
+    QTest.mouseRelease(box, LB, NO_MODS, box.rect().center())
+    h.settle()
+    assert win._zoomed                         # still the standard state
+    zb = chrome.zoom_box_rect(win.frame(), win.width() - chrome.shadow(win.frame()))
+    h.click(*h.mac(win, zb.center()))          # toggles back to the user state
+    h.settle()
+    assert (win._content_width, win._content_height) == opened
+    zb = chrome.zoom_box_rect(win.frame(), win.width() - chrome.shadow(win.frame()))
+    h.click(*h.mac(win, zb.center()))          # back to the standard state
+    h.settle()
+    assert win._zoomed
+    box = win._grow_box
+    c = box.rect().center()
+    press = h.mac(box, c)
+    QTest.mousePress(box, LB, NO_MODS, c)
+    _drag_to(h, box, (press[0] + 7, press[1] + 7))   # seven pixels do change it
+    QTest.mouseRelease(box, LB, NO_MODS, box.rect().center())
+    h.settle()
+    assert not win._zoomed                       # left the standard state
+    assert (win._content_width, win._content_height) != opened
+
+
+def test_the_zoom_stays_on_a_short_screen(harness):
+    h = harness(disks=[_many_volume()], screen_size=(720, 300))
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    top = win.mac_origin().v                     # whatever the launch placed
+    zb = chrome.zoom_box_rect(win.frame(), win.width() - chrome.shadow(win.frame()))
+    h.click(*h.mac(win, zb.center()))
+    h.settle()
+    assert win._zoomed
+    f = win.frame()
+    bottom = win.mac_origin().v + win._content_height + \
+        chrome.structure_size(f, win._content_width, 0)[1] + chrome.shadow(f)
+    assert bottom <= h.d.size[1]               # capped at the desk
+    assert win.mac_origin().v >= top           # it moved no further down
+    if h.d.config.menu_bar == "global":
+        from macrt.ui import theme
+        assert win.mac_origin().v >= theme.MENU_BAR_HEIGHT
+
+
+def test_an_inactive_window_hides_its_scroll_bars(harness):
+    h = harness(disks=[_many_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    assert win.tree.verticalScrollBarPolicy() != \
+        Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    win._focus_changed(win, None)              # focus left the window
+    h.settle()
+    assert not win._hilited
+    assert win.tree.verticalScrollBarPolicy() == \
+        Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    win._focus_changed(None, win)              # focus came back
+    h.settle()
+    assert win._hilited
+    assert win.tree.verticalScrollBarPolicy() == \
+        Qt.ScrollBarPolicy.ScrollBarAsNeeded
 
 
 def test_the_header_wears_the_lock_while_the_window_is_view_only(harness):

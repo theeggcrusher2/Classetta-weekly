@@ -861,8 +861,8 @@ class FilerWindow(_Hosted):
             self.display.close_filer(self)
 
     def _grow_start(self) -> None:
-        # Resizing by hand leaves the standard (zoomed) state, as on a Mac.
-        self._zoomed = False
+        # Leaving the standard state waits for a real resize: the HIG
+        # counts seven pixels, a twitch on the size box does not.
         self._grow = (self.display.input.mac_pos, self._content_width,
                       self._content_height)
 
@@ -872,9 +872,22 @@ class FilerWindow(_Hosted):
             return
         grab, w0, h0 = g
         pt = self.display.mac_from_global(gpos)
-        w = max(200, w0 + pt.h - grab.h)   # room for Name, Size and Kind
-        h = max(100, h0 + pt.v - grab.v)
+        f = self.frame()
+        l_r, t_b = chrome.structure_size(f, 0, 0)   # the frame around the content
+        s = chrome.shadow(f)
+        top = self.mac_origin().v
+        if self.display.config.menu_bar == "global":
+            top = max(top, theme.MENU_BAR_HEIGHT)
+        # The maximum comes from the display, as the HIG asks: the window
+        # never draws past its right or bottom edge. The minimum wins
+        # when a screen is too small for both.
+        max_w = self.display.size[0] - self.mac_origin().h - s - l_r
+        max_h = self.display.size[1] - top - s - t_b
+        w = min(max(200, w0 + pt.h - grab.h), max(max_w, 200))  # room for Name, Size and Kind
+        h = min(max(100, h0 + pt.v - grab.v), max(max_h, 100))
         if (w, h) != (self._content_width, self._content_height):
+            if self._zoomed and max(abs(w - w0), abs(h - h0)) >= 7:
+                self._zoomed = False    # seven pixels change the user state
             self._content_width, self._content_height = w, h
             self._relayout()
 
@@ -925,7 +938,8 @@ class FilerWindow(_Hosted):
         height = max(100, min(fit, max(cap, 100)))
         # Keep the window on the screen, moving as little as possible:
         # the top left stays where it is, so only the size is clamped.
-        cap_w = self.display.size[0] - self.mac_origin().h - chrome.shadow(f)
+        l_r, _ = chrome.structure_size(f, 0, 0)
+        cap_w = self.display.size[0] - self.mac_origin().h - chrome.shadow(f) - l_r
         width = min(width, max(cap_w, 200))
         return width, height
 
@@ -938,6 +952,12 @@ class FilerWindow(_Hosted):
     def _set_hilited(self, hilited: bool) -> None:
         if hilited != self._hilited:
             self._hilited = hilited
+            # The HIG hides a scroll bar's elements in an inactive
+            # window; Qt can only show or hide the whole bar.
+            policy = (Qt.ScrollBarPolicy.ScrollBarAsNeeded if hilited
+                      else Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.tree.setVerticalScrollBarPolicy(policy)
+            self.tree.setHorizontalScrollBarPolicy(policy)
             self._relayout()
 
     def changeEvent(self, event):  # noqa: N802
