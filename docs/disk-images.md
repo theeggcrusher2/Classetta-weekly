@@ -103,9 +103,7 @@ browse as a volume.
 - **parallels (PRD)**: Parallels' own disk format. Not implemented.
 - **bochs, cloop, qcow (other versions)**: not implemented.
 
-- **MAME**: CHD files are supported; MAME has no other container format.
 
-**Refused by the readers that exist**
 
 - Encrypted qcow2 images (AES or LUKS).
 - qcow2 images that need a backing file or an external data file.
