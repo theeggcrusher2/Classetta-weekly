@@ -103,9 +103,8 @@ browse as a volume.
 - **parallels (PRD)**: Parallels' own disk format. Not implemented.
 - **bochs, cloop, qcow (other versions)**: not implemented.
 
+**Refused by the readers that exist**
 
-
-- Encrypted qcow2 images (AES or LUKS).
 - qcow2 images that need a backing file or an external data file.
 - qcow2 images with the dirty, corrupt, extended-L2 or non-deflate
   compression incompatible features set.
