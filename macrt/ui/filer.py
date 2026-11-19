@@ -19,6 +19,7 @@ changed.  FilerOptions.writable is how a window says otherwise.
 from __future__ import annotations
 
 import copy
+import os
 import time
 from concurrent.futures import Future
 from dataclasses import dataclass, replace
@@ -36,7 +37,7 @@ from PyQt6.QtWidgets import (
 from pathlib import Path
 
 from ..macfile import (ArchiveFolder, ContainerFolder, HostFolder, LazyArchiveFile,
-                       MacFile, MemoryFolder, VolumeFolder,
+                       MacFile, MemoryFolder, ToolboxFolder, VolumeFolder,
                        alias_open, alias_original, archive_entries, archive_kind,
                        archive_name, container_contents, creator_application,
                        extract_archive, image_kind,
@@ -306,11 +307,26 @@ def item_icon(f: MacFile, *, large: bool = False) -> list[str] | None:
     a system file's declared family — else None for an item with no icon
     of its own."""
     if f.type == FOLDER:
-        volume = getattr(f.folder, "volume", None)
+        folder = getattr(f, "folder", None)
+        if isinstance(folder, ToolboxFolder):
+            # a folder on the machine's own volume: the Icon file inside
+            try:
+                d = folder._node(folder.path + (f.name,))
+            except KeyError:
+                return None
+            icon = next((n for n in d.items()
+                         if n.name.lower() == ICON_FILE.lower()), None)
+            if icon is not None and not getattr(icon, "is_dir", False):
+                try:
+                    return _icon_from(bytes(icon.forks()[1]), large)
+                except Exception:
+                    return None
+            return None
+        volume = getattr(folder, "volume", None)
         if volume is None:
             return None
         node = volume
-        for part in getattr(f.folder, "path", ()):
+        for part in getattr(folder, "path", ()):
             node = node[part]
         try:
             return _custom_icon(node[f.name], large=large)
@@ -418,6 +434,9 @@ def _container_icon(volume: machfs.Volume, path: tuple[str, ...] = ()) -> list[s
     """What the title bar shows for the container the window lists: the
     container's own icon when it has one, else a generic for what the
     container is — the volume (its disk image), a folder, or a file."""
+    if isinstance(volume, ToolboxFolder):
+        # the startup disk: a volume like any other to the eye
+        return CONTAINER_ICONS["folder" if path else "volume"]
     node = volume
     for part in path:
         node = node[part]
@@ -2368,6 +2387,8 @@ def _browsable(vol):
     volume has none behind it: the in-memory startup disk apps see but
     the Filer has nothing to browse."""
     source = getattr(getattr(vol, "store", None), "source", None)
+    if source is None:
+        return ToolboxFolder(vol)   # the startup disk, live through the File Manager
     if isinstance(source, (machfs.Volume, MemoryFolder)):
         return source
     if isinstance(source, Path):
@@ -2429,44 +2450,64 @@ class FilerMenus:
         self._sync_disk_menu()
         return list(self.menus.values())
 
+    def _cwd(self) -> Path | None:
+        try:
+            return Path(os.getcwd())
+        except OSError:
+            return None
+
     def _sync_disk_menu(self) -> None:
         """The Disks menu shows the mounted volumes, in the order the
-        File Manager gives them to programs (PBGetVInfo by index), and is
-        rebuilt only when that set changes.  The startup disk has no
-        folder behind it, so its item is dimmed."""
+        File Manager gives them to programs (PBGetVInfo by index), then
+        the host's current working directory; it is rebuilt only when
+        that set changes."""
         fs = getattr(self.display, "system", None)
         volumes = fs.files.volumes if fs is not None else []
-        signature = tuple((v.vref, v.name) for v in volumes)
+        cwd = self._cwd()
+        signature = (tuple((v.vref, v.name) for v in volumes),
+                     None if cwd is None else str(cwd))
         if signature == self._disk_sig:
             return
         self._disk_sig = signature
-        self.menus[DISK_MENU_ID].items = [
-            MenuItem(v.name, enabled=_browsable(v) is not None) for v in volumes
-        ]
+        items = [MenuItem(v.name, enabled=_browsable(v) is not None) for v in volumes]
+        if cwd is not None:
+            items.append(MenuItem(cwd.name or str(cwd)))
+        self.menus[DISK_MENU_ID].items = items
 
     def disk_choice(self, item: int) -> None:
         """Select the item-th disk of the listing programs see and bring
         its root window to the front, opening it when it isn't open."""
         fs = getattr(self.display, "system", None)
         volumes = fs.files.volumes if fs is not None else []
-        if not 1 <= item <= len(volumes):
+        cwd = self._cwd()
+        if item == len(volumes) + 1 and cwd is not None:
+            browsable = HostFolder(cwd)
+        elif 1 <= item <= len(volumes):
+            browsable = _browsable(volumes[item - 1])
+        else:
             return
-        browsable = _browsable(volumes[item - 1])
         if browsable is None:
             return
-        if isinstance(browsable, HostFolder):
-            want = browsable.path.resolve()
-            for win in self.display.filer_windows:
-                if (isinstance(win.volume, HostFolder) and win.path == ()
-                        and win.volume.path.resolve() == want):
-                    self._front(win)
-                    return
-        else:
-            for win in self.display.filer_windows:
-                if win.volume is browsable and win.path == ():
-                    self._front(win)
-                    return
+        match = self._window_for(browsable)
+        if match is not None:
+            self._front(match)
+            return
         self.display.open_filer(browsable, ())
+
+    def _window_for(self, browsable) -> FilerWindow | None:
+        for win in self.display.filer_windows:
+            if win.path != ():
+                continue
+            vol = win.volume
+            if isinstance(browsable, (HostFolder,)):
+                if isinstance(vol, HostFolder) and Path(vol.path).resolve() == Path(browsable.path).resolve():
+                    return win
+            elif isinstance(browsable, ToolboxFolder):
+                if isinstance(vol, ToolboxFolder) and vol.volume is browsable.volume:
+                    return win
+            elif vol is browsable:
+                return win
+        return None
 
     def _front(self, win: FilerWindow) -> None:
         win.raise_()

@@ -2,6 +2,7 @@
 
 import machfs
 import os
+from pathlib import Path
 import pytest
 import struct
 import sys
@@ -3935,10 +3936,12 @@ def test_the_disks_menu_lists_the_volumes_programs_see(harness):
     h = harness(disks=[v1, v2])
     h.settle()
     menu = next(m for m in h.d.filer_menus.bar_menus() if m.id == DISK_MENU_ID)
-    # the same list, in the same order, as PBGetVInfo indexes for programs
-    assert [i.text for i in menu.items] == [v.name for v in h.d.system.files.volumes]
-    assert [i.enabled for i in menu.items] == [False, True, True]
-    assert menu.items[0].text == "Macintosh HD"   # the startup disk: dimmed
+    # the same list, in the same order, as PBGetVInfo indexes for programs,
+    # then the host's working directory
+    expected = [v.name for v in h.d.system.files.volumes] + [Path(os.getcwd()).name]
+    assert [i.text for i in menu.items] == expected
+    assert menu.items[0].text == "Macintosh HD"
+    assert all(i.enabled for i in menu.items)
 
 
 def test_choosing_a_disk_brings_its_root_window_to_the_front(harness):
@@ -3966,11 +3969,36 @@ def test_choosing_an_unopened_disk_opens_its_window(harness):
     assert h.d.front_filer.path == ()
 
 
-def test_the_dimmed_startup_disk_item_does_nothing(harness):
+def test_choosing_the_startup_disk_opens_its_window(harness):
     h = harness(disks=[])
     h.settle()
     h.d.filer_menu_choice(DISK_MENU_ID, 1)
-    assert h.d.front_filer is None                 # nothing to browse, nothing opened
+    from macrt.macfile import ToolboxFolder
+    assert h.d.front_filer is not None
+    assert isinstance(h.d.front_filer.volume, ToolboxFolder)
+    assert h.d.front_filer.volume.volume is h.d.system.files.boot
+
+
+def test_the_startup_disks_window_shows_the_machines_folders(harness):
+    h = harness(disks=[])
+    h.settle()
+    h.d.filer_menu_choice(DISK_MENU_ID, 1)
+    names = sorted(h.d.front_filer.entries)
+    assert "System Folder" in names                # what FindFolder knows of it
+
+
+def test_the_cwd_item_opens_the_host_folder_and_reuses_its_window(harness):
+    h = harness(disks=[])
+    h.settle()
+    menu = next(m for m in h.d.filer_menus.bar_menus() if m.id == DISK_MENU_ID)
+    choice = len(menu.items)                        # the host's working directory is last
+    assert menu.items[-1].text == Path(os.getcwd()).name
+    h.d.filer_menu_choice(DISK_MENU_ID, choice)
+    win = h.d.front_filer
+    assert isinstance(win.volume, HostFolder)
+    assert Path(win.volume.path).resolve() == Path(os.getcwd()).resolve()
+    h.d.filer_menu_choice(DISK_MENU_ID, choice)
+    assert h.d.front_filer is win                   # the window was raised, not duplicated
 
 
 def test_a_mounted_host_folder_gets_one_window_for_repeated_choices(harness, tmp_path):

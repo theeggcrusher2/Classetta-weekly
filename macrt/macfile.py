@@ -728,6 +728,89 @@ class VolumeFolder:
                 if isinstance(f, machfs.File)]
 
 
+class ToolboxFolder:
+    """A live view of a volume mounted in the running machine, read
+    through the File Manager structures programs see: the startup disk,
+    with whatever the machine has put on it since.  Path segments are
+    names; folders navigate by them, case-insensitively, as the File
+    Manager does."""
+
+    def __init__(self, volume, path: tuple[str, ...] = ()):
+        self.volume = volume            # a macrt.toolbox.files Volume
+        self.path = tuple(path)
+
+    @property
+    def name(self) -> str:
+        return self.volume.name
+
+    def _node(self, path):
+        d = self.volume.root
+        for part in path:
+            if d is None or not getattr(d, "is_dir", False):
+                raise KeyError(part)
+            d = d.child(part)
+        if d is None:
+            raise KeyError(path[-1] if path else "")
+        return d
+
+    def _key(self, node) -> str:
+        return f"toolbox:{self.volume.vref}:{node.cnid}"
+
+    def _entry(self, node, folder) -> MacFile:
+        key = self._key(node)
+        if getattr(node, "is_dir", False):
+            return MacFile(node.name, type=b"fldr", key=key, folder=folder,
+                           crdate=getattr(node, "crdate", 0), mddate=getattr(node, "mddate", 0))
+        forks = node.forks()
+        return MacFile(node.name, data=bytes(forks[0]), rsrc=bytes(forks[1]),
+                       type=node.type, creator=node.creator, flags=node.flags,
+                       key=key, folder=folder,
+                       crdate=getattr(node, "crdate", 0), mddate=getattr(node, "mddate", 0))
+
+    def entries(self, path: tuple[str, ...]) -> list[MacFile]:
+        try:
+            d = self._node(path)
+        except KeyError:
+            return []
+        folder = ToolboxFolder(self.volume, path)
+        out = []
+        for node in d.items():
+            try:
+                out.append(self._entry(node, folder))
+            except Exception:
+                continue                        # a node that can't be read: the rest are still here
+        return out
+
+    def find(self, name: str) -> MacFile | None:
+        absolute, parts = _split_path(name)
+        if not parts:
+            return None
+        path = () if absolute else self.path
+        try:
+            d = self._node(path)
+            for part in parts[:-1]:
+                if d is None or not getattr(d, "is_dir", False):
+                    return None
+                d = d.child(part)
+                if d is None:
+                    return None
+                path = path + (d.name,)
+            if d is None or not getattr(d, "is_dir", False):
+                return None
+            node = d.child(parts[-1])
+        except KeyError:
+            return None
+        if node is None:
+            return None
+        try:
+            return self._entry(node, ToolboxFolder(self.volume, path))
+        except Exception:
+            return None
+
+    def files(self) -> list[MacFile]:
+        return self.entries(self.path)
+
+
 class _VolumeFile(MacFile):
     """A file on a volume, its forks read from it the first time they're
     wanted: looking through a CD for one application reads no other's."""
@@ -1636,6 +1719,8 @@ def list_folder(volume: machfs.Volume | HostFolder | ContainerFolder | ArchiveFo
                 out.append(f)
             return out
         return files
+    if isinstance(volume, ToolboxFolder):
+        return volume.entries(path)
     folder = VolumeFolder(volume, path)
     node = folder._node(folder.path)
     out = []
