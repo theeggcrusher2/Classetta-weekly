@@ -46,10 +46,12 @@ and how far it gets.
     and sampled sounds, and the Mac Plus's sound buffer, played through
     your computer's speakers;
   - MultiFinder-style switching between several applications at once.
-- **Files** in MacBinary, BinHex, AppleSingle, AppleDouble, DART, 
-  NDIF, DMG, ISO and Toast; HFS, HFS Plus, MFS, 
-  disk images, MOOF floppy images and CD-ROM images. An application 
-  run from a folder on your computer saves its documents there.
+- **Archives:** Expanded support via MacExtract (.zip, .sit, .sea, .hqx, .bin, .rar, .7z, etc.).
+- **Disk Images:** .img, .dsk, .iso, .cdr, .toast, .dmg, .dart, .ndif, .moof.
+- **Filesystems:** HFS, HFS+, MFS, UDF 1.x.
+- **Disktracker:** Load .dtc files to browse offline media indices; create new indices from mounted volumes; reveal or open original files directly from the Filer index view.
+- **Filer:** Native file management window; enabled by default on loads or via `--filer`. Browse host filesystems, drill into nested disk images and archives, extract contents, or launch applications and files directly from the interface.
+
 - **Not there yet:** Apple events and PPC sessions between
   applications; anything plugged into the serial ports, and AppleTalk;
   the event filter and activation procedures of custom Open and Save
@@ -109,6 +111,7 @@ read for what. In short:
   and what to do when it stops.
 - **[Titles tried so far](docs/titles.md):** the applications run so far,
   how far each gets, and what to give it on the command line.
+- **[Disk images](docs/disk-images.md):** Supported formats and archive handling.
 - **[What works](docs/toolbox.md):** the Toolbox and Operating System,
   a manager at a time, with where macrt differs from a Mac and why.
 - **[How macrt works](docs/architecture.md):** the processor, the trap
