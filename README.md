@@ -47,7 +47,7 @@ and how far it gets.
     your computer's speakers;
   - MultiFinder-style switching between several applications at once.
 - **Archives:** Expanded support via MacExtract (.zip, .sit, .sea, .hqx, .bin, .rar, .7z, etc.).
-- **Disk Images:** .img, .dsk, .iso, .cdr, .toast, .dmg, .dart, .ndif, .moof.
+- **Disk Images:** .img, .dsk, .iso, .cdr, .toast, .dmg, .dart, .ndif, .moof, .mdf/.mds, .chd, .vhd, .vmdk, .qcow2.
 - **Filesystems:** HFS, HFS+, MFS, UDF 1.x.
 - **Disktracker:** Load .dtc files to browse offline media indices; create new indices from mounted volumes; reveal or open original files directly from the Filer index view.
 - **Filer:** Native file management window; enabled by default on loads or via `--filer`. Browse host filesystems, drill into nested disk images and archives, extract contents, or launch applications and files directly from the interface.
