@@ -57,7 +57,7 @@ from ..toolbox.types import Point, Rect
 from ..toolbox.windows import WindowRecord, describe_proc
 from . import chrome, theme
 from .bridge import GuiBridge
-from .filer import (APPLE_MENU_ID, FILE_MENU_ID, SPECIAL_MENU_ID, AboutClassettaWindow,
+from .filer import (APPLE_MENU_ID, DISK_MENU_ID, FILE_MENU_ID, SPECIAL_MENU_ID, AboutClassettaWindow,
                     AboutWindow, ContentViewerWindow, FilerMenus, FilerOptions,
                     FilerWindow, GetInfoWindow)
 from .keymap import key_message, modifiers_from_qt
@@ -1141,6 +1141,8 @@ class Display(QObject):
             front = self.front_filer
             if front is not None:
                 front.close()
+        elif menu_id == DISK_MENU_ID and item >= 1:
+            self.filer_menus.disk_choice(item)
         elif menu_id == SPECIAL_MENU_ID and item == 6:
             self.restarting = True             # Special > Restart
             self.shutdown()                    # the same graceful shutdown first

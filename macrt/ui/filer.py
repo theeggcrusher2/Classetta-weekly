@@ -36,7 +36,7 @@ from PyQt6.QtWidgets import (
 from pathlib import Path
 
 from ..macfile import (ArchiveFolder, ContainerFolder, HostFolder, LazyArchiveFile,
-                       MacFile, VolumeFolder,
+                       MacFile, MemoryFolder, VolumeFolder,
                        alias_open, alias_original, archive_entries, archive_kind,
                        archive_name, container_contents, creator_application,
                        extract_archive, image_kind,
@@ -50,7 +50,7 @@ from ..resfork import InvalidForkError, is_fork, read_fork
 from ..toolbox import constants as k
 from ..toolbox.types import Rect
 from ..toolbox.icons import LARGE, MINI, SMALL, Icon, bitmap_icon, color_suite_icon, suite_icon
-from ..toolbox.menus import Menu, parse_menu_items
+from ..toolbox.menus import Menu, MenuItem, parse_menu_items
 from ..toolbox.windows import WindowKind
 from ..viewer import describe, viewer_main
 from . import chrome, icons, theme
@@ -2360,6 +2360,19 @@ FILE_MENU_ID = 129
 EDIT_MENU_ID = 130
 VIEW_MENU_ID = 131
 SPECIAL_MENU_ID = 132
+DISK_MENU_ID = 133
+
+
+def _browsable(vol):
+    """The folder the Filer opens for a mounted volume, or None when the
+    volume has none behind it: the in-memory startup disk apps see but
+    the Filer has nothing to browse."""
+    source = getattr(getattr(vol, "store", None), "source", None)
+    if isinstance(source, (machfs.Volume, MemoryFolder)):
+        return source
+    if isinstance(source, Path):
+        return HostFolder(source)
+    return None
 
 
 class FilerMenus:
@@ -2372,6 +2385,7 @@ class FilerMenus:
     def __init__(self, display: Display):
         self.display = display
         self.last_bar: MenuBarWidget | None = None
+        self._disk_sig: tuple | None = None
         self.menus: dict[int, Menu] = {m.id: m for m in (
             Menu(APPLE_MENU_ID, k.APPLE_MENU_TITLE,
                  parse_menu_items("About Classetta…;(-")),
@@ -2382,6 +2396,7 @@ class FilerMenus:
                 "(Undo/Z;(-;(Cut/X;(Copy/C;(Paste/V;(Clear;(Select All/A")),
             Menu(VIEW_MENU_ID, "View", parse_menu_items(
                 "(by Icon;(by Small Icon;(by Name;(by Date;(by Size;(by Kind")),
+            Menu(DISK_MENU_ID, "Disks", parse_menu_items("")),
             Menu(SPECIAL_MENU_ID, "Special", parse_menu_items(
                 "(Clean Up Window;(Empty Trash;(Erase Disk…;(Set Startup…;"
                 "(-;Restart;Shutdown")),
@@ -2411,4 +2426,50 @@ class FilerMenus:
             file_menu.items[9].enabled = extractable
             file_menu.items[10].enabled = True        # Record Sound… creates a host file
             file_menu.items[12].enabled = closeable
+        self._sync_disk_menu()
         return list(self.menus.values())
+
+    def _sync_disk_menu(self) -> None:
+        """The Disks menu shows the mounted volumes, in the order the
+        File Manager gives them to programs (PBGetVInfo by index), and is
+        rebuilt only when that set changes.  The startup disk has no
+        folder behind it, so its item is dimmed."""
+        fs = getattr(self.display, "system", None)
+        volumes = fs.files.volumes if fs is not None else []
+        signature = tuple((v.vref, v.name) for v in volumes)
+        if signature == self._disk_sig:
+            return
+        self._disk_sig = signature
+        self.menus[DISK_MENU_ID].items = [
+            MenuItem(v.name, enabled=_browsable(v) is not None) for v in volumes
+        ]
+
+    def disk_choice(self, item: int) -> None:
+        """Select the item-th disk of the listing programs see and bring
+        its root window to the front, opening it when it isn't open."""
+        fs = getattr(self.display, "system", None)
+        volumes = fs.files.volumes if fs is not None else []
+        if not 1 <= item <= len(volumes):
+            return
+        browsable = _browsable(volumes[item - 1])
+        if browsable is None:
+            return
+        if isinstance(browsable, HostFolder):
+            want = browsable.path.resolve()
+            for win in self.display.filer_windows:
+                if (isinstance(win.volume, HostFolder) and win.path == ()
+                        and win.volume.path.resolve() == want):
+                    self._front(win)
+                    return
+        else:
+            for win in self.display.filer_windows:
+                if win.volume is browsable and win.path == ():
+                    self._front(win)
+                    return
+        self.display.open_filer(browsable, ())
+
+    def _front(self, win: FilerWindow) -> None:
+        win.raise_()
+        win.activateWindow()
+        win.show()
+        self.display.filer_front(win)

@@ -18,7 +18,8 @@ from macrt.macfile import (ArchiveFolder, ContainerFolder, HostFolder, LazyArchi
 from macrt.resfork import build_fork, Resource, resPurgeable
 from macrt.toolbox import constants as k
 from macrt.ui import chrome, theme
-from macrt.ui.filer import (ARCHIVE_ICON, FILE_MENU_ID, SPECIAL_MENU_ID, FilerOptions,
+from macrt.ui.filer import (ARCHIVE_ICON, DISK_MENU_ID, FILE_MENU_ID, SPECIAL_MENU_ID,
+                             FilerOptions, FilerWindow,
                              GetInfoWindow, _container_icon, _size_text)
 from macrt.ui.stdfile import DISK_ICON, DOCUMENT_ICON, FOLDER_ICON
 from builders import binhex, vers
@@ -3919,3 +3920,70 @@ def test_extract_with_an_archive_selected_in_a_disk_window(harness, tmp_path, mo
     assert (dest / "Inner One").read_bytes() == b"data one"
     assert (dest / "Inner App").read_bytes() == b"data two"
     assert (dest / "._Inner App").exists()              # AppleDouble beside the fork pair
+
+
+def test_the_disks_menu_follows_view_and_precedes_special(harness):
+    h = harness(disks=[])
+    titles = [m.title for m in h.d.filer_menus.bar_menus()]
+    assert titles.index("Disks") == titles.index("View") + 1
+    assert titles.index("Disks") == titles.index("Special") - 1
+
+
+def test_the_disks_menu_lists_the_volumes_programs_see(harness):
+    v1, v2 = _volume(), _n_volume()     # both name themselves "Browse"; rename
+    v1.name, v2.name = "Alpha", "Beta"
+    h = harness(disks=[v1, v2])
+    h.settle()
+    menu = next(m for m in h.d.filer_menus.bar_menus() if m.id == DISK_MENU_ID)
+    # the same list, in the same order, as PBGetVInfo indexes for programs
+    assert [i.text for i in menu.items] == [v.name for v in h.d.system.files.volumes]
+    assert [i.enabled for i in menu.items] == [False, True, True]
+    assert menu.items[0].text == "Macintosh HD"   # the startup disk: dimmed
+
+
+def test_choosing_a_disk_brings_its_root_window_to_the_front(harness):
+    v1, v2 = _volume(), _n_volume()
+    v1.name, v2.name = "Alpha", "Beta"
+    h = harness(disks=[v1, v2])
+    h.settle()
+    win1 = h.d.open_filer(v1)
+    win2 = h.d.open_filer(v2)
+    assert h.d.front_filer is win2
+    h.d.filer_menu_choice(DISK_MENU_ID, 2)        # Macintosh HD is 1
+    assert h.d.front_filer is win1
+    h.d.filer_menu_choice(DISK_MENU_ID, 3)
+    assert h.d.front_filer is win2
+
+
+def test_choosing_an_unopened_disk_opens_its_window(harness):
+    v1 = _n_volume()
+    h = harness(disks=[v1])
+    h.settle()
+    assert h.d.front_filer is None
+    h.d.filer_menu_choice(DISK_MENU_ID, 2)        # Macintosh HD is 1
+    assert h.d.front_filer is not None
+    assert h.d.front_filer.volume is v1
+    assert h.d.front_filer.path == ()
+
+
+def test_the_dimmed_startup_disk_item_does_nothing(harness):
+    h = harness(disks=[])
+    h.settle()
+    h.d.filer_menu_choice(DISK_MENU_ID, 1)
+    assert h.d.front_filer is None                 # nothing to browse, nothing opened
+
+
+def test_a_mounted_host_folder_gets_one_window_for_repeated_choices(harness, tmp_path):
+    (tmp_path / "Read Me.txt").write_bytes(b"hi")
+    h = harness(disks=[])
+    h.settle()
+    h.d.system.files.mount_folder(HostFolder(tmp_path))
+    h.settle()
+    menu = next(m for m in h.d.filer_menus.bar_menus() if m.id == DISK_MENU_ID)
+    assert [i.text for i in menu.items][1] == tmp_path.name
+    h.d.filer_menu_choice(DISK_MENU_ID, 2)
+    win = h.d.front_filer
+    assert isinstance(win.volume, HostFolder)
+    h.d.filer_menu_choice(DISK_MENU_ID, 2)
+    assert h.d.front_filer is win                  # the window was raised, not duplicated
+    assert len(h.d.filer_windows) == 1
