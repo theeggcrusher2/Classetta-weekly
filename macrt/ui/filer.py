@@ -164,6 +164,29 @@ def _kind(f: MacFile) -> str:
     return associated_kind(f) or next((name for t, name in KINDS if f.type == t), "document")
 
 
+def _size_text(n: int, words: bool = False) -> str:
+    """n bytes rounded smart: exact below 1024, then K, M, G, T, P —
+    each 1024 of the last — one decimal below 10 and a whole number
+    above, so the Size column never grows long.  Rounding that reaches
+    1024 carries into the next unit.  words spells out " bytes" after a
+    byte count, the way Get Info and the resource list read."""
+    units = ("", "K", "M", "G", "T", "P")
+    i = 0
+    tenths = n * 10                      # tenths of a byte to start
+    while i < len(units) - 1 and tenths >= 10240:   # 1024.0 of this unit
+        tenths = (tenths + 512) // 1024  # tenths of the next, half up
+        i += 1
+    if i == 0:
+        return f"{n:,} bytes" if words else f"{n:,}"
+    if tenths < 100:                     # under 10 of this unit: a decimal
+        whole, frac = divmod(tenths, 10)
+        return f"{whole}.{frac}{units[i]}" if frac else f"{whole}{units[i]}"
+    whole = (tenths + 5) // 10           # 10 or more: whole numbers
+    if whole >= 1024 and i < len(units) - 1:  # rounding reached the next
+        whole, i = 1, i + 1
+    return f"{whole}{units[i]}"
+
+
 def _icon_for(f: MacFile) -> str:
     if f.type == FOLDER:
         return "folder"
@@ -665,7 +688,7 @@ class FilerWindow(_Hosted):
         folder = f.type == FOLDER
         try:
             data, rsrc = f.sizes()
-            size = "--" if folder else f"{data + rsrc:,}"
+            size = "--" if folder else _size_text(data + rsrc)
         except Exception:
             size = "--"
         item = QTreeWidgetItem([name, size, _kind(f)])
@@ -1779,9 +1802,9 @@ class GetInfoWindow(AboutWindow):
                 lines.append(f"Original: {original}")
         if item.type != FOLDER:
             data, rsrc = item.sizes()
-            lines.append(f"Data fork: {data:,} bytes")
-            lines.append(f"Resource fork: {rsrc:,} bytes")
-            lines.append(f"Total size: {data + rsrc:,} bytes")
+            lines.append(f"Data fork: {_size_text(data, words=True)}")
+            lines.append(f"Resource fork: {_size_text(rsrc, words=True)}")
+            lines.append(f"Total size: {_size_text(data + rsrc, words=True)}")
             if item.type == b"APPL":
                 if sizes := size_resource(item):
                     preferred, minimum = sizes
@@ -1909,7 +1932,7 @@ class ContentViewerWindow(AboutWindow):
         self.list_widget = QListWidget(self)
         self.list_widget.setFont(theme.body_font())
         for name, rid, size, data in self.resources:
-            self.list_widget.addItem(f"{name}  ({size:,} bytes)")
+            self.list_widget.addItem(f"{name}  ({_size_text(size, words=True)})")
 
         self.checkbox = QCheckBox("Text only", self)
         self.checkbox.setChecked(False)

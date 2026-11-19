@@ -19,7 +19,7 @@ from macrt.resfork import build_fork, Resource, resPurgeable
 from macrt.toolbox import constants as k
 from macrt.ui import chrome, theme
 from macrt.ui.filer import (ARCHIVE_ICON, FILE_MENU_ID, SPECIAL_MENU_ID, FilerOptions,
-                             GetInfoWindow, _container_icon)
+                             GetInfoWindow, _container_icon, _size_text)
 from macrt.ui.stdfile import DISK_ICON, DOCUMENT_ICON, FOLDER_ICON
 from builders import binhex, vers
 from test_files import FORK, apple_single, macbinary
@@ -332,6 +332,34 @@ def test_a_dragged_name_divider_survives_resizing_the_window(harness):
     win._relayout()
     h.settle()
     assert win.tree.columnWidth(0) == 180       # the hand's width stands
+
+
+def test_sizes_round_to_the_largest_unit_that_fits():
+    assert _size_text(0) == "0"
+    assert _size_text(13) == "13"
+    assert _size_text(1023) == "1,023"           # exact below a K
+    assert _size_text(1024) == "1K"
+    assert _size_text(1536) == "1.5K"            # a decimal below 10
+    assert _size_text(10 * 1024) == "10K"        # whole numbers from 10
+    assert _size_text(1048575) == "1M"           # rounding carried past 1024K
+    assert _size_text(1024 ** 2) == "1M"
+    assert _size_text(1024 ** 3) == "1G"
+    assert _size_text(1024 ** 4) == "1T"
+    assert _size_text(1024 ** 5) == "1P"
+    assert _size_text(13, words=True) == "13 bytes"
+    assert _size_text(1536, words=True) == "1.5K"
+
+
+def test_the_size_column_rounds_a_large_size(harness):
+    v = machfs.Volume()
+    v.name = "Browse"
+    big = machfs.File()
+    big.type, big.creator, big.data = b"TEXT", b"TEST", b"x" * 1536
+    v["Big"] = big
+    h = harness(disks=[v])
+    win = h.d.open_filer(v)
+    h.settle()
+    assert _item(win, "Big").text(1) == "1.5K"
 
 
 def test_the_zoom_box_sizes_the_window_to_its_contents_and_back(harness):
@@ -3458,6 +3486,21 @@ def test_get_info_shows_forks_type_creator_flags_and_dates(harness):
     assert "Flags: 0x0400" in text
     assert "Created:" in text
     assert "Modified:" in text
+
+
+def test_get_info_rounds_fork_sizes(harness):
+    v = machfs.Volume()
+    v.name = "Browse"
+    item = machfs.File()
+    item.type, item.creator = b"TEXT", b"TEST"
+    item.data = b"x" * 1536
+    v["Doc"] = item
+    h = harness(disks=[v])
+    win = h.d.open_filer(v)
+    h.settle()
+    text = "\n".join(_get_info_lines(h, win, "Doc"))
+    assert "Data fork: 1.5K" in text
+    assert "Total size: 1.5K" in text
 
 
 def test_get_info_shows_an_items_own_icon(harness):
