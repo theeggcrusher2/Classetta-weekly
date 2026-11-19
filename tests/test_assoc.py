@@ -6,7 +6,7 @@ import struct
 
 from macrt import assoc
 from macrt.macfile import MacFile, VolumeFolder, list_folder
-from macrt.resfork import Resource, build_fork
+from macrt.resfork import Resource, build_fork, resPurgeable
 from macrt.toolbox.icons import LARGE, SMALL
 
 
@@ -223,3 +223,55 @@ def test_strip_wrapper():
     assert assoc._strip_wrapper("App.bin") == "App"
     assert assoc._strip_wrapper("App.HQX") == "App"
     assert assoc._strip_wrapper("Plain") == "Plain"
+
+
+def test_the_host_walk_runs_once_for_many_creators(tmp_path, monkeypatch):
+    """The creating-app table is built in one pass; the per-creator
+    lookups then serve from it."""
+    import os
+    from macrt.macfile import HostFolder
+
+    (tmp_path / "AppOne").mkdir()
+    (tmp_path / "AppOne" / "One").write_bytes(b"x")
+    (tmp_path / "AppTwo").mkdir()
+    (tmp_path / "AppTwo" / "Two").write_bytes(b"y")
+    xattrs = {str(tmp_path / "AppOne" / "One"): b"APPLWAVE",
+              str(tmp_path / "AppTwo" / "Two"): b"APPLWAV2"}
+    real_walk = os.walk
+    calls = {"walk": 0}
+
+    def counting_walk(*a, **kw):
+        calls["walk"] += 1
+        return real_walk(*a, **kw)
+
+    monkeypatch.setattr(assoc.os, "walk", counting_walk)
+    monkeypatch.setattr(assoc.os, "getxattr",
+                        lambda p, n, follow_symlinks=True: xattrs.get(p, b""))
+    assoc._host_app_cache.clear()
+    assoc._host_tree_cache.clear()
+    try:
+        assert assoc._host_app(HostFolder(tmp_path), b"WAVE") is not None
+        assert assoc._host_app(HostFolder(tmp_path), b"WAV2") is not None
+        assert calls["walk"] == 1
+    finally:
+        assoc._host_app_cache.clear()
+        assoc._host_tree_cache.clear()
+
+
+def test_the_fork_parse_is_cached_per_fork(monkeypatch):
+    fork = build_fork([Resource(b"kind", 1, b"#SWT\x00SurfWorks document\x00", None, resPurgeable)])
+    calls = []
+    real = assoc._app_info
+
+    def counting(f):
+        calls.append(1)
+        return real(f)
+
+    monkeypatch.setattr(assoc, "_app_info", counting)
+    assoc._info_for_fork.cache_clear()
+    try:
+        assoc._info_for_fork(fork)
+        assoc._info_for_fork(fork)
+        assert len(calls) == 1
+    finally:
+        assoc._info_for_fork.cache_clear()

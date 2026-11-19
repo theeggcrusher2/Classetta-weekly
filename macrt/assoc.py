@@ -191,6 +191,43 @@ def _strip_wrapper(name: str) -> str:
 
 
 _host_app_cache: dict[tuple, MacFile | None] = {}
+_host_tree_cache: dict[str, dict[bytes, str]] = {}
+
+
+def _walk_apps(root) -> dict[bytes, str]:
+    """One pass over the root: creator -> the nearest APPL file under it,
+    by walk order at equal depth.  The per-creator lookups below all
+    serve from this single table."""
+    table: dict[bytes, tuple[int, str]] = {}
+    try:
+        walk = os.walk(root.path)
+    except OSError:
+        return {}
+    for dirpath, dirs, files in walk:
+        dirs[:] = [d for d in dirs if not d.startswith((".", "%"))]
+        if ".rsrc/" in dirpath.lower():
+            continue
+        parts = len(os.path.relpath(dirpath, root.path).split(os.sep))
+        for name in files:
+            if name.startswith((".", "%")):
+                continue
+            lower = name.lower()
+            if lower.endswith((".rsrc",)):
+                continue
+            try:
+                info = os.getxattr(os.path.join(dirpath, name), "com.apple.FinderInfo",
+                                   follow_symlinks=False) \
+                    if hasattr(os, "getxattr") else b""
+            except OSError:
+                info = b""
+            if len(info) < 8 or info[0:4] != b"APPL":
+                continue
+            creator = info[4:8]
+            cur = table.get(creator)
+            if cur is not None and parts >= cur[0]:
+                continue
+            table[creator] = (parts, os.path.join(dirpath, name))
+    return {creator: path for creator, (_depth, path) in table.items()}
 
 
 class _VolumeAppCache:
@@ -228,36 +265,20 @@ def _host_app(root, creator: bytes) -> MacFile | None:
     key = (str(root.path), creator)
     if key in _host_app_cache:
         return _host_app_cache[key]
+    root_key = str(root.path)
+    table = _host_tree_cache.get(root_key)
+    if table is None:
+        table = _walk_apps(root)
+        _host_tree_cache[root_key] = table
+    path = table.get(creator)
     found = None
-    try:
-        walk = os.walk(root.path)
-    except OSError:
-        return None
-    for dirpath, dirs, files in walk:
-        dirs[:] = [d for d in dirs if not d.startswith((".", "%"))]
-        parts = len(os.path.relpath(dirpath, root.path).split(os.sep))
-        for name in files:
-            if name.startswith((".", "%")):
-                continue
-            lower = name.lower()
-            if lower.endswith((".rsrc",)) or ".rsrc/" in dirpath.lower():
-                continue
-            if found is not None and parts >= found[0]:
-                continue
-            try:
-                path = os.path.join(dirpath, name)
-                info = os.getxattr(path, "com.apple.FinderInfo", follow_symlinks=False) \
-                    if hasattr(os, "getxattr") else b""
-            except OSError:
-                info = b""
-            if len(info) < 8 or info[4:8] != creator or info[0:4] != b"APPL":
-                continue
-            try:
-                found = (parts, load_file(path, root))
-            except (ValueError, OSError):
-                continue
-    _host_app_cache[key] = found[1] if found else None
-    return _host_app_cache[key]
+    if path is not None:
+        try:
+            found = load_file(path, root)
+        except (ValueError, OSError):
+            found = None
+    _host_app_cache[key] = found
+    return found
 
 
 def associated_app(f: MacFile) -> MacFile | None:
@@ -289,9 +310,23 @@ def associated_kind(f: MacFile) -> str | None:
     return f"{_strip_wrapper(app.name)} document"
 
 
+_rows_cache: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
 def _rows_for(info: AppInfo, resid: int | None, large: bool) -> tuple[str, ...] | None:
     """The rows ('#'/'.') of an icon family at resource id resid, as
-    declared in info's fork; None without one."""
+    declared in info's fork; None without one.  Memoised per fork: the
+    listing asks once per row for the same app."""
+    key = (resid, large)
+    cached = _rows_cache.get(info)
+    if cached is not None and key in cached:
+        return cached[key]
+    result = _rows_for_uncached(info, resid, large)
+    _rows_cache.setdefault(info, {})[key] = result
+    return result
+
+
+def _rows_for_uncached(info: AppInfo, resid: int | None, large: bool) -> tuple[str, ...] | None:
     if resid is None:
         return None
 
@@ -316,16 +351,36 @@ def _rows_for(info: AppInfo, resid: int | None, large: bool) -> tuple[str, ...] 
     return tuple(rows)
 
 
+@lru_cache(maxsize=64)
 def _info_for_fork(fork: bytes) -> AppInfo | None:
+    """The app's parsed resources, cached by fork bytes: the Kind and
+    icon paths ask once per row, and a fork is megabytes of Rez to parse
+    each time otherwise."""
     if not fork:
         return None
     return _app_info(fork)
 
 
+_color_cache: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
 def _color_for(info: AppInfo, resid: int | None, size: tuple[int, int],
                 depth: int):
     """The colour icon family at resid in info's fork, for depth; None
-    without one."""
+    without one.  Memoised per fork, as the 1-bit rows are."""
+    if info is None or resid is None:
+        return None
+    key = (resid, size, depth)
+    cached = _color_cache.get(info)
+    if cached is not None and key in cached:
+        return cached[key]
+    result = _color_for_uncached(info, resid, size, depth)
+    _color_cache.setdefault(info, {})[key] = result
+    return result
+
+
+def _color_for_uncached(info: AppInfo, resid: int | None, size: tuple[int, int],
+                        depth: int):
     if info is None or resid is None:
         return None
 

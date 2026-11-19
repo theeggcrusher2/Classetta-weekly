@@ -24,7 +24,7 @@ from macrt.macfile import (
     list_folder,
     is_control_panel,
     is_disk_image, load_file, load_volume, open_application, open_applications,
-    open_disks, volume_files,
+    open_disks, volume_files, image_kind,
 )
 from macrt.resfork import (
     DecompressError, InvalidForkError, Resource, build_fork, decompress, is_fork, read_fork,
@@ -1307,3 +1307,62 @@ def test_list_folder_of_an_archive_path_that_holds_nothing_lists_nothing(tmp_pat
     assert list_folder(folder, ("Nope",)) == []
     assert list_folder(folder, ("Docs", "Nope")) == []
     assert list_folder(folder, ("Docs", "Letter")) == []
+
+
+def test_listing_a_host_folder_reads_no_fork_bytes(tmp_path):
+    (tmp_path / "Big.img").write_bytes(b"\x00" * 100000)
+    (tmp_path / "App").write_bytes(b"data fork bytes")
+    (tmp_path / "App.rsrc").write_bytes(FORK)      # the fork beside the app
+    files = {f.name: f for f in HostFolder(tmp_path).files()}
+    assert sorted(files) == ["App", "Big.img"]      # App.rsrc is the app's fork, not a row
+    for f in files.values():
+        assert f.forks_pending                       # nothing was read to list it
+    big = files["Big.img"]
+    assert big.sizes() == (100000, 0)
+    app = files["App"]
+    assert app.sizes() == (len(b"data fork bytes"), len(FORK))
+    assert app.data == b"data fork bytes"            # first touch reads it for real
+    assert app.rsrc == FORK
+    assert not app.forks_pending
+
+
+def test_listing_declares_macbinary_and_binhex_forks(tmp_path):
+    (tmp_path / "mbin.bin").write_bytes(macbinary("Real App", b"actual data", FORK))
+    (tmp_path / "bhx.hqx").write_bytes(binhex("Hex App", b"actual data", FORK))
+    files = {f.name: f for f in HostFolder(tmp_path).files()}
+    assert sorted(files) == ["Hex App", "Real App"]  # the names inside the containers
+    mbin, bhx = files["Real App"], files["Hex App"]
+    assert mbin.sizes() == (len(b"actual data"), len(FORK))
+    assert bhx.sizes() == (len(b"actual data"), len(FORK))
+    assert mbin.forks_pending and bhx.forks_pending
+    assert mbin.type == b"APPL" and bhx.type == b"APPL"
+    assert mbin.data == b"actual data"               # materialising matches the eager load
+    assert bhx.data == b"actual data"
+    assert mbin.rsrc == FORK and bhx.rsrc == FORK
+
+
+def test_listing_skips_a_damaged_binhex(tmp_path):
+    (tmp_path / "aaa_bad.hqx").write_bytes(
+        b"(This file must be converted with BinHex 4.0\r" + b'"' * 200)
+    (tmp_path / "zzz_good.hqx").write_bytes(binhex("Good", b"data", FORK))
+    assert [f.name for f in HostFolder(tmp_path).files()] == ["Good"]
+
+
+def test_the_kind_of_a_pending_disk_image_answers_from_windows(tmp_path):
+    (tmp_path / "Disk.img").write_bytes(hfs_image())
+    files = HostFolder(tmp_path).files()
+    assert len(files) == 1 and files[0].forks_pending
+    assert image_kind(files[0]) == "HFS disk image"
+
+
+def test_an_apple_single_lists_without_decoding(tmp_path):
+    (tmp_path / "Wrapped").write_bytes(
+        apple_single({1: b"the data fork", 2: FORK, 3: b"Wrapped",
+                      9: finder_info(b"APPL", b"TEST")}))
+    files = HostFolder(tmp_path).files()
+    assert len(files) == 1
+    assert files[0].forks_pending
+    assert files[0].sizes() == (len(b"the data fork"), len(FORK))
+    assert files[0].type == b"APPL"
+    assert files[0].data == b"the data fork"
+    assert files[0].rsrc == FORK

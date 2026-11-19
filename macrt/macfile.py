@@ -34,6 +34,7 @@ import io
 import logging
 import mmap
 import os
+import stat
 import struct
 import time
 import unicodedata
@@ -190,6 +191,389 @@ class LazyArchiveFile(MacFile):
                 f"declared={self._declared_data}+{self._declared_rsrc})")
 
 
+class LazyHostFile(LazyArchiveFile):
+    """A host file whose forks are read on first use, not at listing: a
+    folder of thousands costs a name, a stat and a peek at each head, not
+    a read of every fork byte on the drive.
+
+    The probes in ``lazy_host_file`` declare the forks' lengths and the
+    data fork's offset, so ``sizes()`` answers without touching the file
+    and ``head()``/``tail()`` read just their window when the fork is at
+    a known offset.  A fork whose bytes are encoded inline (BinHex) has
+    no offset and a head of b"" until it is materialised, as an archive
+    member is.  Materialising runs the same ``load_file`` the eager path
+    ran, so the forks are exactly what an eager listing would have
+    produced.  A damaged BinHex is not listed at all, as the eager
+    listing did not."""
+
+    def __init__(self, name: str, spec, *, type: bytes, creator: bytes,
+                 flags: int, key: str, folder, crdate: int = 0, mddate: int = 0):
+        super().__init__(name, type, creator, flags, crdate, mddate,
+                         spec["declared"][0], spec["declared"][1], spec["loader"])
+        self.key = key
+        self.folder = folder
+        self._spec = spec
+
+    def head(self, size: int = 65536) -> bytes:
+        if self._loaded:
+            return bytes(self._data[:size])
+        span = self._spec.get("data_range")
+        if span is None:
+            return b""
+        path, at, length = span
+        return self._window(path, at, min(size, length))
+
+    def tail(self, size: int = 65536) -> bytes:
+        if self._loaded:
+            return bytes(self._data[-size:])
+        span = self._spec.get("data_range")
+        if span is None:
+            return b""
+        path, at, length = span
+        if length == 0:
+            return b""
+        want = min(size, length)
+        return self._window(path, at + length - want, want)
+
+    @staticmethod
+    def _window(path: str, at: int, n: int) -> bytes:
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(at)
+                return fh.read(n)
+        except OSError:
+            return b""
+
+
+def apple_single_entries(head: bytes):
+    """(magic, {id: (offset, length)}) from an AppleSingle/AppleDouble
+    header, or None when the table runs out of head.  Fork bodies are
+    not sliced; whoever calls reads exactly what it needs."""
+    if len(head) < 26:
+        return None
+    magic, = struct.unpack_from(">I", head, 0)
+    if magic not in (APPLE_SINGLE, APPLE_DOUBLE):
+        return None
+    n, = struct.unpack_from(">H", head, 24)
+    end = 26 + 12 * n
+    if len(head) < end:
+        return None
+    entries = {}
+    for i in range(n):
+        eid, off, length = struct.unpack_from(">III", head, 26 + 12 * i)
+        entries[eid] = (off, length)
+    return magic, entries
+
+
+def _finfo_parts(finfo: bytes) -> tuple[bytes, bytes, int] | None:
+    if len(finfo) >= 10:
+        return finfo[0:4], finfo[4:8], struct.unpack_from(">H", finfo, 8)[0]
+    return None
+
+
+def _peek_macbinary(path: str, size: int, head: bytes):
+    """(name, type, creator, flags, (dlen, rlen), data_range) from the
+    header, or None when head is not MacBinary.  Mirrors the full parse's
+    checks; raises ValueError when a crc-valid-looking container is cut
+    short, as the full parse does."""
+    if len(head) < 128:
+        return None
+    if head[0] != 0 or head[74] != 0 or not 1 <= head[1] <= 63:
+        return None
+    if head[:3] == b"\x00\x05\x16":     # AppleSingle/Double can pass for MacBinary I
+        return None
+    name_b = head[2:2 + head[1]]
+    data_len, rsrc_len = struct.unpack_from(">II", head, 83)
+    if max(data_len, rsrc_len) >= 0x1000000:
+        return None
+    crc_ok = binascii.crc_hqx(bytes(head[:124]), 0) == struct.unpack_from(">H", head, 124)[0]
+    if not crc_ok and (head[82] != 0 or any(head[99:126])):
+        return None
+    if not crc_ok and (b":" in name_b or min(name_b) < 0x20):
+        return None
+    sec_len = struct.unpack_from(">H", head, 120)[0] if crc_ok else 0
+    pad = lambda n: (n + 127) & ~127                        # noqa: E731
+    data_at = 128 + pad(sec_len)
+    rsrc_at = data_at + pad(data_len)
+    if rsrc_at + rsrc_len > size:
+        if data_at + data_len + rsrc_len == size:
+            pass                                            # the data fork wasn't padded
+        elif crc_ok:
+            raise ValueError("MacBinary file is cut short")
+        else:
+            return None
+    if not crc_ok and size > rsrc_at + pad(rsrc_len) + 1024:
+        return None                                     # far too long to be what it says
+    flags = head[73] << 8 | (head[101] if crc_ok else 0)
+    return (name_b.decode("mac_roman"), bytes(head[65:69]), bytes(head[69:73]),
+            flags, (data_len, rsrc_len), (path, data_at, data_len))
+
+
+def _peek_binhex(head: bytes):
+    """(name, type, creator, flags, (dlen, rlen), None) decoded from just
+    the front of the file, or None when there's no BinHex banner in it.
+    A banner that doesn't decode cleanly raises ValueError, as the eager
+    listing skipped those rows."""
+    banner = head.find(BINHEX_BANNER, 0, 4096)
+    if banner < 0:
+        return None
+    start = head.find(b":", banner)
+    end = head.find(b":", start + 1) if start >= 0 else -1
+    if start < 0 or end < 0:
+        raise ValueError("BinHex file is cut short")
+    table = {c: i for i, c in enumerate(BINHEX_CHARS)}
+    packed, bits, nbits = bytearray(), 0, 0
+    for c in head[start + 1:end]:
+        if c in b" \t\r\n":
+            continue
+        if c not in table:
+            raise ValueError(f"BinHex file has a stray {chr(c)!r}")
+        bits, nbits = bits << 6 | table[c], nbits + 6
+        if nbits >= 8:
+            nbits -= 8
+            packed.append(bits >> nbits & 0xFF)
+            bits &= (1 << nbits) - 1
+    out, i, last = bytearray(), 0, 0
+    need = 23                              # the shortest possible header
+    while i < len(packed) and len(out) < need:
+        c = packed[i]
+        i += 1
+        if c != BINHEX_RUN:
+            out.append(c)
+            last = c
+        elif i < len(packed):
+            n = packed[i]
+            i += 1
+            if n == 0:
+                out.append(BINHEX_RUN)
+                last = BINHEX_RUN
+            else:
+                out += bytes([last]) * (n - 1)
+        need = (out[0] if out else 0) + 22
+    if not out:
+        raise ValueError("BinHex file is empty")
+    n = out[0]
+    body = n + 20                          # len byte, name, null, type, creator, flags, lengths
+    if len(out) < body + 2:
+        raise ValueError("BinHex file is cut short")
+    if binascii.crc_hqx(bytes(out[:body]), 0) != struct.unpack_from(">H", out, body)[0]:
+        raise ValueError("BinHex file is damaged (bad CRC)")
+    name = bytes(out[1:1 + n]).decode("mac_roman")
+    ftype, creator = bytes(out[n + 2:n + 6]), bytes(out[n + 6:n + 10])
+    flags, data_len, rsrc_len = struct.unpack_from(">HII", out, n + 10)
+    return name, ftype, creator, flags, (data_len, rsrc_len), None
+
+
+def _read_exact(fh, at: int, n: int) -> bytes:
+    fh.seek(at)
+    blob = fh.read(n)
+    if len(blob) != n:
+        raise ValueError("AppleSingle/AppleDouble file is cut short")
+    return blob
+
+
+def _peek_apple(fh, path: str, size: int, head: bytes):
+    """(name, type, creator, flags, (dlen, rlen), data_range) for
+    AppleSingle and AppleDouble, or None.  Fork bodies are not read;
+    the entry table is, precisely if it's past the head window."""
+    parsed = apple_single_entries(head)
+    if parsed is None and len(head) >= 26:
+        magic, = struct.unpack_from(">I", head, 0)
+        if magic in (APPLE_SINGLE, APPLE_DOUBLE):
+            n, = struct.unpack_from(">H", head, 24)
+            end = 26 + 12 * n
+            fh.seek(0)
+            head = fh.read(end)
+            if len(head) != end:
+                raise ValueError("AppleSingle/AppleDouble file is cut short")
+            parsed = apple_single_entries(head)
+    if parsed is None:
+        return None
+    magic, entries = parsed
+    for off, length in entries.values():
+        if off + length > size:
+            raise ValueError("AppleSingle/AppleDouble file is cut short")
+    span = entries.get(AS_FINDER_INFO)
+    finfo = _read_exact(fh, *span) if span and span[1] >= 10 else b""
+    parts = _finfo_parts(finfo)
+    ftype, creator, flags = parts if parts else (b"????", b"????", 0)
+    span = entries.get(AS_NAME)
+    name_b = _read_exact(fh, *span) if span else b""
+    dspan, rspan = entries.get(AS_DATA), entries.get(AS_RSRC)
+    rsrc_len = rspan[1] if rspan else 0
+    base_name = name_b.decode("mac_roman") if name_b else ""
+    if magic == APPLE_SINGLE:
+        data_len = dspan[1] if dspan else 0
+        data_range = (path, dspan[0], dspan[1]) if dspan else None
+        return (base_name or os.path.basename(path), ftype, creator, flags,
+                (data_len, rsrc_len), data_range)
+    # AppleDouble: the forks belong to the data file beside this one
+    nm = os.path.basename(path)
+    if nm.startswith("._"):
+        base = nm[2:]
+    elif nm.startswith("%"):
+        base = nm[1:]
+    elif nm.lower().endswith(".rsrc"):
+        base = nm[:-5]
+    else:
+        base = nm
+    sibling = os.path.join(os.path.dirname(path), base)
+    data_len = 0
+    data_range = None
+    if base != nm:
+        try:
+            st = os.stat(sibling)
+            if stat.S_ISREG(st.st_mode):
+                data_len = st.st_size
+                data_range = (sibling, 0, data_len)
+        except OSError:
+            pass
+    return (base_name or base, ftype, creator, flags,
+            (data_len, rsrc_len), data_range)
+
+
+def _readable_plain(p: Path, top: Path, links: bool) -> bool:
+    return links or (not p.is_symlink() and p.resolve().is_relative_to(top))
+
+
+def _side_fork(path: Path, top: Path, links: bool):
+    """(declared_rsrc, rsrc_range | None, finfo) from the first side
+    file that holds a resource fork — the eager loader's side loop read
+    as headers.  (0, None, b"") when there is no side fork."""
+    for side_path, kind in _side_files(path):
+        side_path = Path(side_path)
+        if not _readable_plain(side_path, top, links):
+            continue
+        try:
+            st = side_path.stat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        if kind in ("double", "either"):
+            try:
+                with open(side_path, "rb") as fh:
+                    head = fh.read(min(st.st_size, 65536))
+                    parsed = apple_single_entries(head)
+                    if parsed is None and len(head) >= 26:
+                        magic, = struct.unpack_from(">I", head, 0)
+                        if magic in (APPLE_SINGLE, APPLE_DOUBLE):
+                            n, = struct.unpack_from(">H", head, 24)
+                            end = 26 + 12 * n
+                            fh.seek(0)
+                            head = fh.read(end)
+                            parsed = apple_single_entries(head)
+                    if parsed is not None:
+                        _magic, entries = parsed
+                        for off, length in entries.values():
+                            if off + length > st.st_size:
+                                parsed = None
+                                break
+                        if parsed is None:
+                            continue            # damaged side: the loader moved on too
+                        rspan = entries.get(AS_RSRC)
+                        if rspan is None:
+                            continue            # a wrapper with no fork: the loop moved on too
+                        span = entries.get(AS_FINDER_INFO)
+                        finfo = b""
+                        if span and span[1] >= 10:
+                            fh.seek(span[0])
+                            finfo = fh.read(span[1])
+                        return rspan[1], (str(side_path), rspan[0], rspan[1]), finfo
+            except OSError:
+                continue
+            if kind == "double":
+                continue                    # a damaged AppleDouble: the loop moved on too
+        # The side file is the fork itself, whole and at its start.
+        return st.st_size, (str(side_path), 0, st.st_size), b""
+    return 0, None, b""
+
+
+def _finf_file(path: Path, top: Path, links: bool):
+    """Basilisk II's .finf, if it names one."""
+    finf = path.parent / ".finf" / path.name
+    try:
+        if finf.is_file() and _readable_plain(finf, top, links):
+            return finf.read_bytes()
+    except OSError:
+        pass
+    return None
+
+
+def _load_forks(path: str, folder):
+    f = load_file(path, folder)
+    return bytes(f.data), bytes(f.rsrc)
+
+
+def lazy_host_file(path, folder, name: str, *, links: bool = True):
+    """One host file as a lazy MacFile: what the listing shows without
+    reading a single fork byte.  Raises ValueError when the file looks
+    like BinHex but is damaged — the eager listing skipped those rows.
+    Returns None for something that isn't a plain file."""
+    path = Path(path)
+    top = path.parent.resolve()
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    size = st.st_size
+    with open(path, "rb") as fh:
+        head = fh.read(size if size <= 65536 else 4096)
+        probe = (_peek_macbinary(str(path), size, head)
+                 or _peek_binhex(head)
+                 or _peek_apple(fh, str(path), size, head))
+    key = str(path)
+    if probe is not None:
+        name_b, ftype, creator, flags, (dlen, rlen), data_range = probe
+        spec = {"declared": (dlen, rlen), "data_range": data_range,
+                "loader": lambda: _load_forks(str(path), folder)}
+        return LazyHostFile(name_b, spec, type=ftype, creator=creator,
+                            flags=flags, key=key, folder=folder)
+    if path.name.startswith("%"):
+        # Executor's resource fork: the data fork is the file beside it.
+        base = str(path.with_name(path.name[1:]))
+        data_len = 0
+        data_range = None
+        try:
+            bst = os.stat(base)
+            if stat.S_ISREG(bst.st_mode) and _readable_plain(Path(base), top, links):
+                data_len = bst.st_size
+                data_range = (base, 0, data_len)
+        except OSError:
+            pass
+        spec = {"declared": (data_len, size), "data_range": data_range,
+                "loader": lambda: _load_forks(str(path), folder)}
+        return LazyHostFile(path.name[1:], spec, type=b"????", creator=b"????",
+                            flags=0, key=base, folder=folder)
+    rsrc_len, _rsrc_range, sfinfo = _side_fork(path, top, links)
+    ftype, creator, flags = b"????", b"????", 0
+    if len(sfinfo) >= 10:
+        ftype, creator = sfinfo[0:4], sfinfo[4:8]
+        flags = struct.unpack_from(">H", sfinfo, 8)[0]
+    finf = _finf_file(path, top, links)
+    if finf is not None:
+        parts = _finfo_parts(finf)
+        if parts:
+            ftype, creator, flags = parts
+    elif ftype == b"????":
+        parts = _finfo_parts(_host_finder_info(path))
+        if parts:
+            ftype, creator, flags = parts
+    spec = {"declared": (size, rsrc_len), "data_range": (str(path), 0, size),
+            "loader": lambda: _load_forks(str(path), folder)}
+    nm = path.name
+    if (rsrc_len == 0 and size <= 65536 and is_fork(head)):
+        # A bare resource fork, small enough to call exactly.
+        spec = {"declared": (0, size), "data_range": None,
+                "loader": lambda: _load_forks(str(path), folder)}
+        if nm.lower().endswith(".rsrc"):
+            nm = nm[:-5]
+    return LazyHostFile(nm, spec, type=ftype, creator=creator,
+                        flags=flags, key=key, folder=folder)
+
+
 class Folder(Protocol):
     def find(self, name: str) -> MacFile | None: ...
 
@@ -293,9 +677,11 @@ class HostFolder:
             if n.lower().endswith(".rsrc") and n[:-5] in names:
                 continue                                # app's resource fork, beside app
             try:
-                out.append(load_file(p, self))
+                entry = lazy_host_file(p, self, n)
             except ValueError:
                 continue                                # damaged; the rest are still here
+            if entry is not None:
+                out.append(entry)
         return out
 
 
@@ -1496,8 +1882,17 @@ def archive_kind(f: MacFile) -> str | None:
     would freeze the Filer on a large archive.  An archive member whose
     forks are still inside the archive is not decoded to be asked."""
     if needs_materialise(f):
-        return None
-    d = _fork_sample(f)
+        # An archive member decodes nothing to answer; a plain host
+        # file's data fork lies at a known offset, so a window read
+        # answers for it.
+        if isinstance(f, LazyHostFile):
+            d = f.head(65536)
+            if not d:
+                return None
+        else:
+            return None
+    else:
+        d = _fork_sample(f)
     if d[:4] == b"SIT!" and d[10:14] == b"rLau" or d[:16] == b"StuffIt (c)1997-":
         return "StuffIt"
     if d[:4] == b"PK\x03\x04":
@@ -1561,6 +1956,51 @@ def archive_name(f: MacFile) -> str | None:
     return archive_name_on(d)
 
 
+def _pending_image_kind(f: LazyHostFile) -> str | None:
+    """image_kind's answer for a host file whose forks are pending:
+    window reads only.  A raw HFS image answers from the head; a
+    UDIF's trailer from the tail; an NDIF's resource fork is left
+    unread, so those read as documents."""
+    d = f.head(4096)
+    if not d:
+        return None
+    if moof.is_moof(d):
+        return "MOOF disk image"
+    if chd.is_chd(d):
+        return "CHD disk image"
+    if qcow2.is_qcow2(d):
+        return "qcow2 disk image"
+    if vhd.is_vhd(d):
+        return "VHD disk image"
+    if vmdk.is_vmdk(d):
+        return "VMDK disk image"
+    if dmg.is_udif(d):
+        return "UDIF disk image"
+    if dmg.is_udif(f.tail(512)):
+        return "UDIF disk image"
+    if mdf.is_mds(d):
+        return "MDF/MDS CD image"
+    if f.key.lower().endswith((".mds", ".mdf")):
+        return "MDF/MDS CD image"
+    if f.key.lower().endswith(".cue"):
+        return "BIN/CUE CD image"
+    if f.key.lower().endswith(".bin") and _cue_beside(f):
+        return "BIN/CUE CD image"
+    if dart.is_dart(d):
+        return "DART disk image"
+    if len(d) > DISKCOPY_HEADER and d[82:84] == b"\x01\x00" and d[0] < 64:
+        return "DiskCopy 4.2 image"
+    start = _volume_start(d)
+    if start is not None:
+        signature = start[1]
+        if signature == HFS_SIGNATURE:
+            return "HFS disk image"
+        if signature == MFS_SIGNATURE:
+            return "MFS disk image"
+        return "HFS+ disk image"
+    return None
+
+
 def _cue_beside(f: MacFile) -> bool:
     """Whether a .bin file has a .cue sheet beside it in its folder —
     the only case its name says "BIN/CUE CD image"."""
@@ -1585,6 +2025,8 @@ def image_kind(f: MacFile) -> str | None:
     if needs_materialise(f):
         # The bytes are still inside the archive: only the name says
         # anything, and reading the body here would decode the member.
+        if isinstance(f, LazyHostFile):
+            return _pending_image_kind(f)
         return None
     d = f.head(524296)
     if not d:
