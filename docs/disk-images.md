@@ -103,10 +103,7 @@ browse as a volume.
 - **parallels (PRD)**: Parallels' own disk format. Not implemented.
 - **bochs, cloop, qcow (other versions)**: not implemented.
 
-**MAME**
-
-- MAME's disk images are CHD files, which are supported above. MAME has no
-  additional disk container format of its own beyond CHD.
+- **MAME**: CHD files are supported; MAME has no other container format.
 
 **Refused by the readers that exist**
 
