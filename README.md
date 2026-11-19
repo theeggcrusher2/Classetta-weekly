@@ -11,6 +11,11 @@ other programs.
 
 ![Three 68k test applications running side by side](docs/screenshots/test-apps.png)
 
+## Features
+- **Archive support** for disk image management
+- **Diskstracker integration** for storage analytics
+- **Filer support** for file and disk image management
+
 ## What runs
 
 Real 68k applications run: TeachText, Microsoft Excel, MacWrite, MacPaint
@@ -41,10 +46,10 @@ and how far it gets.
     and sampled sounds, and the Mac Plus's sound buffer, played through
     your computer's speakers;
   - MultiFinder-style switching between several applications at once.
-- **Files** in MacBinary, BinHex, AppleSingle and AppleDouble, the
-  emulators' side files, HFS, HFS Plus and MFS disk images, MOOF floppy
-  images and CD-ROM images. An application run from a folder on your
-  computer saves its documents there.
+- **Files** in MacBinary, BinHex, AppleSingle, AppleDouble, DART, 
+  NDIF, DMG, ISO and Toast; HFS, HFS Plus, MFS, 
+  disk images, MOOF floppy images and CD-ROM images. An application 
+  run from a folder on your computer saves its documents there.
 - **Not there yet:** Apple events and PPC sessions between
   applications; anything plugged into the serial ports, and AppleTalk;
   the event filter and activation procedures of custom Open and Save
