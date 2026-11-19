@@ -13,7 +13,7 @@ other programs.
 
 ## Features
 - **Transparent archive & image handling:** Seamlessly browse, extract, and launch files from nested archives and disk images, including archives-within-archives.
-- **Disktracker integration:** Offline media indexing, index creation, and file discovery.
+- **Disktracker integration:** Offline media indexing and direct file discovery from index files.
 - **Filer:** Native file management, host filesystem browsing, and file/application launching.
 
 ## What runs
