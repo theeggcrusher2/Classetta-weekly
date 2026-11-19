@@ -12,7 +12,7 @@ other programs.
 ![Three 68k test applications running side by side](docs/screenshots/test-apps.png)
 
 ## Features
-- **Archive support** for disk image management
+- **Transparent archive & image handling:** Seamlessly browse, extract, and launch files from nested archives and disk images, including archives-within-archives.
 - **Diskstracker integration** for storage analytics
 - **Filer support** for file and disk image management
 
