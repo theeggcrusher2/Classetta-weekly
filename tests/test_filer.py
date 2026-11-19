@@ -289,12 +289,12 @@ def test_the_window_lists_the_folder(harness):
     assert win in h.d.filer_windows
 
 
-def test_the_name_column_fits_32_Ws_without_truncating(harness):
+def test_the_name_column_fits_32_ns_without_truncating(harness):
     h = harness(disks=[_n_volume()])
     win = h.d.open_filer(h.d.config.disks[0])
     h.settle()
     fm = QFontMetrics(win.tree.font())
-    assert win.tree.columnWidth(0) >= fm.horizontalAdvance("W" * 32)
+    assert win.tree.columnWidth(0) >= fm.horizontalAdvance("n" * 32)
 
 
 def test_the_kind_column_stays_at_the_right_edge_as_the_window_resizes(harness):

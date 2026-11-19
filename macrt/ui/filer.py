@@ -622,7 +622,7 @@ class FilerWindow(_Hosted):
         # icon and padding (16px icon + padding, plus headroom for a
         # vertical scrollbar's width) + the fixed Size and Kind columns.
         fm = QFontMetrics(self.tree.font())
-        self._content_width = max(CONTENT[0], fm.horizontalAdvance('W' * 32) + 30 + 56 + 84)
+        self._content_width = max(CONTENT[0], fm.horizontalAdvance('n' * 32) + 30 + 56 + 84)
         self.tree.setRootIsDecorated(False)
         self.tree.setIndentation(0)
         self.tree.setUniformRowHeights(True)
@@ -914,7 +914,7 @@ class FilerWindow(_Hosted):
         fm = self.tree.fontMetrics()
         widest = max((fm.horizontalAdvance(self.tree.topLevelItem(i).text(0))
                       for i in range(rows)), default=0)
-        width = max(CONTENT[0], fm.horizontalAdvance('W' * 32) + 30 + 56 + 84,
+        width = max(CONTENT[0], fm.horizontalAdvance('n' * 32) + 30 + 56 + 84,
                     widest + 30 + 56 + 84)
         f = self.frame()
         overhead = chrome.structure_size(f, self._content_width, 0)[1]
