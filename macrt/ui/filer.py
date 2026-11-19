@@ -26,7 +26,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Callable
 
 import machfs
-from PyQt6.QtCore import QEvent, QSize, Qt
+from PyQt6.QtCore import QEvent, QPoint, QSize, Qt, QTimer
 from PyQt6.QtGui import QFontMetrics, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QHeaderView, QInputDialog, QListWidget,
@@ -48,6 +48,7 @@ from ..process import size_resource
 from ..m68k.segload import has_code, why_no_code
 from ..resfork import InvalidForkError, is_fork, read_fork
 from ..toolbox import constants as k
+from ..toolbox.types import Rect
 from ..toolbox.icons import LARGE, MINI, SMALL, Icon, bitmap_icon, color_suite_icon, suite_icon
 from ..toolbox.menus import Menu, parse_menu_items
 from ..toolbox.windows import WindowKind
@@ -501,6 +502,46 @@ def _merge(node: dict, key: str, value) -> None:
         existing.setdefault(key, value)
 
 
+class _GrowBox(QWidget):
+    """The classic size box at the corner where the window's scroll bars meet."""
+    def __init__(self, dad: FilerWindow):
+        super().__init__(dad)
+        self.dad = dad
+        self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.resize(theme.GROW_BOX, theme.GROW_BOX)
+
+    def paintEvent(self, ev):  # noqa: N802
+        f = self.dad.frame()
+        bg, fg = chrome.palette(f)
+        p = QPainter(self)
+        chrome.paint_grow_box(p, self.rect(), fg=fg, bg=bg, hilited=self.dad._hilited)
+        p.end()
+
+    def mousePressEvent(self, ev):  # noqa: N802
+        dad = self.dad
+        dad.raise_()
+        if dad.isWindow():
+            dad.activateWindow()
+        else:
+            dad.tree.setFocus()
+        dad.display.update_mouse(ev.globalPosition().toPoint(), ev.modifiers(), down=True)
+        dad._grow_start()
+        self.grabMouse()
+
+    def mouseMoveEvent(self, ev):  # noqa: N802
+        self.dad.display.update_mouse(ev.globalPosition().toPoint(), ev.modifiers(), down=None)
+        self.dad._grow_move(ev.globalPosition().toPoint())
+
+    def mouseReleaseEvent(self, ev):  # noqa: N802
+        self.releaseMouse()
+        dad = self.dad
+        dad.display.update_mouse(ev.globalPosition().toPoint(), ev.modifiers(), down=False)
+        dad._grow_move(ev.globalPosition().toPoint())
+        dad._grow_end()
+        dad.display.input.releases = dad.display.input.presses
+
+
 class FilerWindow(_Hosted):
     """One folder's window: its contents listed, ready to open.  Its
     title bar wears an icon of the container it lists — the disk image
@@ -577,12 +618,20 @@ class FilerWindow(_Hosted):
         self.tree.setColumnWidth(0, self._content_width - 140)
         self.tree.setColumnWidth(1, 56)
         self.tree.setColumnWidth(2, 84)
+        self._name_custom = False      # set once a hand drags the Name divider
+        self._syncing_columns = False
+        header.sectionResized.connect(self._column_resized)
         self.tree.itemActivated.connect(self._activated)
         self.tree.installEventFilter(self)
         self.tree.viewport().installEventFilter(self)
         app = QApplication.instance()
         if app is not None:
             app.focusChanged.connect(self._focus_changed)
+        self._content_height = CONTENT[1]
+        self._grow = None         # drag state: (grab mac point, content width, content height)
+        self._grow_box = _GrowBox(self)
+        self._zoomed = False      # is the window at its zoom (fit) size
+        self._user_size = None    # the size the window had before it zoomed
         self._relayout()
 
     # -- content ----------------------------------------------------------
@@ -658,10 +707,11 @@ class FilerWindow(_Hosted):
             title = self.path[-1] if self.path else self.volume.name
         return chrome.Frame(kind=WindowKind.DOCUMENT, title=title,
                             title_icon=self._title_icon, title_pixmap=self._title_pixmap,
-                            hilited=self._hilited, go_away=True, zoom=True, grow=True, pressed=self._pressed)
+                            hilited=self._hilited, go_away=True, zoom=True, grow=True, pressed=self._pressed,
+                            zoomed_out=self._zoomed)
 
     def content_size(self) -> tuple[int, int]:
-        return (getattr(self, '_content_width', CONTENT[0]), CONTENT[1])
+        return self._content_width, self._content_height
 
     def _relayout(self) -> None:
         f = self.frame()
@@ -669,8 +719,44 @@ class FilerWindow(_Hosted):
         s = chrome.shadow(f)
         self.resize(w + s, h + s)
         self.setMask(chrome.mask(f, w, h))
-        self.tree.setGeometry(chrome.content_rect(f, w, h))
+        c = chrome.content_rect(f, w, h)
+        g = theme.GROW_BOX if f.grow else 0
+        self.tree.setGeometry(c)
+        self._sync_name_column()
+        # The viewport settles its own width (scroll bars and all) a beat
+        # later, so sync again once the event loop has caught up.
+        QTimer.singleShot(0, self._sync_after_layout)
+        if g:
+            self._grow_box.setGeometry(c.x() + c.width() - g, c.y() + c.height() - g, g, g)
+            self._grow_box.show()
+            self._grow_box.raise_()
+        else:
+            self._grow_box.hide()
         self.update()
+
+    def _sync_name_column(self) -> None:
+        """Name keeps the room the fixed Size and Kind columns leave, so
+        Kind stays anchored at the right edge as the window changes size —
+        unless the divider was dragged by hand."""
+        if self._name_custom or self._syncing_columns:
+            return
+        width = max(0, self.tree.viewport().width() - 140)
+        if self.tree.columnWidth(0) != width:
+            self._syncing_columns = True
+            try:
+                self.tree.setColumnWidth(0, width)
+            finally:
+                self._syncing_columns = False
+
+    def _column_resized(self, logical: int, _old: int, _new: int) -> None:
+        if logical == 0 and not self._syncing_columns:
+            self._name_custom = True      # a hand dragged the divider
+
+    def _sync_after_layout(self) -> None:
+        try:
+            self._sync_name_column()
+        except RuntimeError:              # the window closed before the timer ran
+            pass
 
     def paintEvent(self, event):  # noqa: N802
         f = self.frame()
@@ -685,11 +771,13 @@ class FilerWindow(_Hosted):
         return chrome.hit(f, w, h, x, y)
 
     def box_rect(self, part: int):
-        if part != k.wInGoAway:
-            return None
         f = self.frame()
         w = self.width() - chrome.shadow(f)
-        return chrome.close_box_rect(f, w)
+        if part == k.wInGoAway:
+            return chrome.close_box_rect(f, w)
+        if part in (k.wInZoomIn, k.wInZoomOut):
+            return chrome.zoom_box_rect(f, w)
+        return None
 
     def set_pressed(self, part: int) -> None:
         if part != self._pressed:
@@ -709,6 +797,14 @@ class FilerWindow(_Hosted):
             self.display._start_tracker(
                 BoxTracker(self.display, Future(), self, k.wInGoAway)
             ).add_done_callback(self._close_box_done)
+        elif part == k.wInGrow:
+            # Resize from the corner: the top left stays, the size follows
+            # the mouse until the button comes up.
+            self._grow_start()
+        elif part in (k.wInZoomIn, k.wInZoomOut):
+            self.display._start_tracker(
+                BoxTracker(self.display, Future(), self, part)
+            ).add_done_callback(self._zoom_box_done)
         elif part == k.wInDrag:
             self.display._start_tracker(DragTracker(
                 self.display, Future(), self, self.mac_origin(),
@@ -716,12 +812,19 @@ class FilerWindow(_Hosted):
 
     def mouseMoveEvent(self, ev):  # noqa: N802
         self.display.update_mouse(ev.globalPosition().toPoint(), ev.modifiers(), down=None)
+        if self._grow is not None:
+            self._grow_move(ev.globalPosition().toPoint())
+            return
         t = self.display.tracker
         if isinstance(t, (BoxTracker, DragTracker)) and self._tracks(t):
             t.move(ev.globalPosition().toPoint())
 
     def mouseReleaseEvent(self, ev):  # noqa: N802
         self.display.update_mouse(ev.globalPosition().toPoint(), ev.modifiers(), down=False)
+        if self._grow is not None:
+            self._grow_end()
+            self.update()
+            return
         t = self.display.tracker
         if isinstance(t, (BoxTracker, DragTracker)) and self._tracks(t):
             t.release(ev.globalPosition().toPoint())
@@ -733,6 +836,75 @@ class FilerWindow(_Hosted):
     def _close_box_done(self, closed) -> None:
         if closed:
             self.display.close_filer(self)
+
+    def _grow_start(self) -> None:
+        # Resizing by hand leaves the standard (zoomed) state, as on a Mac.
+        self._zoomed = False
+        self._grow = (self.display.input.mac_pos, self._content_width,
+                      self._content_height)
+
+    def _grow_move(self, gpos: QPoint) -> None:
+        g = self._grow
+        if g is None:
+            return
+        grab, w0, h0 = g
+        pt = self.display.mac_from_global(gpos)
+        w = max(200, w0 + pt.h - grab.h)   # room for Name, Size and Kind
+        h = max(100, h0 + pt.v - grab.v)
+        if (w, h) != (self._content_width, self._content_height):
+            self._content_width, self._content_height = w, h
+            self._relayout()
+
+    def _grow_end(self) -> None:
+        self._grow = None
+
+    def _zoom_box_done(self, zoomed) -> None:
+        if zoomed:
+            self._toggle_zoom()
+
+    def _toggle_zoom(self) -> None:
+        if self._zoomed:
+            if self._user_size is not None:
+                self._content_width, self._content_height = self._user_size
+            self._zoomed = False
+        else:
+            self._user_size = (self._content_width, self._content_height)
+            self._content_width, self._content_height = self._fit_size()
+            self._zoomed = True
+        self._relayout()
+        self._grow_box.update()
+
+    def _fit_size(self) -> tuple[int, int]:
+        """The content size that shows every row at once (zoom to fit),
+        kept short enough that the window never draws behind the menu bar."""
+        rows = self.tree.topLevelItemCount()
+        if rows:
+            row_h = self.tree.sizeHintForRow(0)
+            if row_h <= 0:
+                row_h = self.tree.fontMetrics().lineSpacing()
+        else:
+            row_h = 18
+        header_h = self.tree.header().height()
+        fit = header_h + rows * row_h
+        # The standard state fits the contents, as the HIG asks: width
+        # enough for the widest name, height enough for every row.
+        fm = self.tree.fontMetrics()
+        widest = max((fm.horizontalAdvance(self.tree.topLevelItem(i).text(0))
+                      for i in range(rows)), default=0)
+        width = max(CONTENT[0], fm.horizontalAdvance('W' * 32) + 30 + 56 + 84,
+                    widest + 30 + 56 + 84)
+        f = self.frame()
+        overhead = chrome.structure_size(f, self._content_width, 0)[1]
+        top = self.mac_origin().v
+        if self.display.config.menu_bar == "global":
+            top = max(top, theme.MENU_BAR_HEIGHT)
+        cap = self.display.size[1] - top - overhead - chrome.shadow(f)
+        height = max(100, min(fit, max(cap, 100)))
+        # Keep the window on the screen, moving as little as possible:
+        # the top left stays where it is, so only the size is clamped.
+        cap_w = self.display.size[0] - self.mac_origin().h - chrome.shadow(f)
+        width = min(width, max(cap_w, 200))
+        return width, height
 
     def closeEvent(self, event):  # noqa: N802
         event.accept()
@@ -761,6 +933,9 @@ class FilerWindow(_Hosted):
             self.display.filer_blurred(self, new)
 
     def eventFilter(self, obj, ev):  # noqa: N802
+        if obj is self.tree.viewport() and ev.type() == QEvent.Type.Resize:
+            self._sync_name_column()    # a scrollbar came or went
+            return False
         if ev.type() == QEvent.Type.MouseButtonPress:
             self.raise_()
             if self.isWindow():

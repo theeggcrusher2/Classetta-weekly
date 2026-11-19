@@ -6,7 +6,7 @@ import pytest
 import struct
 import sys
 import zlib
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtGui import QColor, QFontMetrics
 from PyQt6.QtTest import QTest
 
@@ -17,7 +17,7 @@ from macrt.macfile import (ArchiveFolder, ContainerFolder, HostFolder, LazyArchi
                            is_alias, load_volume, open_disks)
 from macrt.resfork import build_fork, Resource, resPurgeable
 from macrt.toolbox import constants as k
-from macrt.ui import theme
+from macrt.ui import chrome, theme
 from macrt.ui.filer import (ARCHIVE_ICON, FILE_MENU_ID, SPECIAL_MENU_ID, FilerOptions,
                              GetInfoWindow, _container_icon)
 from macrt.ui.stdfile import DISK_ICON, DOCUMENT_ICON, FOLDER_ICON
@@ -295,6 +295,84 @@ def test_the_name_column_fits_32_Ws_without_truncating(harness):
     h.settle()
     fm = QFontMetrics(win.tree.font())
     assert win.tree.columnWidth(0) >= fm.horizontalAdvance("W" * 32)
+
+
+def test_the_kind_column_stays_at_the_right_edge_as_the_window_resizes(harness):
+    h = harness(disks=[_n_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    hdr = win.tree.header()
+
+    def kind_right():
+        return hdr.sectionViewportPosition(2) + win.tree.columnWidth(2)
+
+    col0 = win.tree.columnWidth(0)
+    width = win.tree.viewport().width()
+    assert kind_right() == width               # Kind ends at the list's edge
+    win._content_width += 120                  # grow the window by hand
+    win._relayout()
+    h.settle()
+    assert win.tree.viewport().width() == width + 120
+    assert win.tree.columnWidth(0) == col0 + 120   # Name took the new room
+    assert kind_right() == win.tree.viewport().width()
+    win._content_width -= 120                  # and shrink it back again
+    win._relayout()
+    h.settle()
+    assert win.tree.columnWidth(0) == col0
+    assert kind_right() == win.tree.viewport().width()
+
+
+def test_a_dragged_name_divider_survives_resizing_the_window(harness):
+    h = harness(disks=[_n_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    win.tree.header().resizeSection(0, 180)    # a hand drags the divider
+    h.settle()
+    win._content_width += 120
+    win._relayout()
+    h.settle()
+    assert win.tree.columnWidth(0) == 180       # the hand's width stands
+
+
+def test_the_zoom_box_sizes_the_window_to_its_contents_and_back(harness):
+    h = harness(disks=[_n_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    top = win.pos().y()
+    size = (win._content_width, win._content_height)
+    f = win.frame()
+    zb = chrome.zoom_box_rect(f, win.width() - chrome.shadow(f))
+    assert zb is not None
+    h.click(*h.mac(win, zb.center()))
+    h.settle()
+    assert win._zoomed
+    assert win._content_height < size[1]            # one row: it fits down
+    assert win.pos().y() == top                     # the window did not move
+    assert win.height() + win.pos().y() <= h.d.size[1]   # it stays on the desk
+    f = win.frame()
+    zb = chrome.zoom_box_rect(f, win.width() - chrome.shadow(f))
+    h.click(*h.mac(win, zb.center()))
+    h.settle()
+    assert not win._zoomed
+    assert (win._content_width, win._content_height) == size
+
+
+def test_dragging_the_size_box_resizes_the_window(harness):
+    h = harness(disks=[_n_volume()])
+    win = h.d.open_filer(h.d.config.disks[0])
+    h.settle()
+    before = (win.width(), win.height())
+    box = win._grow_box
+    c = box.rect().center()
+    QTest.mousePress(box, LB, NO_MODS, c)
+    QTest.mouseMove(box, c + QPoint(60, 40))
+    # the box moved with the window, so its own centre is now the
+    # dragged corner: releasing there is releasing on the size box
+    QTest.mouseRelease(box, LB, NO_MODS, box.rect().center())
+    h.settle()
+    assert (win.width(), win.height()) == (before[0] + 60, before[1] + 40)
+    # Name followed the width: the viewport minus the fixed Size and Kind
+    assert win.tree.columnWidth(0) == win.tree.viewport().width() - 140
 
 
 def test_the_header_wears_the_lock_while_the_window_is_view_only(harness):

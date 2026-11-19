@@ -292,6 +292,25 @@ def paint(p: QPainter, f: Frame, w: int, h: int) -> None:
         p.fillRect(s, h, w, s, pal.frame)
 
 
+def paint_grow_box(p: QPainter, r: QRect, fg=BLACK, bg=WHITE, hilited: bool = True) -> None:
+    """The size box's white face, its outline and its nested corner marks."""
+    p.fillRect(r, bg)
+    frame_rect(p, r.x(), r.y(), r.width(), r.height(), fg)
+    if hilited:
+        for bx, by, bs in ((r.x() + 3, r.y() + 3, 6), (r.x() + 5, r.y() + 5, 8)):
+            p.fillRect(bx, by, bs, bs, bg)
+            p.fillRect(bx, by, bs, 1, fg)
+            p.fillRect(bx, by + bs - 1, bs, 1, fg)
+            p.fillRect(bx, by, 1, bs, fg)
+            p.fillRect(bx + bs - 1, by, 1, bs, fg)
+
+
+def palette(f: Frame) -> tuple[QColor, QColor]:
+    """A frame's content and frame colours, as it draws them."""
+    pal = _Palette(f)
+    return pal.content, pal.frame
+
+
 def _paint_document(p: QPainter, f: Frame, w: int, h: int, pal: _Palette) -> None:
     b = theme.BORDER
     tr = title_rect(f, w)
@@ -327,16 +346,8 @@ def _paint_document(p: QPainter, f: Frame, w: int, h: int, pal: _Palette) -> Non
     if f.grow:
         c = content_rect(f, w, h)
         g = theme.GROW_BOX
-        gx, gy = c.x() + c.width() - g, c.y() + c.height() - g
-        p.fillRect(gx, gy, g, g, pal.content)
-        frame_rect(p, gx, gy, g, g, pal.frame)
-        if f.hilited:
-            for bx, by, bs in ((gx + 3, gy + 3, 6), (gx + 5, gy + 5, 8)):
-                p.fillRect(bx, by, bs, bs, pal.content)
-                p.fillRect(bx, by, bs, 1, pal.frame)
-                p.fillRect(bx, by + bs - 1, bs, 1, pal.frame)
-                p.fillRect(bx, by, 1, bs, pal.frame)
-                p.fillRect(bx + bs - 1, by, 1, bs, pal.frame)
+        paint_grow_box(p, QRect(c.x() + c.width() - g, c.y() + c.height() - g, g, g),
+                       fg=pal.frame, bg=pal.content, hilited=f.hilited)
 
 
 def _title_text_rect(f: Frame, w: int, tr: QRect, cb, zb) -> QRect | None:
