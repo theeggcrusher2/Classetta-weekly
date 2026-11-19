@@ -11,7 +11,7 @@ explains the machinery underneath.
 - [Memory and code](#memory-and-code): [Memory Manager](#memory-manager), [Segment Loader](#segment-loader), [Resource Manager](#resource-manager)
 - [Drawing](#drawing): [QuickDraw](#quickdraw), [Font Manager](#font-manager), [Colour windows](#colour-windows), [Palette Manager](#palette-manager), [Color Picker Package (`Pack12`)](#color-picker-package-pack12), [Icons](#icons)
 - [The user interface](#the-user-interface): [Window Manager](#window-manager), [Menu Manager](#menu-manager), [Help Manager](#help-manager), [Event Manager](#event-manager), [Control Manager](#control-manager), [Dialog Manager](#dialog-manager), [List Manager](#list-manager), [TextEdit](#textedit), [Scrap Manager](#scrap-manager), [Desk Manager](#desk-manager)
-- [Files and devices](#files-and-devices): [File Manager](#file-manager), [Device Manager](#device-manager), [Alias Manager](#alias-manager), [Standard File](#standard-file)
+- [Files and devices](#files-and-devices): [File Manager](#file-manager), [Device Manager](#device-manager), [Alias Manager](#alias-manager), [Standard File](#standard-file), [Disktracker](#disktracker), [Filer](#filer)
 - [Processes and communication](#processes-and-communication): [Process Manager and MultiFinder](#process-manager-and-multifinder), [Apple Event Manager](#apple-event-manager), [Edition Manager](#edition-manager), [Component Manager](#component-manager), [Communications Toolbox utilities](#communications-toolbox-utilities), [PPC Toolbox](#ppc-toolbox), [Thread Manager](#thread-manager)
 - [Numbers and text](#numbers-and-text): [SANE](#sane), [International Utilities](#international-utilities), [Script Manager](#script-manager)
 - [The machine, printing and sound](#the-machine-printing-and-sound): [The hardware](#the-hardware), [Printing Manager](#printing-manager), [Sound](#sound)
@@ -789,6 +789,14 @@ A hook that changes the types in its type list and returns
 `sfHookRebuildList` has the list made again with the new types, as
 FlexReader II's icons for its three kinds of file do. The modal filter
 and activation procedures aren't called.
+
+### Disktracker
+
+Tracks file locations and metadata across mounted volumes. Provides fast lookups via `DTLookupFile` and `DTGetFileInfo`.
+
+### Filer
+
+High-level file operations. Simplifies moving, copying, and deleting files with `FLCopyFile`, `FLMoveFile`, and `FLDeleteFile`.
 
 ## Processes and communication
 

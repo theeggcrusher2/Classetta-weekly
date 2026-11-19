@@ -389,6 +389,16 @@ its strikes' widths and line spacing (see [A real System
 file](running-apps.md#a-real-system-file)).
 
 
+### Filer and Disktracker
+
+* **Filer navigation.** Filer nests by reading a directory's contents into a
+  handle and presenting them in its list view; drilling down opens a new
+  view over the selected folder's contents, recursively, with each path
+  tracked in a stack of handles.
+* **Disktracker indexing.** Disktracker's pipeline crawls a volume's catalog
+  tree, populating an indexed database of file metadata and IDs for fast
+  lookup, triggered by volume mount or manual refresh.
+
 ## The source tree
 
 ```

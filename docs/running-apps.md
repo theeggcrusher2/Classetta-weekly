@@ -249,19 +249,22 @@ python -m macrt "System 6.0.8.dsk" --app TeachText
 python -m macrt Tools.img --app "Tools:Disk Tools:Disk First Aid"
 python -m macrt Paint.dsk                           # a 400K MFS floppy from 1984
 python -m macrt Catalog.dtc                         # a Disk Tracker index, browsed read-only
+python -m macrt --filer ~/Downloads/MacArchives   # browses local folder
 ```
 
-Disk Tracker's own index files open too: a `.dtc` or `.dt1` file lists
-the disks it indexes in the Filer window's root — one folder per disk,
-each holding that disk's recorded contents — and stays read-only — its
-title bar carries a catalog icon of its own rather than a disk's. A
-folder's row in it still browses; a file's row offers Get Info only
-(Open, View, Trace Traps and Display Contents are off), and a double-click
-on a file's row says the item is recorded in the index rather than stored
-in it. File ▸ Get Info shows what the index recorded: size, type, creator,
-and creation and modification dates. To build such
-an index from a list of disk images, see
-[disktracker/README.md](../disktracker/README.md).
+The Filer supports nested navigation: double-clicking an archive file or
+folder member within a Filer window opens that item in a new window, allowing
+you to drill down through complex, multi-layered directory structures.
+
+Disk Tracker's own index files (`.dtc` or `.dt1`) open in a read-only Filer
+window, listing the disks they index as folders. Double-clicking a file in
+one shows it's recorded in the index rather than stored; File ▸ Get Info shows
+its metadata (size, type, creator, dates).
+
+```sh
+# Example: creating a Disk Tracker index
+python -m disktracker.build "Disk 1.dsk" "Disk 2.dsk" > Catalog.dtc
+```
 
 `--app` takes the application's name, or its Mac path with folders
 separated by colons, starting from the disk's name or from any folder
