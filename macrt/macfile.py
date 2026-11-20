@@ -38,6 +38,8 @@ import stat
 import struct
 import time
 import unicodedata
+from collections import OrderedDict
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Protocol
@@ -69,12 +71,40 @@ VOLUME_SIGNATURES = (HFS_SIGNATURE, *HFS_PLUS_SIGNATURES, MFS_SIGNATURE)
 MAC_1904 = 2082844800                   # seconds from 1904 to 1970
 SECTOR, TAG = 512, 12                   # a floppy sector, and the tag the drive keeps with it
 MAPPED = 16 << 20                       # an image this big is mapped, not read
+MEMORY_GUARD = 512 * 1024 * 1024       # the volume bytes a run keeps in RAM at once
+MEMORY_GUARD = 512 * 1024 * 1024       # the volume bytes a run keeps in RAM at once
 CD_IMAGES = (".iso", ".cdr", ".toast")  # the names an image macrt mounts as a CD-ROM ends in
 ISO_9660_AT = 16 * 2048 + 1             # the first volume descriptor's "CD001" (ECMA-119)
 CD_SECTOR, CD_DATA = 2352, 2048         # a CD sector whole, and the data in it (ECMA-130)
 CD_SYNC = b"\x00" + b"\xff" * 10 + b"\x00"  # what each whole sector starts with
 
 log = logging.getLogger("macrt.macfile")
+
+_VOLUME_CACHE: OrderedDict[str, int] = OrderedDict()   # disk image -> its size
+_VOLUME_BYTES = 0                                     # the volume bytes held at once
+
+
+def _cache_volume(key: str, size: int) -> None:
+    """Keep the volumes a run has open, and stay under the memory guard by
+    evicting the least recently loaded when it goes past it."""
+    global _VOLUME_BYTES
+    _VOLUME_CACHE[key] = _VOLUME_CACHE.pop(key, 0) + size
+    _VOLUME_BYTES += size
+    while _VOLUME_BYTES > MEMORY_GUARD and _VOLUME_CACHE:
+        old, n = _VOLUME_CACHE.popitem(last=False)
+        _VOLUME_BYTES -= n
+        log.debug("macrt.macfile: evicted volume %r (%.1f MB)", old, n / (1024 * 1024))
+
+
+def _vol_size(source, data) -> int:
+    if isinstance(source, (str, os.PathLike)):
+        try:
+            return Path(source).stat().st_size
+        except OSError:
+            pass
+    if isinstance(data, (bytes, bytearray, memoryview)):
+        return len(data)
+    return len(data) if hasattr(data, "__len__") else 0
 
 
 @dataclass(eq=False)
@@ -1668,6 +1698,8 @@ def load_volume(source: str | os.PathLike | bytes | mmap.mmap) -> machfs.Volume:
                 raise ValueError(f"the disk image is damaged ({type(hfs_e).__name__}: {hfs_e})") from None
     vol.size = len(data)                # the disk's: whether it's a floppy's
     vol.startup, vol.disk, vol.allocation = startup, disk, allocation
+    _cache_volume(str(source) if not isinstance(source, (bytes, bytearray, mmap.mmap))
+                  else f"<bytes {id(data):x}>", _vol_size(source, data))
     return vol
 
 
