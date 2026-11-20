@@ -830,6 +830,23 @@ class Display(QObject):
         if win not in self.filer_windows:
             return
         self.filer_windows.remove(win)
+        
+        # Eject/unmount volume if applicable (skip Macintosh HD boot volume)
+        vol = getattr(win, "volume", None)
+        if isinstance(vol, VolumeFolder):
+            image_name = vol.volume.name
+            # Find and unmount in FileSystem if not boot volume
+            fs = self.system.files
+            for v in list(fs.volumes):
+                if v.name == image_name and v is not fs.boot:
+                    try:
+                        fs.unmount(v)
+                        # Clean up cache in macfile
+                        from .. import macfile
+                        macfile._VOLUME_CACHE.pop(str(v.store.source) if hasattr(v.store, "source") and v.store.source else "", None)
+                    except Exception:
+                        pass
+        
         self._retire(win)
         if self.front_filer is win:
             self.front_filer = self.filer_windows[-1] if self.filer_windows else None
