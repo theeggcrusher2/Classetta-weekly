@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import struct
 
-from PyQt6.QtGui import QImage
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor, QImage
 
 from .color import STANDARD_4BIT, STANDARD_8BIT
 from .pict import PictError, Reader, pixel_image, read_ctab, to_mono
@@ -102,6 +103,12 @@ def bitmap_icon(data: bytes, size: tuple[int, int] = LARGE, masked: bool = True)
     width, height = size
     rb = (width + 7) // 8
     n = rb * height
+    if len(data) == 128 and size != LARGE:
+        large_icon = bitmap_icon(data, LARGE, masked=False)
+        if large_icon is None:
+            return None
+        img = large_icon.image().scaled(width, height, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.FastTransformation)
+        return Icon(width, height, _mono_rows(img), None)
     if len(data) < n:
         return None
     mask = _rows(data, rb, height, n) if masked and len(data) >= 2 * n else None
@@ -128,7 +135,56 @@ def color_icon(data: bytes, size: tuple[int, int], depth: int,
         return None
     img = pixel_image(_rows(data, rb, height), width, height, depth,
                       STANDARD_8BIT if depth == 8 else STANDARD_4BIT + [0xFF000000] * 240)
-    return Icon(width, height, _mono_rows(img), mask)
+    return Icon(width, height, _mono_rows(img), mask,
+                _mask_to_alpha(img, mask, size))
+
+
+def _mask_to_alpha(img: QImage, mask: list[bytes] | None,
+                 size: tuple[int, int]) -> QImage:
+    """img as ARGB32, the bits where mask is clear made transparent;
+    without a mask, img as ARGB32 with every pixel kept."""
+    out = img.convertToFormat(QImage.Format.Format_ARGB32)
+    if not mask:
+        return out
+    transparent = QColor(0, 0, 0, 0)
+    width, height = size
+    for y in range(min(height, len(mask))):
+        mrow = mask[y]
+        for x in range(width):
+            if not (mrow[x >> 3] & (0x80 >> (x & 7))):
+                out.setPixelColor(x, y, transparent)
+    return out
+
+
+def color_suite_icon(get, size: tuple[int, int], depth: int) -> Icon | None:
+    """The deepest colour icon of a size in a suite, its pixels as an
+    ARGB32 image with the 1-bit sibling's mask as its alpha; None when
+    depth can't show colour or the suite has no colour member for it.
+    At depth 8 and deeper the 8-bit member wins over the 4-bit one; at
+    depth 4 the 4-bit member is the deepest one usable."""
+    if depth <= 2:
+        return None
+    bw, four, eight = SIZES[size]
+    candidates = ((eight, 8), (four, 4)) if depth >= 8 else ((four, 4),)
+    one = get(bw)
+    if not one and size == LARGE:
+        one = get("ICON")
+    masked = len(one) >= 2 * size[0] * size[1] // 8 if one else False
+    masked_icon = bitmap_icon(one, size, masked=masked) if one else None
+    mask = masked_icon.mask if masked_icon else None
+    for kind, bits in candidates:
+        data = get(kind)
+        if not data:
+            continue
+        row_bytes = size[0] * bits // 8
+        if len(data) < row_bytes * size[1]:
+            continue
+        table = STANDARD_8BIT if bits == 8 else STANDARD_4BIT + [0xFF000000] * 240
+        img = pixel_image(_rows(data, row_bytes, size[1]), size[0], size[1],
+                          bits, table)
+        return Icon(size[0], size[1], _mono_rows(img), mask,
+                    pixels=_mask_to_alpha(img, mask, size))
+    return None
 
 
 def suite_icon(get, size: tuple[int, int]) -> Icon | None:
@@ -138,7 +194,10 @@ def suite_icon(get, size: tuple[int, int]) -> Icon | None:
     one, all of it (the mask is the 1-bit one's)."""
     bw, four, eight = SIZES[size]
     one = get(bw)
-    icon = bitmap_icon(one, size) if one else None
+    if not one and size == LARGE:
+        one = get("ICON")
+    masked = len(one) >= 2 * size[0] * size[1] // 8 if one else False
+    icon = bitmap_icon(one, size, masked=masked) if one else None
     if icon is not None:
         return icon
     for kind, depth in ((eight, 8), (four, 4)):

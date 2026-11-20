@@ -179,6 +179,59 @@ def read_fork(data: bytes) -> list[Resource]:
     return out
 
 
+def _pstr(body: bytes, at: int) -> str | None:
+    """The Pascal string at *at* in *body*, None when it starts past the
+    body's end or runs off it."""
+    if at < 0 or at >= len(body):
+        return None
+    n = body[at]
+    if at + 1 + n > len(body):
+        return None
+    return body[at + 1:at + 1 + n].decode("mac_roman")
+
+
+def vers_message(body: bytes) -> str | None:
+    """What a 'vers' record says: its long message, or its short version
+    string when there is no long one; None for a record too short or
+    empty to hold either."""
+    if len(body) < 7:                # six header bytes, then the short pascal string
+        return None
+    return _pstr(body, 7 + body[6]) or _pstr(body, 6) or None
+
+
+def vers_messages(rsrc: bytes) -> tuple[str | None, str | None]:
+    """Version messages (ID 1, ID 2) from a resource fork.
+
+    Each record is parsed by :func:`vers_message`.  An error (including a
+    missing or truncated resource) returns ``(None, None)``."""
+    try:
+        resources = read_fork(bytes(rsrc))
+    except Exception:
+        return None, None
+    messages: dict[int, str | None] = {}
+    for rid in (1, 2):
+        r = next((r for r in resources if r.type == b"vers" and r.id == rid), None)
+        messages[rid] = vers_message(r.data) if r is not None else None
+    return messages[1], messages[2]
+
+
+def vers_body(rsrc: bytes, rid: int = 1) -> bytes | None:
+    """The raw data of ``'vers'`` resource *rid* in *rsrc*, or ``None`` when
+    the resource is missing, compressed, or the fork cannot be read.
+
+    The ``'vers'`` resources used by the System for version numbers are never
+    compressed, so callers that need a raw version number should use this
+    (e.g. :func:`file_version`)."""
+    try:
+        fork = open_fork(bytes(rsrc))
+    except InvalidForkError:
+        return None
+    e = fork.find(b"vers", rid)
+    if e is None or e.attrs & resCompressed:
+        return None
+    return fork.raw(e)
+
+
 def decompress(data: bytes) -> bytes:
     """Expand a resource stored with resCompressed set.  Once it has come
     to the length its header gives, whatever is stored after is left

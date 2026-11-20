@@ -110,6 +110,10 @@ def decode(data: bytes, width: int, height: int, row_bytes: int, depth: int,
         img = QImage(_swapped(data, 2), width, height, row_bytes, QImage.Format.Format_RGB555)
     else:
         img = QImage(_swapped(data, 4), width, height, row_bytes, QImage.Format.Format_RGB32)
+    if img.format() == QImage.Format.Format_RGB32:
+        # already RGB32: convertToFormat shares data's buffer rather than
+        # copying, and data doesn't outlive this function
+        img = img.copy()
     return img.convertToFormat(QImage.Format.Format_RGB32)
 
 

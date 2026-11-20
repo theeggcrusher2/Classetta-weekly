@@ -9,6 +9,7 @@ These pages say how to use it, what it implements, and how it's built.
 | --- | --- |
 | [Running a Mac application](running-apps.md) | Installing macrt, getting an application to it with its resource fork, every option, and what to do when it stops |
 | [Titles tried so far](titles.md) | The applications run so far, how far each gets, and what to give it on the command line |
+| [Disk images](disk-images.md) | Supported formats, archives, disk structures, and Filer management |
 | [What works](toolbox.md) | The Toolbox and Operating System a manager at a time: what macrt does, and where and why it differs from a Mac |
 | [How macrt works](architecture.md) | The processor, the trap dispatcher, memory, drawing, resources and files, and the source tree |
 | [Working on macrt](development.md) | The tests and what each covers, the 68k test applications, and adding a Toolbox routine |

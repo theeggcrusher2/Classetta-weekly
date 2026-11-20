@@ -29,7 +29,7 @@ from unicorn.m68k_const import UC_CPU_M68K_M68020, UC_CPU_M68K_M68030
 from ..macfile import MacFile, finder_beside, fonts_beside
 from ..memory import RAM, from_mac, to_mac
 from ..resfork import (InvalidForkError, build_fork, open_fork, resCompressed, resLocked,
-                       resSysHeap, restype)
+                       resSysHeap, restype, vers_body)
 from . import lowmem, printing, sysres
 from .files import FileManager, FileSystem
 from .lowmem import World
@@ -311,14 +311,9 @@ class Partition:
 
 def file_version(f: MacFile | None) -> int:
     """The version f's 'vers' 1 gives, as $0755 for 7.5.5; 0 if it has none."""
-    try:
-        fork = open_fork(f.rsrc) if f is not None else None
-    except InvalidForkError:
-        fork = None
-    vers = next((fork.raw(e) for e in fork.entries
-                 if e.type == b"vers" and e.id == 1 and not e.attrs & resCompressed),
-                b"") if fork is not None else b""
-    return int.from_bytes(vers[:2], "big") if len(vers) >= 2 else 0
+    rsrc = getattr(f, "rsrc", b"") if f is not None else b""
+    body = vers_body(rsrc) if rsrc else None
+    return int.from_bytes(body[:2], "big") if body and len(body) >= 2 else 0
 
 
 def system_version(f: MacFile | None) -> int:

@@ -395,3 +395,88 @@ def test_sicn(g):
              g.handle(EMPTY + MIDDLE)) == 0
     rows = g.rows(port)
     assert white(rows, 8, 40, 24, 56) and rows[0][32:] == "#" * 32
+
+
+# -- Colour suite icons ---------------------------------------------------------
+from macrt.toolbox.color import STANDARD_4BIT, STANDARD_8BIT   # noqa: E402
+from macrt.toolbox.icons import color_suite_icon               # noqa: E402
+
+COLOUR_SMALL = {                        # 16 by 16 members of a suite
+    "ics#": b"\xcc" * 32 + b"\xff" * 32,
+    "ics4": b"\x11" * 128,              # every pixel colour 1
+    "ics8": b"\xd7" * 256,              # every pixel colour 215
+}
+COLOUR_LARGE = {                        # 32 by 32 members
+    "ICN#": b"\xf0" * 128 + b"\xff" * 128,
+    "icl4": b"\x11" * 512,
+    "icl8": b"\xd7" * 1024,
+}
+
+
+def colour_suite(**overrides):
+    data = COLOUR_SMALL | COLOUR_LARGE | overrides
+    return lambda kind: data.get(kind)
+
+
+def test_a_colour_icon_needs_more_than_two_bits(qapp):
+    assert color_suite_icon(colour_suite(), LARGE, 1) is None
+    assert color_suite_icon(colour_suite(), LARGE, 2) is None
+
+
+def test_a_colour_icon_at_depth_8_is_the_8bit_member(qapp):
+    icon = color_suite_icon(colour_suite(), LARGE, 8)
+    assert icon is not None
+    assert (icon.width, icon.height) == (32, 32)
+    px = STANDARD_8BIT[0xd7]
+    assert icon.pixels.pixelColor(0, 0).rgb() == px
+
+
+def test_a_colour_icon_at_depth_8_keeps_the_4bit_member_as_fallback(qapp):
+    icon = color_suite_icon(colour_suite(icl8=None), LARGE, 8)
+    assert icon is not None
+    assert icon.pixels.pixelColor(0, 0).rgb() == STANDARD_4BIT[0x1]
+
+
+def test_a_colour_icon_at_depth_4_is_the_4bit_member(qapp):
+    icon = color_suite_icon(colour_suite(), LARGE, 4)
+    assert icon is not None
+    assert icon.pixels.pixelColor(0, 0).rgb() == STANDARD_4BIT[0x1]
+
+
+def test_a_colour_icon_at_depth_4_never_uses_the_8bit_member(qapp):
+    icon = color_suite_icon(colour_suite(icl4=None, ics4=None), LARGE, 4)
+    assert icon is None
+    icon = color_suite_icon(colour_suite(), SMALL, 4)
+    assert icon is not None
+
+
+def test_a_suite_without_colour_members_gives_none(qapp):
+    get = colour_suite(icl4=None, icl8=None, ics4=None, ics8=None)
+    assert color_suite_icon(get, LARGE, 8) is None
+    assert color_suite_icon(get, SMALL, 4) is None
+
+
+def test_a_short_colour_member_is_not_used(qapp):
+    icon = color_suite_icon(colour_suite(icl8=b"\xd7" * 100), LARGE, 8)
+    assert icon is not None                     # the 4-bit one takes over
+    assert icon.pixels.pixelColor(0, 0).rgb() == STANDARD_4BIT[0x1]
+
+
+def test_the_masks_clear_bits_become_transparency(qapp):
+    # The mask's first row (its first 2 of 32 bytes for a small icon) is clear.
+    small = COLOUR_SMALL | {"ics#": b"\xcc" * 32 + b"\x00\x00" + b"\xff" * 30}
+    icon = color_suite_icon(lambda kind: small.get(kind), SMALL, 8)
+    assert icon.pixels.pixelColor(0, 0).alpha() == 0
+    assert icon.pixels.pixelColor(0, 1).alpha() == 255
+    large = COLOUR_LARGE | {"ICN#": b"\xf0" * 128 + b"\x00\x00\x00\x00" + b"\xff" * 124}
+    icon = color_suite_icon(lambda kind: large.get(kind), LARGE, 8)
+    assert icon.pixels.pixelColor(0, 0).alpha() == 0
+    assert icon.pixels.pixelColor(0, 1).alpha() == 255
+
+
+def test_a_suite_without_a_1bit_sibling_keeps_no_alpha(qapp):
+    get = colour_suite(**{"ics#": None, "ICN#": None})
+    icon = color_suite_icon(get, SMALL, 8)
+    assert icon is not None
+    assert icon.mask is None
+    assert icon.pixels.pixelColor(0, 0).alpha() == 255

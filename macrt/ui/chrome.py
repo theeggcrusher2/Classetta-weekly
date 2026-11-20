@@ -13,9 +13,10 @@ its auxiliary record's or the default record's (Inside Macintosh V, the
 Window Manager), as the screen shows them, when they aren't the standard
 black and white.  The parts are named, not described: macrt draws the
 outline, the line under the title bar, the boxes' outlines and any shadow
-in wFrameColor, the title in wTextColor, the stripes in wHiliteColor and
-the title bar behind them in wTitleBarColor, and a dialog box's white
-band in wContentColor.  Rounded windows stay black and white.
+in wFrameColor, the title and the title bar's icon in wTextColor, the
+stripes in wHiliteColor and the title bar behind them in wTitleBarColor,
+and a dialog box's white band in wContentColor.  Rounded windows stay
+black and white.
 """
 
 from __future__ import annotations
@@ -25,7 +26,8 @@ from functools import lru_cache
 
 from PyQt6.QtCore import QRect, QRectF, Qt
 from PyQt6.QtGui import (
-    QBitmap, QBrush, QColor, QFontMetrics, QImage, QPainter, QPainterPath, QPen, QRegion,
+    QBitmap, QBrush, QColor, QFontMetrics, QImage, QPainter, QPainterPath, QPen, QPixmap,
+    QRegion,
 )
 
 from ..memory import BusError
@@ -49,6 +51,8 @@ STANDARD_COLORS = (_WHITE, _BLACK, _BLACK, _BLACK, _WHITE)
 class Frame:
     kind: WindowKind
     title: str = ""
+    title_icon: list[str] | None = None   # '#'/'.' rows drawn beside the title
+    title_pixmap: QPixmap | None = None   # drawn instead of title_icon, at depth > 2
     hilited: bool = True
     go_away: bool = False
     zoom: bool = False
@@ -288,6 +292,25 @@ def paint(p: QPainter, f: Frame, w: int, h: int) -> None:
         p.fillRect(s, h, w, s, pal.frame)
 
 
+def paint_grow_box(p: QPainter, r: QRect, fg=BLACK, bg=WHITE, hilited: bool = True) -> None:
+    """The size box's white face, its outline and its nested corner marks."""
+    p.fillRect(r, bg)
+    frame_rect(p, r.x(), r.y(), r.width(), r.height(), fg)
+    if hilited:
+        for bx, by, bs in ((r.x() + 3, r.y() + 3, 6), (r.x() + 5, r.y() + 5, 8)):
+            p.fillRect(bx, by, bs, bs, bg)
+            p.fillRect(bx, by, bs, 1, fg)
+            p.fillRect(bx, by + bs - 1, bs, 1, fg)
+            p.fillRect(bx, by, 1, bs, fg)
+            p.fillRect(bx + bs - 1, by, 1, bs, fg)
+
+
+def palette(f: Frame) -> tuple[QColor, QColor]:
+    """A frame's content and frame colours, as it draws them."""
+    pal = _Palette(f)
+    return pal.content, pal.frame
+
+
 def _paint_document(p: QPainter, f: Frame, w: int, h: int, pal: _Palette) -> None:
     b = theme.BORDER
     tr = title_rect(f, w)
@@ -320,8 +343,15 @@ def _paint_document(p: QPainter, f: Frame, w: int, h: int, pal: _Palette) -> Non
     if title_box is not None:
         _paint_title(p, f, title_box, pal.text)
 
+    if f.grow:
+        c = content_rect(f, w, h)
+        g = theme.GROW_BOX
+        paint_grow_box(p, QRect(c.x() + c.width() - g, c.y() + c.height() - g, g, g),
+                       fg=pal.frame, bg=pal.content, hilited=f.hilited)
+
 
 def _title_text_rect(f: Frame, w: int, tr: QRect, cb, zb) -> QRect | None:
+    """Where the icon and title go together, centred as one block."""
     if not f.title:
         return None
     font = theme.title_font()
@@ -335,14 +365,25 @@ def _title_text_rect(f: Frame, w: int, tr: QRect, cb, zb) -> QRect | None:
     box = theme.BOX_INSET + theme.BOX_SIZE + theme.BOX_CLEARANCE + pad
     left = box if f.go_away else pad
     right = w - (box if f.zoom and f.kind is WindowKind.DOCUMENT else pad)
-    x = max((w - m.horizontalAdvance(f.title)) // 2, left)
-    text = m.elidedText(f.title, Qt.TextElideMode.ElideRight, max(right - x, 0))
+    lead = ((f.title_pixmap.width() if f.title_pixmap is not None
+             else theme.bitmap_size(f.title_icon)[0]) + theme.TITLE_ICON_GAP
+            if f.title_pixmap is not None or f.title_icon else 0)
+    x = max((w - m.horizontalAdvance(f.title) - lead) // 2, left)
+    text = m.elidedText(f.title, Qt.TextElideMode.ElideRight, max(right - x - lead, 0))
     if not text:
         return None
-    return QRect(x, tr.y(), m.horizontalAdvance(text), tr.height())
+    return QRect(x, tr.y(), lead + m.horizontalAdvance(text), tr.height())
 
 
 def _paint_title(p: QPainter, f: Frame, r: QRect, color) -> None:
+    if f.title_pixmap is not None:
+        pm = f.title_pixmap
+        p.drawPixmap(r.x(), r.y() + (r.height() - pm.height()) // 2, pm)
+        r = r.adjusted(pm.width() + theme.TITLE_ICON_GAP, 0, 0, 0)
+    elif f.title_icon:
+        iw, ih = theme.bitmap_size(f.title_icon)
+        theme.draw_bitmap(p, r.x(), r.y() + (r.height() - ih) // 2, f.title_icon, color)
+        r = r.adjusted(iw + theme.TITLE_ICON_GAP, 0, 0, 0)
     font = theme.title_font()
     p.setFont(font)
     p.setPen(QPen(color))

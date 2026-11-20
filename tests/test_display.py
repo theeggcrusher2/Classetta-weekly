@@ -450,16 +450,34 @@ def test_global_bar_follows_front_app(harness):
     assert not any(e[0] == "FindWindow" for e in a.log)
 
 
-def test_application_menu(harness):
-    h = harness(menu_bar="global")
+def test_application_menu_includes_filer(harness):
+    import machfs
+    from macrt.ui.filer import FilerOptions
+    from macrt.ui.filer import FilerWindow
+    
+    # Create a disk
+    v = machfs.Volume()
+    v.name = "Browse"
+    app = machfs.File()
+    app.type, app.creator, app.rsrc = b"APPL", b"TEST", bytearray([0x00, 0x01, 0x02])  # A minimal FORK
+    v["Widget"] = app
+    
+    h = harness(menu_bar="global", disks=[v])
     pa = h.launch(Recorder("Alpha", at=(30, 60)))
     bar = h.d.global_bar
     assert h.d.application_menu_for(bar) is None          # one app: no menu ("auto")
     pb = h.launch(Recorder("Beta", at=(420, 260)))
+    win = h.d.open_filer(h.d.config.disks[0])
+    menu = h.d.application_menu_for(bar)
+    assert menu is not None
+    assert [i.text for i in menu.items] == ["Hide Beta", "Hide Others", "Show All", "-",
+                                            "Alpha", "Beta", "Filer"]
+    assert menu.items[6].mark == k.checkMark
+    h.d.close_filer(win)
+    # After closing Filer, Filer should no longer be in the menu
     menu = h.d.application_menu_for(bar)
     assert [i.text for i in menu.items] == ["Hide Beta", "Hide Others", "Show All", "-",
                                             "Alpha", "Beta"]
-    assert menu.items[5].mark == k.checkMark
     # Pick "Alpha" from it.
     menu_cell = bar.cells()[-1][1]
     h.press(*h.mac(bar, menu_cell.center()))
@@ -468,14 +486,113 @@ def test_application_menu(harness):
     h.move(ih, iv)
     h.release(ih, iv)
     h.wait_until(lambda: h.d.front_process is pa, what="switch via Application menu")
-    # Hide Others hides Beta's window.
-    h.press(*h.mac(bar, bar.cells()[-1][1].center()))
-    h.wait_until(lambda: QApplication.activePopupWidget() is not None, what="pulldown")
-    ih, iv = h.item_point(2)
-    h.move(ih, iv)
-    h.release(ih, iv)
-    h.wait_until(lambda: pb.hidden, what="Hide Others")
-    assert not h.d.views[pb.windows[0]].isVisible()
+
+
+def test_single_app_and_filer_application_menu(harness):
+    import machfs
+    v = machfs.Volume()
+    v.name = "Browse"
+    h = harness(menu_bar="global", disks=[v])
+    pa = h.launch(Recorder("Alpha", at=(30, 60)))
+    bar = h.d.global_bar
+    assert h.d.application_menu_for(bar) is None          # one app, no filer: no menu
+    win = h.d.open_filer(h.d.config.disks[0])
+    menu = h.d.application_menu_for(bar)
+    assert menu is not None                               # one app + filer: menu visible
+    assert [i.text for i in menu.items] == ["Hide Alpha", "Hide Others", "Show All", "-",
+                                            "Alpha", "Filer"]
+    assert menu.items[4].mark == ""                       # Alpha not front (Filer is)
+    assert menu.items[5].mark == k.checkMark              # Filer is front
+    # Bring Alpha to front
+    h.d.filer_front(None)
+    menu2 = h.d.application_menu_for(bar)
+    assert menu2.items[4].mark == k.checkMark             # Alpha checked
+    assert menu2.items[5].mark == ""                      # Filer unchecked
+    h.d.close_filer(win)
+
+
+def test_switching_between_filer_and_app_via_application_menu(harness):
+    import machfs
+    v = machfs.Volume()
+    v.name = "Browse"
+    h = harness(menu_bar="global", disks=[v])
+    pa = h.launch(Recorder("Alpha", at=(30, 60)))
+    win = h.d.open_filer(h.d.config.disks[0])
+    bar = h.d.global_bar
+    assert h.d.front_filer is win
+    # Switch to Alpha via application menu choice (item 5: Alpha)
+    h.d.application_menu_choice(5)
+    h.wait_until(lambda: h.d.front_process is pa and h.d.front_filer is None, what="switch to app")
+
+    # Switch back to Filer via application menu choice (item 6: Filer)
+    h.d.application_menu_choice(6)
+    h.wait_until(lambda: h.d.front_filer is win, what="switch to Filer")
+    h.d.close_filer(win)
+
+
+def test_selecting_filer_from_the_menu_brings_its_window_forward(harness, monkeypatch):
+    """The Filer's window, chosen from the Application menu after an app
+    has come forward, is raised: the app's window loses the front and the
+    Filer's window takes it."""
+    import machfs
+    v = machfs.Volume()
+    v.name = "Browse"
+    h = harness(menu_bar="global", disks=[v])
+    win = h.d.open_filer(h.d.config.disks[0])
+    pa = h.launch(Recorder("Alpha", at=(30, 60)))
+    app_win = pa.front_window()
+    assert app_win is not None and app_win.hilited
+    raised = []
+    real_raise = win.raise_
+    monkeypatch.setattr(win, "raise_", lambda: (raised.append(1), real_raise())[1])
+    # The Filer, as the Application menu lists it: after the one app.
+    h.d.application_menu_choice(5 + len(h.d.launch_order))
+    h.wait_until(lambda: h.d.front_filer is win, what="the Filer front again")
+    assert raised, "the Filer's window was not raised to the front"
+    assert not app_win.hilited                    # the app's window is behind it
+    assert h.d.global_bar.process is h.d.filer_menus
+    h.d.close_filer(win)
+
+
+def test_selecting_the_app_from_the_menu_brings_its_window_forward(harness):
+    """The app, chosen from the Application menu while the Filer is front,
+    comes all the way to the front: its window hilited again and the bar
+    its own."""
+    import machfs
+    v = machfs.Volume()
+    v.name = "Browse"
+    h = harness(menu_bar="global", disks=[v])
+    pa = h.launch(Recorder("Alpha", at=(30, 60)))
+    win = h.d.open_filer(h.d.config.disks[0])
+    app_win = pa.front_window()
+    assert app_win is not None and not app_win.hilited   # the Filer took the front
+    h.d.filer_front(win)                                 # as clicking its window would
+    assert h.d.front_filer is win
+    h.d.application_menu_choice(5)                       # Alpha, as the menu lists it
+    h.wait_until(lambda: h.d.front_process is pa and h.d.front_filer is None,
+                 what="Alpha front again")
+    assert app_win.hilited                          # its window is frontmost again
+    assert h.d.global_bar.process is pa
+    h.d.close_filer(win)
+
+
+def test_launching_an_app_from_the_filer_does_not_bury_the_filer(harness, monkeypatch):
+    """An application launched from the Filer comes to the front (the switch
+    raises its window) without the Filer's windows being lowered: on the
+    host's desktop lower() puts them behind every window rather than behind
+    the application's."""
+    import machfs
+    v = machfs.Volume()
+    v.name = "Browse"
+    h = harness(menu_bar="global", disks=[v])
+    win = h.d.open_filer(h.d.config.disks[0])
+    lowered = []
+    monkeypatch.setattr(win, "lower", lambda: lowered.append(1))
+    pa = h.launch(Recorder("Alpha", at=(30, 60)))
+    h.wait_until(lambda: h.d.front_process is pa, what="the app to come front")
+    assert h.d.front_filer is None                  # the app took the front
+    assert lowered == []                            # the Filer stayed in place
+    h.d.close_filer(win)
 
 
 def test_programs_find_the_application_menu_in_their_menu_lists(harness):

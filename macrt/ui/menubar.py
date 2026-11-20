@@ -64,6 +64,13 @@ def _bitmap(rows: list[bytes], width: int) -> list[str]:
             for row in rows]
 
 
+def _colour_bar(display) -> bool:
+    """The menu bar may wear colour (the rainbow Apple): the running
+    System's depth is more than 2, or --rainbow was asked for."""
+    system = getattr(display, "system", None)
+    return getattr(system, "depth", 1) > 2
+
+
 def _title_icon(menu: Menu) -> tuple[list[str], list[str]] | None:
     """The image and mask, as bitmaps, of the small icon of a title that's
     an icon suite's; None for a title of text."""
@@ -232,7 +239,7 @@ class MenuBarWidget(QWidget):
         what a program has drawn over it."""
         img = QImage(self.width(), self.height(), QImage.Format.Format_RGB32)
         p = QPainter(img)
-        self._paint_bar(p, mono=True)
+        self._paint_bar(p, mono=not _colour_bar(self.display))
         p.end()
         return img
 
@@ -253,7 +260,9 @@ class MenuBarWidget(QWidget):
             if inverted or colors:
                 p.fillRect(cell, bg)
             if menu.is_apple:
-                rainbow = (theme.APPLE_RAINBOW if theme.RAINBOW_APPLE and not (inverted or mono)
+                rainbow = (theme.APPLE_RAINBOW if (theme.RAINBOW_APPLE
+                                                   or _colour_bar(self.display))
+                           and not (inverted or mono)
                            else None)
                 self._draw_icon(p, cell, theme.APPLE_ICON, fg, rainbow)
             elif menu.id in _TITLE_ICONS:
@@ -826,6 +835,12 @@ class MenuTracker:
         if menu is not None and menu.id == kApplicationMenuID:
             self._finish(0)
             self.display.application_menu_choice(item)
+            return
+        if menu is not None and self.bar.process is self.display.filer_menus:
+            # The Filer's menus: no process waits on a MenuSelect, so the
+            # Display takes the choice itself.
+            self._finish(0)
+            self.display.filer_menu_choice(menu.id, item)
             return
         self._finish((menu.id & 0xFFFF) << 16 | item if menu else 0)
 

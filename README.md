@@ -11,6 +11,11 @@ other programs.
 
 ![Three 68k test applications running side by side](docs/screenshots/test-apps.png)
 
+## Features
+- **Transparent archive & image handling:** Seamlessly browse, extract, and launch files from nested archives and disk images, including archives-within-archives.
+- **Disktracker integration:** Offline media indexing and direct file discovery from index files.
+- **Filer:** Native file management, host filesystem browsing, and file/application launching.
+
 ## What runs
 
 Real 68k applications run: TeachText, Microsoft Excel, MacWrite, MacPaint
@@ -41,10 +46,12 @@ and how far it gets.
     and sampled sounds, and the Mac Plus's sound buffer, played through
     your computer's speakers;
   - MultiFinder-style switching between several applications at once.
-- **Files** in MacBinary, BinHex, AppleSingle and AppleDouble, the
-  emulators' side files, HFS, HFS Plus and MFS disk images, MOOF floppy
-  images and CD-ROM images. An application run from a folder on your
-  computer saves its documents there.
+- **Archives:** Expanded support via MacExtract (.zip, .sit, .sea, .hqx, .bin, .rar, .7z, etc.).
+- **Disk Images:** .img, .dsk, .iso, .cdr, .toast, .dmg, .dart, .ndif, .moof, .mdf/.mds, .chd, .vhd, .vmdk, .qcow2.
+- **Filesystems:** HFS, HFS+, MFS, UDF 1.x.
+- **Disktracker:** Load .dtc files to browse offline media indices; create new indices from mounted volumes; reveal or open original files directly from the Filer index view.
+- **Filer:** Native file management window; enabled by default on loads or via `--filer`. Browse host filesystems, drill into nested disk images and archives, extract contents, or launch applications and files directly from the interface.
+
 - **Not there yet:** Apple events and PPC sessions between
   applications; anything plugged into the serial ports, and AppleTalk;
   the event filter and activation procedures of custom Open and Save
@@ -65,6 +72,9 @@ installed. Then:
 python -m macrt App.bin                         # MacBinary, BinHex, AppleDouble…
 python -m macrt "System 6.0.8.dsk" --app TeachText
 python -m macrt One.bin Two.hqx                 # several, side by side
+python -m macrt Disk.dsk                        # a Filer window; double-click to run what's on it
+python -m macrt Catalog.dtc                     # a Disk Tracker index in a read-only Filer window
+python -m macrt App.bin --filer                 # show a loose file's folder in a Filer window
 python -m macrt App.bin --view                  # its menus and windows, without its code
 python -m macrt App.bin --trace-traps           # log every trap it calls
 ```
@@ -101,6 +111,7 @@ read for what. In short:
   and what to do when it stops.
 - **[Titles tried so far](docs/titles.md):** the applications run so far,
   how far each gets, and what to give it on the command line.
+- **[Disk images](docs/disk-images.md):** Supported formats and archive handling.
 - **[What works](docs/toolbox.md):** the Toolbox and Operating System,
   a manager at a time, with where macrt differs from a Mac and why.
 - **[How macrt works](docs/architecture.md):** the processor, the trap

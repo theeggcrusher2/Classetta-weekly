@@ -101,7 +101,7 @@ def test_command_line_errors(tmp_path, capsys):
     assert "No such file" in fails(tmp_path / "nothing.bin")
     sit = tmp_path / "Game.sit"
     sit.write_bytes(b"SIT!" + bytes(6) + b"rLau" + bytes(100))
-    assert "StuffIt archive: unpack it first" in fails(sit)
+    assert "StuffIt" in fails(sit)           # macextract says what's wrong with it
     bare = tmp_path / "Game"
     bare.write_bytes(b"just a data fork, the resource fork was lost on the way")
     assert "has no resource fork" in fails(bare)
@@ -137,10 +137,10 @@ def test_an_application_past_the_end_of_a_disk_image_cut_short(tmp_path):
     image[moved:moved + end - at] = image[at:end]
     part = tmp_path / "Part.img"
     part.write_bytes(image[:moved + 1024])
-    _, _, error = open_targets(parse_args([str(part), "--app", "Last"]))
+    _, _, _, error = open_targets(parse_args([str(part), "--app", "Last"]))
     assert error == ("Last's resource fork goes past the end of the disk image: "
                      "the image holds only part of its disk.")
-    [(first, _)], _, error = open_targets(parse_args([str(part), "--app", "First"]))
+    [(first, _)], _, _, error = open_targets(parse_args([str(part), "--app", "First"]))
     assert error is None and first.rsrc == APP_FORK + bytes(64 * 1024)
 
 

@@ -1,2 +1,3 @@
 [console_scripts]
+disktracker = disktracker.__main__:main
 macrt = macrt.demo:main

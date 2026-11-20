@@ -29,11 +29,17 @@ disk images among them, to be put in the drives.
 from __future__ import annotations
 
 import binascii
+import copy
+import io
+import logging
 import mmap
 import os
+import stat
 import struct
 import time
 import unicodedata
+from collections import OrderedDict
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Protocol
@@ -42,8 +48,10 @@ import machfs
 import machfs.main
 from machfs.btree import unpack_extent_record
 
-from . import moof
-from .resfork import InvalidForkError, is_fork, open_fork
+from . import bin, cue, chd, dmg, dart, mdf, moof, qcow2, vhd, vmdk
+from .util import member_segments
+from .resfork import (
+    InvalidForkError, is_fork, open_fork, vers_messages)
 
 APPLE_SINGLE = 0x00051600
 APPLE_DOUBLE = 0x00051607
@@ -63,10 +71,40 @@ VOLUME_SIGNATURES = (HFS_SIGNATURE, *HFS_PLUS_SIGNATURES, MFS_SIGNATURE)
 MAC_1904 = 2082844800                   # seconds from 1904 to 1970
 SECTOR, TAG = 512, 12                   # a floppy sector, and the tag the drive keeps with it
 MAPPED = 16 << 20                       # an image this big is mapped, not read
+MEMORY_GUARD = 512 * 1024 * 1024       # the volume bytes a run keeps in RAM at once
+MEMORY_GUARD = 512 * 1024 * 1024       # the volume bytes a run keeps in RAM at once
 CD_IMAGES = (".iso", ".cdr", ".toast")  # the names an image macrt mounts as a CD-ROM ends in
 ISO_9660_AT = 16 * 2048 + 1             # the first volume descriptor's "CD001" (ECMA-119)
 CD_SECTOR, CD_DATA = 2352, 2048         # a CD sector whole, and the data in it (ECMA-130)
 CD_SYNC = b"\x00" + b"\xff" * 10 + b"\x00"  # what each whole sector starts with
+
+log = logging.getLogger("macrt.macfile")
+
+_VOLUME_CACHE: OrderedDict[str, int] = OrderedDict()   # disk image -> its size
+_VOLUME_BYTES = 0                                     # the volume bytes held at once
+
+
+def _cache_volume(key: str, size: int) -> None:
+    """Keep the volumes a run has open, and stay under the memory guard by
+    evicting the least recently loaded when it goes past it."""
+    global _VOLUME_BYTES
+    _VOLUME_CACHE[key] = _VOLUME_CACHE.pop(key, 0) + size
+    _VOLUME_BYTES += size
+    while _VOLUME_BYTES > MEMORY_GUARD and _VOLUME_CACHE:
+        old, n = _VOLUME_CACHE.popitem(last=False)
+        _VOLUME_BYTES -= n
+        log.debug("macrt.macfile: evicted volume %r (%.1f MB)", old, n / (1024 * 1024))
+
+
+def _vol_size(source, data) -> int:
+    if isinstance(source, (str, os.PathLike)):
+        try:
+            return Path(source).stat().st_size
+        except OSError:
+            pass
+    if isinstance(data, (bytes, bytearray, memoryview)):
+        return len(data)
+    return len(data) if hasattr(data, "__len__") else 0
 
 
 @dataclass(eq=False)
@@ -82,6 +120,8 @@ class MacFile:
     # The documents it's launched with, as when they're opened in the
     # Finder: the Finder information it's given lists them.
     documents: tuple[MacFile, ...] = field(default=(), repr=False)
+    crdate: int = 0                     # creation date (Mac epoch)
+    mddate: int = 0                     # modification date (Mac epoch)
 
     def __post_init__(self):
         if not self.key:
@@ -91,9 +131,477 @@ class MacFile:
     def is_application(self) -> bool:
         return self.type == b"APPL"
 
+    def sizes(self) -> tuple[int, int]:
+        """Its data and resource forks' lengths."""
+        return len(self.data), len(self.rsrc)
+
+    def head(self, size: int = 65536) -> bytes:
+        """Its data fork's first size bytes, for telling what it is
+        without reading a big file whole."""
+        return bytes(self.data[:size])
+
+    def tail(self, size: int = 65536) -> bytes:
+        """Its data fork's last size bytes, for finding a zip's end of
+        central directory without reading the fork whole."""
+        return bytes(self.data[-size:])
+
     def cut_short(self, fork: str) -> bool:
         """Whether the disk image it's on ends before all of the fork."""
         return False
+
+
+class LazyArchiveFile(MacFile):
+    """An archive member whose forks decode on first touch, so listing
+    an archive reads its directory only.
+
+    ``data`` and ``rsrc`` are properties: a fork the archive declares
+    empty is returned without decoding anything, and ``sizes()``
+    reports the declared lengths until a fork is touched.  A fork that
+    decodes damaged raises ValueError, as the archive's open does.
+    """
+
+    def __init__(self, name: str, type: bytes, creator: bytes, flags: int,
+                 crdate: int, mddate: int, data_size: int, rsrc_size: int,
+                 loader):
+        super().__init__(name, type=type, creator=creator, flags=flags,
+                         crdate=crdate, mddate=mddate)
+        self._declared_data = data_size
+        self._declared_rsrc = rsrc_size
+        self._loader = loader
+        self._loaded = False
+
+    def _materialise(self):
+        self._loaded = True
+        loader, self._loader = self._loader, None
+        self._data, self._rsrc = loader()
+
+    @property
+    def data(self) -> bytes:
+        if not self._loaded:
+            if self._declared_data == 0:
+                return b""
+            self._materialise()
+        return self._data
+
+    @data.setter
+    def data(self, value: bytes):
+        self._loaded = True
+        self._data = value
+
+    @property
+    def rsrc(self) -> bytes:
+        if not self._loaded:
+            if self._declared_rsrc == 0:
+                return b""
+            self._materialise()
+        return self._rsrc
+
+    @rsrc.setter
+    def rsrc(self, value: bytes):
+        self._loaded = True
+        self._rsrc = value
+
+    @property
+    def forks_pending(self) -> bool:
+        """True while the decoder has not run.  Both forks come out of
+        one loader, so this is not per fork; the icon paths use it to
+        show a generic icon until the forks are real."""
+        return not self._loaded
+
+    def sizes(self) -> tuple[int, int]:
+        """Its data and resource forks' lengths — the archive's own
+        declared lengths until a fork is decoded."""
+        if self._loaded:
+            return len(self._data), len(self._rsrc)
+        return self._declared_data, self._declared_rsrc
+
+    def __repr__(self):
+        # Without the forks: printing one must not decode it.
+        return (f"{type(self).__name__}({self.name!r}, "
+                f"declared={self._declared_data}+{self._declared_rsrc})")
+
+
+class LazyHostFile(LazyArchiveFile):
+    """A host file whose forks are read on first use, not at listing: a
+    folder of thousands costs a name, a stat and a peek at each head, not
+    a read of every fork byte on the drive.
+
+    The probes in ``lazy_host_file`` declare the forks' lengths and the
+    data fork's offset, so ``sizes()`` answers without touching the file
+    and ``head()``/``tail()`` read just their window when the fork is at
+    a known offset.  A fork whose bytes are encoded inline (BinHex) has
+    no offset and a head of b"" until it is materialised, as an archive
+    member is.  Materialising runs the same ``load_file`` the eager path
+    ran, so the forks are exactly what an eager listing would have
+    produced.  A damaged BinHex is not listed at all, as the eager
+    listing did not."""
+
+    def __init__(self, name: str, spec, *, type: bytes, creator: bytes,
+                 flags: int, key: str, folder, crdate: int = 0, mddate: int = 0):
+        super().__init__(name, type, creator, flags, crdate, mddate,
+                         spec["declared"][0], spec["declared"][1], spec["loader"])
+        self.key = key
+        self.folder = folder
+        self._spec = spec
+
+    def head(self, size: int = 65536) -> bytes:
+        if self._loaded:
+            return bytes(self._data[:size])
+        span = self._spec.get("data_range")
+        if span is None:
+            return b""
+        path, at, length = span
+        return self._window(path, at, min(size, length))
+
+    def tail(self, size: int = 65536) -> bytes:
+        if self._loaded:
+            return bytes(self._data[-size:])
+        span = self._spec.get("data_range")
+        if span is None:
+            return b""
+        path, at, length = span
+        if length == 0:
+            return b""
+        want = min(size, length)
+        return self._window(path, at + length - want, want)
+
+    @staticmethod
+    def _window(path: str, at: int, n: int) -> bytes:
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(at)
+                return fh.read(n)
+        except OSError:
+            return b""
+
+
+def apple_single_entries(head: bytes):
+    """(magic, {id: (offset, length)}) from an AppleSingle/AppleDouble
+    header, or None when the table runs out of head.  Fork bodies are
+    not sliced; whoever calls reads exactly what it needs."""
+    if len(head) < 26:
+        return None
+    magic, = struct.unpack_from(">I", head, 0)
+    if magic not in (APPLE_SINGLE, APPLE_DOUBLE):
+        return None
+    n, = struct.unpack_from(">H", head, 24)
+    end = 26 + 12 * n
+    if len(head) < end:
+        return None
+    entries = {}
+    for i in range(n):
+        eid, off, length = struct.unpack_from(">III", head, 26 + 12 * i)
+        entries[eid] = (off, length)
+    return magic, entries
+
+
+def _finfo_parts(finfo: bytes) -> tuple[bytes, bytes, int] | None:
+    if len(finfo) >= 10:
+        return finfo[0:4], finfo[4:8], struct.unpack_from(">H", finfo, 8)[0]
+    return None
+
+
+def _peek_macbinary(path: str, size: int, head: bytes):
+    """(name, type, creator, flags, (dlen, rlen), data_range) from the
+    header, or None when head is not MacBinary.  Mirrors the full parse's
+    checks; raises ValueError when a crc-valid-looking container is cut
+    short, as the full parse does."""
+    if len(head) < 128:
+        return None
+    if head[0] != 0 or head[74] != 0 or not 1 <= head[1] <= 63:
+        return None
+    if head[:3] == b"\x00\x05\x16":     # AppleSingle/Double can pass for MacBinary I
+        return None
+    name_b = head[2:2 + head[1]]
+    data_len, rsrc_len = struct.unpack_from(">II", head, 83)
+    if max(data_len, rsrc_len) >= 0x1000000:
+        return None
+    crc_ok = binascii.crc_hqx(bytes(head[:124]), 0) == struct.unpack_from(">H", head, 124)[0]
+    if not crc_ok and (head[82] != 0 or any(head[99:126])):
+        return None
+    if not crc_ok and (b":" in name_b or min(name_b) < 0x20):
+        return None
+    sec_len = struct.unpack_from(">H", head, 120)[0] if crc_ok else 0
+    pad = lambda n: (n + 127) & ~127                        # noqa: E731
+    data_at = 128 + pad(sec_len)
+    rsrc_at = data_at + pad(data_len)
+    if rsrc_at + rsrc_len > size:
+        if data_at + data_len + rsrc_len == size:
+            pass                                            # the data fork wasn't padded
+        elif crc_ok:
+            raise ValueError("MacBinary file is cut short")
+        else:
+            return None
+    if not crc_ok and size > rsrc_at + pad(rsrc_len) + 1024:
+        return None                                     # far too long to be what it says
+    flags = head[73] << 8 | (head[101] if crc_ok else 0)
+    return (name_b.decode("mac_roman"), bytes(head[65:69]), bytes(head[69:73]),
+            flags, (data_len, rsrc_len), (path, data_at, data_len))
+
+
+def _peek_binhex(head: bytes):
+    """(name, type, creator, flags, (dlen, rlen), None) decoded from just
+    the front of the file, or None when there's no BinHex banner in it.
+    A banner that doesn't decode cleanly raises ValueError, as the eager
+    listing skipped those rows."""
+    banner = head.find(BINHEX_BANNER, 0, 4096)
+    if banner < 0:
+        return None
+    start = head.find(b":", banner)
+    end = head.find(b":", start + 1) if start >= 0 else -1
+    if start < 0 or end < 0:
+        raise ValueError("BinHex file is cut short")
+    table = {c: i for i, c in enumerate(BINHEX_CHARS)}
+    packed, bits, nbits = bytearray(), 0, 0
+    for c in head[start + 1:end]:
+        if c in b" \t\r\n":
+            continue
+        if c not in table:
+            raise ValueError(f"BinHex file has a stray {chr(c)!r}")
+        bits, nbits = bits << 6 | table[c], nbits + 6
+        if nbits >= 8:
+            nbits -= 8
+            packed.append(bits >> nbits & 0xFF)
+            bits &= (1 << nbits) - 1
+    out, i, last = bytearray(), 0, 0
+    need = 23                              # the shortest possible header
+    while i < len(packed) and len(out) < need:
+        c = packed[i]
+        i += 1
+        if c != BINHEX_RUN:
+            out.append(c)
+            last = c
+        elif i < len(packed):
+            n = packed[i]
+            i += 1
+            if n == 0:
+                out.append(BINHEX_RUN)
+                last = BINHEX_RUN
+            else:
+                out += bytes([last]) * (n - 1)
+        need = (out[0] if out else 0) + 22
+    if not out:
+        raise ValueError("BinHex file is empty")
+    n = out[0]
+    body = n + 20                          # len byte, name, null, type, creator, flags, lengths
+    if len(out) < body + 2:
+        raise ValueError("BinHex file is cut short")
+    if binascii.crc_hqx(bytes(out[:body]), 0) != struct.unpack_from(">H", out, body)[0]:
+        raise ValueError("BinHex file is damaged (bad CRC)")
+    name = bytes(out[1:1 + n]).decode("mac_roman")
+    ftype, creator = bytes(out[n + 2:n + 6]), bytes(out[n + 6:n + 10])
+    flags, data_len, rsrc_len = struct.unpack_from(">HII", out, n + 10)
+    return name, ftype, creator, flags, (data_len, rsrc_len), None
+
+
+def _read_exact(fh, at: int, n: int) -> bytes:
+    fh.seek(at)
+    blob = fh.read(n)
+    if len(blob) != n:
+        raise ValueError("AppleSingle/AppleDouble file is cut short")
+    return blob
+
+
+def _peek_apple(fh, path: str, size: int, head: bytes):
+    """(name, type, creator, flags, (dlen, rlen), data_range) for
+    AppleSingle and AppleDouble, or None.  Fork bodies are not read;
+    the entry table is, precisely if it's past the head window."""
+    parsed = apple_single_entries(head)
+    if parsed is None and len(head) >= 26:
+        magic, = struct.unpack_from(">I", head, 0)
+        if magic in (APPLE_SINGLE, APPLE_DOUBLE):
+            n, = struct.unpack_from(">H", head, 24)
+            end = 26 + 12 * n
+            fh.seek(0)
+            head = fh.read(end)
+            if len(head) != end:
+                raise ValueError("AppleSingle/AppleDouble file is cut short")
+            parsed = apple_single_entries(head)
+    if parsed is None:
+        return None
+    magic, entries = parsed
+    for off, length in entries.values():
+        if off + length > size:
+            raise ValueError("AppleSingle/AppleDouble file is cut short")
+    span = entries.get(AS_FINDER_INFO)
+    finfo = _read_exact(fh, *span) if span and span[1] >= 10 else b""
+    parts = _finfo_parts(finfo)
+    ftype, creator, flags = parts if parts else (b"????", b"????", 0)
+    span = entries.get(AS_NAME)
+    name_b = _read_exact(fh, *span) if span else b""
+    dspan, rspan = entries.get(AS_DATA), entries.get(AS_RSRC)
+    rsrc_len = rspan[1] if rspan else 0
+    base_name = name_b.decode("mac_roman") if name_b else ""
+    if magic == APPLE_SINGLE:
+        data_len = dspan[1] if dspan else 0
+        data_range = (path, dspan[0], dspan[1]) if dspan else None
+        return (base_name or os.path.basename(path), ftype, creator, flags,
+                (data_len, rsrc_len), data_range)
+    # AppleDouble: the forks belong to the data file beside this one
+    nm = os.path.basename(path)
+    if nm.startswith("._"):
+        base = nm[2:]
+    elif nm.startswith("%"):
+        base = nm[1:]
+    elif nm.lower().endswith(".rsrc"):
+        base = nm[:-5]
+    else:
+        base = nm
+    sibling = os.path.join(os.path.dirname(path), base)
+    data_len = 0
+    data_range = None
+    if base != nm:
+        try:
+            st = os.stat(sibling)
+            if stat.S_ISREG(st.st_mode):
+                data_len = st.st_size
+                data_range = (sibling, 0, data_len)
+        except OSError:
+            pass
+    return (base_name or base, ftype, creator, flags,
+            (data_len, rsrc_len), data_range)
+
+
+def _readable_plain(p: Path, top: Path, links: bool) -> bool:
+    return links or (not p.is_symlink() and p.resolve().is_relative_to(top))
+
+
+def _side_fork(path: Path, top: Path, links: bool):
+    """(declared_rsrc, rsrc_range | None, finfo) from the first side
+    file that holds a resource fork — the eager loader's side loop read
+    as headers.  (0, None, b"") when there is no side fork."""
+    for side_path, kind in _side_files(path):
+        side_path = Path(side_path)
+        if not _readable_plain(side_path, top, links):
+            continue
+        try:
+            st = side_path.stat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        if kind in ("double", "either"):
+            try:
+                with open(side_path, "rb") as fh:
+                    head = fh.read(min(st.st_size, 65536))
+                    parsed = apple_single_entries(head)
+                    if parsed is None and len(head) >= 26:
+                        magic, = struct.unpack_from(">I", head, 0)
+                        if magic in (APPLE_SINGLE, APPLE_DOUBLE):
+                            n, = struct.unpack_from(">H", head, 24)
+                            end = 26 + 12 * n
+                            fh.seek(0)
+                            head = fh.read(end)
+                            parsed = apple_single_entries(head)
+                    if parsed is not None:
+                        _magic, entries = parsed
+                        for off, length in entries.values():
+                            if off + length > st.st_size:
+                                parsed = None
+                                break
+                        if parsed is None:
+                            continue            # damaged side: the loader moved on too
+                        rspan = entries.get(AS_RSRC)
+                        if rspan is None:
+                            continue            # a wrapper with no fork: the loop moved on too
+                        span = entries.get(AS_FINDER_INFO)
+                        finfo = b""
+                        if span and span[1] >= 10:
+                            fh.seek(span[0])
+                            finfo = fh.read(span[1])
+                        return rspan[1], (str(side_path), rspan[0], rspan[1]), finfo
+            except OSError:
+                continue
+            if kind == "double":
+                continue                    # a damaged AppleDouble: the loop moved on too
+        # The side file is the fork itself, whole and at its start.
+        return st.st_size, (str(side_path), 0, st.st_size), b""
+    return 0, None, b""
+
+
+def _finf_file(path: Path, top: Path, links: bool):
+    """Basilisk II's .finf, if it names one."""
+    finf = path.parent / ".finf" / path.name
+    try:
+        if finf.is_file() and _readable_plain(finf, top, links):
+            return finf.read_bytes()
+    except OSError:
+        pass
+    return None
+
+
+def _load_forks(path: str, folder):
+    f = load_file(path, folder)
+    return bytes(f.data), bytes(f.rsrc)
+
+
+def lazy_host_file(path, folder, name: str, *, links: bool = True):
+    """One host file as a lazy MacFile: what the listing shows without
+    reading a single fork byte.  Raises ValueError when the file looks
+    like BinHex but is damaged — the eager listing skipped those rows.
+    Returns None for something that isn't a plain file."""
+    path = Path(path)
+    top = path.parent.resolve()
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    size = st.st_size
+    with open(path, "rb") as fh:
+        head = fh.read(size if size <= 65536 else 4096)
+        probe = (_peek_macbinary(str(path), size, head)
+                 or _peek_binhex(head)
+                 or _peek_apple(fh, str(path), size, head))
+    key = str(path)
+    if probe is not None:
+        name_b, ftype, creator, flags, (dlen, rlen), data_range = probe
+        spec = {"declared": (dlen, rlen), "data_range": data_range,
+                "loader": lambda: _load_forks(str(path), folder)}
+        return LazyHostFile(name_b, spec, type=ftype, creator=creator,
+                            flags=flags, key=key, folder=folder)
+    if path.name.startswith("%"):
+        # Executor's resource fork: the data fork is the file beside it.
+        base = str(path.with_name(path.name[1:]))
+        data_len = 0
+        data_range = None
+        try:
+            bst = os.stat(base)
+            if stat.S_ISREG(bst.st_mode) and _readable_plain(Path(base), top, links):
+                data_len = bst.st_size
+                data_range = (base, 0, data_len)
+        except OSError:
+            pass
+        spec = {"declared": (data_len, size), "data_range": data_range,
+                "loader": lambda: _load_forks(str(path), folder)}
+        return LazyHostFile(path.name[1:], spec, type=b"????", creator=b"????",
+                            flags=0, key=base, folder=folder)
+    rsrc_len, _rsrc_range, sfinfo = _side_fork(path, top, links)
+    ftype, creator, flags = b"????", b"????", 0
+    if len(sfinfo) >= 10:
+        ftype, creator = sfinfo[0:4], sfinfo[4:8]
+        flags = struct.unpack_from(">H", sfinfo, 8)[0]
+    finf = _finf_file(path, top, links)
+    if finf is not None:
+        parts = _finfo_parts(finf)
+        if parts:
+            ftype, creator, flags = parts
+    elif ftype == b"????":
+        parts = _finfo_parts(_host_finder_info(path))
+        if parts:
+            ftype, creator, flags = parts
+    spec = {"declared": (size, rsrc_len), "data_range": (str(path), 0, size),
+            "loader": lambda: _load_forks(str(path), folder)}
+    nm = path.name
+    if (rsrc_len == 0 and size <= 65536 and is_fork(head)):
+        # A bare resource fork, small enough to call exactly.
+        spec = {"declared": (0, size), "data_range": None,
+                "loader": lambda: _load_forks(str(path), folder)}
+        if nm.lower().endswith(".rsrc"):
+            nm = nm[:-5]
+    return LazyHostFile(nm, spec, type=ftype, creator=creator,
+                        flags=flags, key=key, folder=folder)
 
 
 class Folder(Protocol):
@@ -181,18 +689,29 @@ class HostFolder:
         return None
 
     def files(self) -> list[MacFile]:
-        names = sorted(os.listdir(self.path))
+        try:
+            names = sorted(os.listdir(self.path))
+        except OSError:
+            return []
         out = []
         for n in names:
             p = self.path / n
-            if n.startswith((".", "%")) or not p.is_file():
+            if n.startswith((".", "%")):
+                continue
+            if p.is_dir():
+                sub_folder = HostFolder(p, self.root)
+                out.append(MacFile(n, type=b"fldr", key=str(p), folder=sub_folder))
+                continue
+            if not p.is_file():
                 continue
             if n.lower().endswith(".rsrc") and n[:-5] in names:
                 continue                                # app's resource fork, beside app
             try:
-                out.append(load_file(p, self))
+                entry = lazy_host_file(p, self, n)
             except ValueError:
                 continue                                # damaged; the rest are still here
+            if entry is not None:
+                out.append(entry)
         return out
 
 
@@ -239,6 +758,89 @@ class VolumeFolder:
                 if isinstance(f, machfs.File)]
 
 
+class ToolboxFolder:
+    """A live view of a volume mounted in the running machine, read
+    through the File Manager structures programs see: the startup disk,
+    with whatever the machine has put on it since.  Path segments are
+    names; folders navigate by them, case-insensitively, as the File
+    Manager does."""
+
+    def __init__(self, volume, path: tuple[str, ...] = ()):
+        self.volume = volume            # a macrt.toolbox.files Volume
+        self.path = tuple(path)
+
+    @property
+    def name(self) -> str:
+        return self.volume.name
+
+    def _node(self, path):
+        d = self.volume.root
+        for part in path:
+            if d is None or not getattr(d, "is_dir", False):
+                raise KeyError(part)
+            d = d.child(part)
+        if d is None:
+            raise KeyError(path[-1] if path else "")
+        return d
+
+    def _key(self, node) -> str:
+        return f"toolbox:{self.volume.vref}:{node.cnid}"
+
+    def _entry(self, node, folder) -> MacFile:
+        key = self._key(node)
+        if getattr(node, "is_dir", False):
+            return MacFile(node.name, type=b"fldr", key=key, folder=folder,
+                           crdate=getattr(node, "crdate", 0), mddate=getattr(node, "mddate", 0))
+        forks = node.forks()
+        return MacFile(node.name, data=bytes(forks[0]), rsrc=bytes(forks[1]),
+                       type=node.type, creator=node.creator, flags=node.flags,
+                       key=key, folder=folder,
+                       crdate=getattr(node, "crdate", 0), mddate=getattr(node, "mddate", 0))
+
+    def entries(self, path: tuple[str, ...]) -> list[MacFile]:
+        try:
+            d = self._node(path)
+        except KeyError:
+            return []
+        folder = ToolboxFolder(self.volume, path)
+        out = []
+        for node in d.items():
+            try:
+                out.append(self._entry(node, folder))
+            except Exception:
+                continue                        # a node that can't be read: the rest are still here
+        return out
+
+    def find(self, name: str) -> MacFile | None:
+        absolute, parts = _split_path(name)
+        if not parts:
+            return None
+        path = () if absolute else self.path
+        try:
+            d = self._node(path)
+            for part in parts[:-1]:
+                if d is None or not getattr(d, "is_dir", False):
+                    return None
+                d = d.child(part)
+                if d is None:
+                    return None
+                path = path + (d.name,)
+            if d is None or not getattr(d, "is_dir", False):
+                return None
+            node = d.child(parts[-1])
+        except KeyError:
+            return None
+        if node is None:
+            return None
+        try:
+            return self._entry(node, ToolboxFolder(self.volume, path))
+        except Exception:
+            return None
+
+    def files(self) -> list[MacFile]:
+        return self.entries(self.path)
+
+
 class _VolumeFile(MacFile):
     """A file on a volume, its forks read from it the first time they're
     wanted: looking through a CD for one application reads no other's."""
@@ -247,6 +849,15 @@ class _VolumeFile(MacFile):
         self._node, self._forks = node, {}
         super().__init__(*args, **kw)
 
+    def __getattr__(self, name: str):
+        """What the volume's node carries that this wrapper doesn't:
+        catalog fields like the Disk Tracker's suffix and disk name ride
+        on the node, and the Filer asks the file it shows."""
+        node = self.__dict__.get("_node")
+        if node is None:
+            raise AttributeError(name)
+        return getattr(node, name)
+
     def _get(self, fork: str) -> bytes:
         if self._forks.get(fork) is None:
             self._forks[fork] = bytes(getattr(self._node, fork))
@@ -254,6 +865,40 @@ class _VolumeFile(MacFile):
 
     def _set(self, fork: str, value: bytes | None) -> None:
         self._forks[fork] = value                       # None: what's on the volume
+
+    def sizes(self) -> tuple[int, int]:
+        """Its forks' lengths, without reading them when the disk has them."""
+        if hasattr(self._node, "sizes"):
+            return self._node.sizes()
+        return super().sizes()
+
+    def tail(self, size: int = 65536) -> bytes:
+        """Its data fork's last size bytes, reading only that much of
+        the disk image it's on."""
+        if isinstance(self._node, OnDisk):
+            _length, spans = self._node._forks.get("data", (0, []))
+            out = bytearray()
+            for at, end in reversed(spans):
+                want = size - len(out)
+                if want <= 0:
+                    break
+                out = bytearray(self._node._disk[max(at, end - want):end]) + out
+            return bytes(out[-size:])
+        return super().tail(size)
+
+    def head(self, size: int = 65536) -> bytes:
+        """Its data fork's first size bytes, reading only that much of
+        the disk image it's on."""
+        if isinstance(self._node, OnDisk):
+            _length, spans = self._node._forks.get("data", (0, []))
+            out = bytearray()
+            for at, end in spans:
+                want = size - len(out)
+                if want <= 0:
+                    break
+                out += self._node._disk[at:min(end, at + want)]
+            return bytes(out[:size])
+        return super().head(size)
 
     def cut_short(self, fork: str) -> bool:
         return isinstance(self._node, OnDisk) and self._node.cut_short(fork)
@@ -265,7 +910,176 @@ class _VolumeFile(MacFile):
 def _from_machfs(volume: machfs.Volume, folder: VolumeFolder, name: str,
                  f: machfs.File) -> MacFile:
     key = ":".join((volume.name, *folder.path, name))
-    return _VolumeFile(f, name, None, None, bytes(f.type), bytes(f.creator), f.flags, key, folder)
+    return _VolumeFile(f, name, None, None, bytes(f.type), bytes(f.creator), f.flags, key, folder,
+                       crdate=getattr(f, 'crdate', 0), mddate=getattr(f, 'mddate', 0))
+
+
+# ---------------------------------------------------------------------------
+# Alias files
+# ---------------------------------------------------------------------------
+ALIAS_FLAG = 0x8000                  # the Finder's isAlias flag
+
+
+def needs_materialise(f: MacFile | None) -> bool:
+    """True while f is an archive member whose forks are still undecoded
+    inside its archive — the listing must not read them, and callers
+    materialise lazily behind a busy window instead."""
+    return isinstance(f, LazyArchiveFile) and f.forks_pending
+
+
+def _alias_record(f: MacFile):
+    """The alias record in f's resource fork, if it's one there.  A
+    member whose forks are still inside its archive has none: reading
+    them would decode the member, and an alias never needs to cross
+    that boundary."""
+    if needs_materialise(f):
+        return None
+    rsrc = getattr(f, "rsrc", b"")
+    if not rsrc:
+        return None
+    try:
+        fork = open_fork(bytes(rsrc))
+    except Exception:
+        return None
+    e = fork.find(b"alis", 0) or next((e for e in fork.entries if e.type == b"alis"), None)
+    if e is None:
+        return None
+    try:
+        from .toolbox import aliases as al
+        return al.Alias.parse(fork.raw(e))
+    except Exception:
+        return None
+
+
+def is_alias(f: MacFile) -> bool:
+    """Whether f is an alias file: an 'alis' resource, and the Finder's
+    isAlias flag or the file's own shape — type alis, or an empty data
+    fork — when a copy of it lost the flag.
+
+    For a member whose forks are still inside its archive, no fork is
+    read: identification uses the declared flags and type alone.  An
+    alias never needs to point out of its archive, so a pending member
+    is identified as one only from its own declared metadata; the record
+    itself is decoded lazily when the member is opened, behind a busy
+    window."""
+    if needs_materialise(f):
+        return bool(f.flags & ALIAS_FLAG) or f.type == b"alis"
+    if _alias_record(f) is None:
+        return False
+    return bool(f.flags & ALIAS_FLAG) or f.type == b"alis" or not f.data
+
+
+def resolve_alias(f: MacFile, fs):
+    """Where an alias file's target is, as the Toolbox's Alias Manager
+    finds it; None when f isn't an alias or its original can't be found."""
+    from .toolbox import aliases as al
+    record = _alias_record(f)
+    if record is None or fs is None:
+        return None
+    try:
+        return al.resolve(fs, record)
+    except Exception:
+        return None
+
+
+def alias_original(f: MacFile, fs=None) -> str | None:
+    """The Mac pathname of an alias file's original, if it can be said."""
+    from .toolbox import aliases as al
+    found = resolve_alias(f, fs)
+    if found is None:
+        return None
+    if found.node is not None:
+        return al.path_of(found.node)
+    record = _alias_record(f)
+    if record is not None and record.path:
+        return record.path
+    return f"{found.volume.name}:{found.name}"
+
+
+def alias_open(f: MacFile, fs):
+    """What opening an alias file opens: the file, or a volume and the
+    path of the folder it points at — both None when its original can't
+    be found."""
+    found = resolve_alias(f, fs)
+    if found is None or found.node is None:
+        return None, None, ()
+    node = found.node
+    from .toolbox import files as fm
+    from .toolbox import aliases as al
+    if isinstance(node, (fm.File, fm.Dir)):
+        # The Alias Manager resolved it to a mounted catalog node: a File's
+        # own bytes are in its .ref (a machfs file a disk image was read
+        # into, or a MacFile when the volume is a host folder), and a
+        # Dir's is its name there.
+        path = tuple(n for n in al.path_of(node).split(":")[1:] if n)
+        if isinstance(node, fm.Dir):
+            machfs_volume = _machfs_volume(found.volume)
+            if machfs_volume is not None:
+                return None, machfs_volume, path       # a folder on a disk image
+            where = _host_path(found.volume, node)
+            return ((None, HostFolder(where), ()) if where is not None
+                    else (None, None, ()))
+        ref = node.ref
+        if isinstance(ref, MacFile):
+            return ref, None, ()                      # a file on a host folder
+        machfs_volume = _machfs_volume(found.volume)
+        if machfs_volume is not None:
+            folder = VolumeFolder(machfs_volume, path[:-1])
+            return (_from_machfs(machfs_volume, folder, node.name, ref), None, ())
+        return (MacFile(node.name, bytes(ref.data), bytes(ref.rsrc), bytes(ref.type),
+                        bytes(ref.creator), ref.flags, node.name), None, ())
+    if not isinstance(node, (machfs.File, machfs.Folder)):
+        return None, None, ()
+
+    def path_of(node) -> tuple[str, ...]:
+        names = []
+        while node.parent is not None:
+            names.append(node.name)
+            node = node.parent
+        return tuple(reversed(names))
+
+    if node.is_dir:
+        return None, found.volume, path_of(node)
+    return (_from_machfs(found.volume, VolumeFolder(found.volume, path_of(node.parent)),
+                         node.name, node), None, ())
+
+
+def _machfs_volume(volume):
+    """The machfs volume a mounted one was read from, if it was one."""
+    source = getattr(getattr(volume, "store", None), "source", None)
+    return source if isinstance(source, machfs.Volume) else None
+
+
+def _host_path(volume, node):
+    """Where a mounted directory is on the host, if its volume's store
+    keeps its files on the host."""
+    store = getattr(volume, "store", None)
+    try:
+        return store.path(node)
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Version resources
+# ---------------------------------------------------------------------------
+
+def version_messages(f: MacFile | None) -> tuple[str | None, str | None]:
+    """f's version messages as (ID 1, ID 2), what the Finder's Get Info
+    shows: ID 1's in the version field, ID 2's beneath the file's name.
+
+    None for a record that isn't there or can't be read: a fork that
+    won't open, a truncated record or garbage never raises.  A member
+    whose forks are still inside its archive is left undecoded — the
+    Filer materialises it behind a busy window before asking."""
+    if f is None:
+        return None, None
+    if needs_materialise(f):
+        return None, None
+    rsrc = getattr(f, "rsrc", b"")
+    if not rsrc:
+        return None, None
+    return vers_messages(rsrc)
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +1258,9 @@ def _startup_name(boot: bytes) -> str | None:
 
 
 def is_disk_image(data: bytes) -> bool:
-    if moof.is_moof(data) or _raw_cd(data):     # load_volume says what's on a CD
+    if moof.is_moof(data) or chd.is_chd(data) or qcow2.is_qcow2(data) or vhd.is_vhd(data) \
+            or vmdk.is_vmdk(data) or dmg.is_udif(data) or mdf.is_mds(data) \
+            or dart.is_dart(data) or _raw_cd(data):
         return True
     data = _sectors(data)[0]
     return (_hfs_partition(data) is not None or _volume_start(data) is not None
@@ -681,107 +1497,6 @@ def _mac_name(name: str, cnid: int, folder: machfs.Folder, limit: int = 31) -> s
     return (mac.replace(b":", b"?")[:limit - len(tag)] + tag).decode("mac_roman")
 
 
-def _read_hfs_plus(disk) -> machfs.Volume:
-    """An HFS Plus volume (Technote 1150, "HFS Plus Volume Format") as the
-    HFS reader has one, so the rest of macrt can't tell them apart: its
-    catalog's folders and files, their Finder information, dates (in GMT
-    on the disk, in local time as HFS keeps them) and flags, each file's
-    forks left on the disk until they're wanted, and its names as
-    _mac_name has them.  A hard link is the file it links to, and the
-    folder that keeps those, the metadata directory, isn't seen, as the
-    Technote has it of an implementation that follows hard links."""
-    vh = 1024
-    crdate, mddate, bkdate = struct.unpack_from(">III", disk, vh + 16)
-    block_size, = struct.unpack_from(">I", disk, vh + 40)
-    if not block_size or block_size % 512:
-        raise ValueError(f"its allocation blocks are {block_size} bytes")
-    overflow: dict[tuple[int, int, int], bytes] = {}    # (fork type, file, block): extents
-
-    def spans(length: int, extents: bytes, cnid: int, kind: int) -> list[tuple[int, int]]:
-        """Where a fork's bytes are on the disk: its first eight extents',
-        then the extents overflow file's."""
-        out, blocks, wanted = [], 0, -(-length // block_size)
-        looked: set[int] = set()
-        while True:
-            for i in range(0, 64, 8):
-                start, count = struct.unpack_from(">LL", extents, i)
-                if count:
-                    out.append((start * block_size, (start + count) * block_size))
-                    blocks += count
-            if blocks >= wanted:
-                return out
-            if blocks in looked:                # an overflow record of no blocks
-                raise ValueError(f"file {cnid}'s extents end at block {blocks}")
-            looked.add(blocks)
-            extents = overflow[kind, cnid, blocks]
-
-    def fork(value: bytes, at: int, cnid: int, kind: int) -> tuple[int, list[tuple[int, int]]]:
-        """A fork's length, and where its bytes are, from its HFSPlusForkData."""
-        length, = struct.unpack_from(">Q", value, at)
-        return length, spans(length, value[at + 16:at + 80], cnid, kind)
-
-    def tree(at: int, cnid: int) -> tuple[bytes, int]:
-        """One of the volume's own B-tree files, and its node size."""
-        length, where = fork(bytes(disk[vh:vh + 512]), at, cnid, 0)
-        data = b"".join(disk[a:b] for a, b in where)[:length]
-        return data, struct.unpack_from(">H", data, 14 + 18)[0]
-
-    for rec in _leaf_records(*tree(192, 3)):            # the extents overflow file
-        klen, kind, cnid, start = struct.unpack_from(">HBxLL", rec)
-        if klen >= 10 and kind in (0, 0xFF):            # a data fork's, a resource fork's
-            overflow[kind, cnid, start] = rec[2 + klen:2 + klen + 64]
-    cnids: dict[int, machfs.Folder | machfs.File] = {}
-    children, links = [], []
-    for rec in _leaf_records(*tree(272, 4)):            # the catalog
-        klen, parent, length = struct.unpack_from(">HLH", rec)
-        name = rec[8:8 + 2 * length].decode("utf-16-be", "replace")
-        value = rec[(2 + klen + 1) & ~1:]
-        kind = struct.unpack_from(">h", value)[0] if len(value) >= 2 else 0
-        if kind not in (1, 2):                          # a thread
-            continue
-        flags, cnid, *dates = struct.unpack_from(">2xH4xLLL8xL", value)
-        if kind == 1:                                   # a folder
-            node = machfs.Folder()
-        elif kind == 2:                                 # a file
-            node = OnDisk(disk, {"data": fork(value, 88, cnid, 0),
-                                 "rsrc": fork(value, 168, cnid, 0xFF)})
-            node.type, node.creator, node.flags, v, h = struct.unpack_from(">4s4sHhh", value, 48)
-            node.y, node.x = v, h
-            node.locked = bool(flags & 1)               # its other flags aren't HFS's
-            if (node.type, node.creator) == (b"hlnk", b"hfs+"):
-                links.append((node, struct.unpack_from(">L", value, 44)[0]))
-        node.crdate, node.mddate, node.bkdate = map(_gmt_to_local, dates)
-        cnids[cnid] = node
-        children.append((parent, name, cnid, node))
-    hidden = next((cnid for parent, name, cnid, node in children if parent == 2
-                   and name == "\0\0\0\0HFS+ Private Data"
-                   and isinstance(node, machfs.Folder)), None)
-    inodes = {name: node for parent, name, cnid, node in children if parent == hidden}
-    targets = {id(link): inodes.get(f"iNode{n}", link) for link, n in links}
-    vol_name = "Untitled"
-    for parent, name, cnid, node in children:
-        if parent == 1:                                 # the top folder: the volume's name
-            vol_name = _mac_name(name, cnid, {}, 27)
-        elif cnid != hidden and parent != hidden:
-            folder = cnids[parent]
-            folder[_mac_name(name, cnid, folder)] = targets.get(id(node), node)
-    seen, todo = set(), [cnids[2]]
-    while todo:                                         # a folder that is in itself?
-        folder = todo.pop()
-        if id(folder) in seen:
-            raise ValueError("a folder on it is inside itself")
-        seen.add(id(folder))
-        todo.extend(v for v in folder.values() if isinstance(v, machfs.Folder))
-    vol = machfs.Volume()
-    vol.update(cnids[2])
-    for name in ("Desktop", "Desktop DB", "Desktop DF"):
-        vol.pop(name, None)
-    _link_aliases(crdate, cnids)
-    vol.crdate, vol.mddate, vol.bkdate = crdate, _gmt_to_local(mddate), _gmt_to_local(bkdate)
-    vol.name = vol_name
-    return vol
-
-
 def _image(path: Path) -> bytes | mmap.mmap:
     """A disk image's bytes.  A big one, a hard disk's or a CD's, is mapped
     copy-on-write rather than read: only what's looked at is in memory, and
@@ -793,14 +1508,130 @@ def _image(path: Path) -> bytes | mmap.mmap:
         return mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_COPY)
 
 
+# the reader's mode and the sector size for each mode a sheet may name;
+# a mode the sheet doesn't know is refused by the parser before this
+_CUE_TRACK = {
+    cue.TrackType.AUDIO: (bin.MODE_AUDIO, CD_SECTOR),
+    cue.TrackType.MODE1_2048: (bin.MODE_1, 2048),
+    cue.TrackType.MODE1_2352: (bin.MODE_1, CD_SECTOR),
+    cue.TrackType.MODE2_2048: (bin.MODE_2_FORM1, 2048),
+    cue.TrackType.MODE2_2352: (bin.MODE_2_FORM1, CD_SECTOR),
+    cue.TrackType.MODE2_2336: (bin.MODE_2_FORM2, 2336),
+}
+
+
+def _cue_tracks(sheet: cue.CueSheet, cue_name: str) -> list[bin.BinTrack]:
+    """The sheet's tracks as macrt.bin wants them: each track's frame from
+    its INDEX 01 — the frame its data starts at — and its byte offset at
+    that frame, its sector size from its mode."""
+    tracks = []
+    for t in sheet.tracks:
+        index01 = next((i for i in t.indexes if i.number == 1), None)
+        if index01 is None:
+            raise ValueError(f"{cue_name}: track {t.number:02d} has no INDEX 01")
+        mode, sector_size = _CUE_TRACK[t.type]
+        tracks.append(bin.BinTrack(t.number, index01.time.frames * sector_size,
+                                   sector_size, mode))
+    return tracks
+
+
+def _cue_plan(cue_bytes: bytes, cue_name: str) -> tuple[str, list[bin.BinTrack]]:
+    """The one file a sheet names, and its tracks as macrt.bin wants them.
+
+    A sheet keeping one file per track is refused, with a warning
+    recommending the files be merged into a single .bin first: images of
+    that shape are unsupported, and no pieces of them are opened."""
+    try:
+        sheet = cue.parse_cue(cue_bytes)
+    except cue.CueError as e:
+        raise ValueError(f"{cue_name}: {e}") from None
+    if len(sheet.files) > 1:
+        names = ", ".join(f.name for f in sheet.files)
+        log.warning("%s: it keeps one file per track (%s); "
+                    "merge them into a single .bin first", cue_name, names)
+        raise ValueError(f"{cue_name}: it keeps one file per track ({names}); "
+                         f"merge them into a single .bin first")
+    return sheet.files[0].name, _cue_tracks(sheet, cue_name)
+
+
+def _cue_bin_image(path: Path) -> bytes | None:
+    """The stream a .cue sheet and the .bin it names hold: the data track's
+    user sectors, the form a raw CD image takes.  For a bare .bin with no
+    sheet beside it, None — it opens as it always has, with a warning that
+    it is unknown what disc this is."""
+    low = path.suffix.lower()
+    cue_path = path if low == ".cue" else path.with_suffix(".cue")
+    if not cue_path.is_file():
+        if low == ".cue":
+            raise ValueError(f"{path.name}: it has no .cue sheet beside it")
+        log.warning("%s: it is unknown what disc this is; "
+                    "convert it to a known image format first", path.name)
+        return None
+    with cue_path.open("rb") as f:
+        cue_bytes = f.read()
+    name, tracks = _cue_plan(cue_bytes, cue_path.name)
+    bin_path = cue_path.parent / name
+    if not bin_path.is_file():
+        raise ValueError(f"{cue_path.name}: {bin_path.name} is missing")
+    return bin.read_image(_image(bin_path), tracks)
+
+
+def _mdf_image(path: Path) -> bytes:
+    """The stream an .mdf/.mds pair holds: the data track's user sectors,
+    the form a raw CD image takes."""
+    mds_path = path if path.suffix.lower() == ".mds" else path.with_suffix(".mds")
+    mdf_path = mds_path.with_suffix(".mdf")
+    if not mds_path.is_file():
+        raise ValueError(f"{path.name}: it has no .mds sidecar beside it")
+    with mds_path.open("rb") as f:
+        mds_bytes = f.read()
+    if not mdf.is_mds(mds_bytes):
+        raise ValueError(f"{mds_path.name}: not an Alcohol .mds descriptor")
+    if not mdf_path.is_file():
+        raise ValueError(f"{mds_path.name}: {mdf_path.name} is missing")
+    return mdf.read_image(_image(mdf_path), mds_bytes)
+
+
 def load_volume(source: str | os.PathLike | bytes | mmap.mmap) -> machfs.Volume:
     """The volume on a disk image; its disk, for the disk driver, is its
     .disk."""
+    path = source if not isinstance(source, (bytes, bytearray, mmap.mmap)) else None
     data = source if isinstance(source, (bytes, bytearray, mmap.mmap)) else _image(Path(source))
+    if path is not None and Path(path).suffix.lower() in (".mds", ".mdf"):
+        data = _mdf_image(Path(path))
+    if path is not None and Path(path).suffix.lower() in (".cue", ".bin"):
+        cue_data = _cue_bin_image(Path(path))
+        if cue_data is not None:
+            data = cue_data
+    if isinstance(source, (bytes, bytearray, mmap.mmap)) and mdf.is_mds(data):
+        raise ValueError("an .mds descriptor has to sit beside its .mdf; open it by its path")
+    if dmg.is_udif(data):
+        data = dmg.read_udif(data)
+    elif path is not None and not (moof.is_moof(data) or chd.is_chd(data)
+                                   or qcow2.is_qcow2(data) or vhd.is_vhd(data)
+                                   or vmdk.is_vmdk(data)):
+        # NDIF keeps its chunk map in the resource fork: the data fork
+        # alone isn't one the volume readers can see.
+        try:
+            probe = load_file(path)
+        except (OSError, ValueError):
+            probe = None
+        if probe is not None and dmg.is_ndif_fork(probe.rsrc):
+            data = dmg.read_ndif(probe.data, probe.rsrc)
+    if dart.is_dart(data):
+        data = dart.read_image(data)
     if moof.is_moof(data):
         tracks = moof.Disk(bytes(data))
         disk = Disk(bytearray(tracks.image), bytearray(tracks.tags), tracks)
     else:
+        if chd.is_chd(data):
+            data = chd.read_image(data)
+        elif qcow2.is_qcow2(data):
+            data = qcow2.read_image(data)
+        elif vhd.is_vhd(data):
+            data = vhd.read_image(data)
+        elif vmdk.is_vmdk(data):
+            data = vmdk.read_image(data)
         sectors, tags = _sectors(data)
         own = (isinstance(sectors, mmap.mmap)          # the disk's own already: not copied
                or sectors is not data and isinstance(sectors, bytearray))
@@ -811,26 +1642,64 @@ def load_volume(source: str | os.PathLike | bytes | mmap.mmap) -> machfs.Volume:
     if part is not None:
         data = data[part[0]:part[1]]
     start = _volume_start(data)
-    if part is None and start is None and _iso_9660(data):
-        raise ValueError("it's an ISO 9660 disc, with no HFS, HFS Plus or MFS volume "
-                         "on it for macrt to read")
     startup = _startup_name(bytes(data[start[0]:start[0] + 1024])) if start else None
+    if start and start[1] in (b"H+", b"HX"):
+        from .hfsplus import read_hfsplus
+        vol = read_hfsplus(data[start[0]:] if start[0] else data)
+        vol.size, vol.startup, vol.disk = len(data), startup, disk
+        return vol
     allocation = _allocation(data, start)
     if start and start[1] == MFS_SIGNATURE:
         vol = _read_mfs(bytes(data[start[0]:]), start[0] // SECTOR)
         vol.size, vol.startup, vol.disk, vol.allocation = len(data), startup, disk, allocation
         return vol
+    stem = Path(source).stem if not isinstance(source, (bytes, bytearray, mmap.mmap)) else "CDROM"
     try:
         if start and start[1] == HFS_SIGNATURE and _embedded(data[start[0]:]) is not None:
             start = start[0] + _embedded(data[start[0]:]), b"H+"
         if start and start[1] in HFS_PLUS_SIGNATURES:
-            vol = _read_hfs_plus(data[start[0]:])
+            from .hfsplus import read_hfsplus
+            vol = read_hfsplus(data[start[0]:] if start[0] else data)
         else:
             vol = _read_hfs(data)
-    except Exception as e:      # noqa: BLE001 - a damaged catalog trips over anything
-        raise ValueError(f"the disk image is damaged ({type(e).__name__}: {e})") from None
+    except Exception as hfs_e:
+        try:
+            from .iso9660 import _read_iso
+            vol_name, cr, md, root = _read_iso(bytes(data), stem)
+            vol = machfs.Volume()
+            vol.name = vol_name
+            def populate(node, folder):
+                for child in node['children']:
+                    if child['kind'] == 'folder':
+                        sub = machfs.Folder()
+                        folder[child['name']] = sub
+                        populate(child, sub)
+                    else:
+                        # Its bytes stay on the disc until wanted: the
+                        # directory record says where they are, and the
+                        # ISO volume grades nothing to fail early.
+                        size = child['size']
+                        start = child['lba'] * 2048
+                        f = OnDisk(data, {"data": (size, [(start, start + size)]),
+                                          "rsrc": (0, [])})
+                        f.type, f.creator = child.get('type', b'????'), child.get('creator', b'????')
+                        f.crdate, f.mddate = child.get('crdate', 0), child.get('mddate', 0)
+                        folder[child['name']] = f
+            populate(root, vol)
+        except Exception as e2:
+            try:
+                from .udf import read_udf
+                vol = read_udf(bytes(data))
+            except Exception as e3:
+                # A named UDF refusal (2.x, a virtual allocation table, …) is
+                # worth surfacing; otherwise keep today's damaged-disc error.
+                if isinstance(e3, ValueError) and str(e3).startswith("the UDF disc"):
+                    raise e3 from None
+                raise ValueError(f"the disk image is damaged ({type(hfs_e).__name__}: {hfs_e})") from None
     vol.size = len(data)                # the disk's: whether it's a floppy's
     vol.startup, vol.disk, vol.allocation = startup, disk, allocation
+    _cache_volume(str(source) if not isinstance(source, (bytes, bytearray, mmap.mmap))
+                  else f"<bytes {id(data):x}>", _vol_size(source, data))
     return vol
 
 
@@ -852,6 +1721,48 @@ def volume_files(volume: machfs.Volume) -> Iterator[MacFile]:
     for path, node in volume.iter_paths():
         if isinstance(node, machfs.File):
             yield _from_machfs(volume, VolumeFolder(volume, path[:-1]), path[-1], node)
+
+
+def list_folder(volume: machfs.Volume | HostFolder | ContainerFolder | ArchiveFolder,
+                path: tuple[str, ...] = ()) -> list[MacFile]:
+    """One folder's contents, as the Finder's window lists them: its
+    files, and its subfolders as MacFiles of type 'fldr' with no forks,
+    each keeping its place in the folder it's in."""
+    if isinstance(volume, HostFolder):
+        folder = volume
+        for part in path:
+            sub = folder._entry(part)
+            if sub is None or not sub.is_dir():
+                return []
+            folder = HostFolder(sub, folder.root)
+        return folder.files()
+    if isinstance(volume, ContainerFolder):
+        return volume.files()            # flat: the decoded file
+    if isinstance(volume, ArchiveFolder):
+        files = volume.files()           # flat: the archive's entries
+        if path:
+            out = []
+            for f in files:
+                parts = member_segments(f.name)
+                if parts[:len(path)] != list(path) or len(parts) == len(path):
+                    continue
+                f = copy.copy(f)
+                f.name = "/".join(parts[len(path):])
+                out.append(f)
+            return out
+        return files
+    if isinstance(volume, ToolboxFolder):
+        return volume.entries(path)
+    folder = VolumeFolder(volume, path)
+    node = folder._node(folder.path)
+    out = []
+    for name, child in node.items():
+        if isinstance(child, machfs.Folder):
+            key = ":".join((volume.name, *folder.path, name))
+            out.append(MacFile(name, type=b"fldr", key=key, folder=folder))
+        else:
+            out.append(_from_machfs(volume, folder, name, child))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1079,13 +1990,363 @@ def load_file(path: str | os.PathLike, folder: Folder | None = None, *,
 # What the command line opens
 # ---------------------------------------------------------------------------
 def archive_kind(f: MacFile) -> str | None:
-    """The kind of archive f is, if it's one: something to unpack first."""
-    d = f.data
+    """The kind of archive f is, if it's one: something to unpack first.
+    Any format in macextract's registry counts — add one there and it
+    is recognised (and browsable) here with no change.
+
+    A sample of the fork answers, not the whole of it: the menu bar asks
+    this of the selected file on every paint, so reading the body there
+    would freeze the Filer on a large archive.  An archive member whose
+    forks are still inside the archive is not decoded to be asked."""
+    if needs_materialise(f):
+        # An archive member decodes nothing to answer; a plain host
+        # file's data fork lies at a known offset, so a window read
+        # answers for it.
+        if isinstance(f, LazyHostFile):
+            d = f.head(65536)
+            if not d:
+                return None
+        else:
+            return None
+    else:
+        d = _fork_sample(f)
     if d[:4] == b"SIT!" and d[10:14] == b"rLau" or d[:16] == b"StuffIt (c)1997-":
         return "StuffIt"
     if d[:4] == b"PK\x03\x04":
         return "zip"
+    if not d:
+        return None
+    try:
+        from macextract import formats
+    except ImportError:
+        return None
+    for module in formats.FORMATS:
+        try:
+            if module.probe(d):
+                return "archive"
+        except Exception:
+            continue
     return None
+
+
+def _fork_sample(f, size: int = 65536) -> bytes:
+    """The first size bytes of a file's data fork: from MacFile.head,
+    which reads only that much even of a file on a disk image, or of a
+    bare machfs node's data when there is no head to call."""
+    head = getattr(f, "head", None)
+    if head is not None:
+        return head(size)
+    return bytes(getattr(f, "data", b"")[:size])
+
+
+# Each macextract module's name for itself, by its module name: the Kind
+# column's archive names.  Containers (MacBinary, BinHex, AppleSingle and
+# the text encodings) are left out: they hold one file, they aren't
+# archives to unpack.
+_ARCHIVE_KINDS = {
+    "abk": "Apple Backup", "arc": "ARC", "bzip2": "bzip2", "cpt": "Compact Pro",
+    "dd": "DiskDoubler", "gzip": "gzip", "lha": "LHA", "mar": "MAR",
+    "now": "Now Compress", "packit": "PackIt", "pf": "Private File", "rar": "RAR",
+    "segments": "split archive", "sevenz": "7z", "sit": "StuffIt",
+    "sit5": "StuffIt 5", "spacesaver": "SpaceSaver", "sqp": "AppleLink package", "superdisk": "SuperDisk!",
+    "tar": "tar", "tome": "Apple Installer Tome", "z": "Unix compress", "xz": "xz",
+    "zip": "ZIP",
+}
+
+
+def archive_name(f: MacFile) -> str | None:
+    """The name of the archive f is, if it's one macextract knows: the
+    Kind column's word for it, without opening it."""
+    if needs_materialise(f):
+        # The head is still compressed inside the archive: sampling it
+        # would decode the member, which drawing a listing must not do.
+        return None
+    d = f.head()
+    if not d:
+        return None
+    if d[:4] == b"PK\x03\x04":
+        # A bare PK header isn't enough to call it a zip: the end of
+        # central directory at the file's end is what says it's one.
+        return "ZIP" if _eocd_in(f.tail(65536)) else None
+    if d[:4] == b"SIT!" and d[10:14] == b"rLau" or d[:16] == b"StuffIt (c)1997-":
+        return "StuffIt"
+    return archive_name_on(d)
+
+
+def _pending_image_kind(f: LazyHostFile) -> str | None:
+    """image_kind's answer for a host file whose forks are pending:
+    window reads only.  A raw HFS image answers from the head; a
+    UDIF's trailer from the tail; an NDIF's resource fork is left
+    unread, so those read as documents."""
+    d = f.head(4096)
+    if not d:
+        return None
+    if moof.is_moof(d):
+        return "MOOF disk image"
+    if chd.is_chd(d):
+        return "CHD disk image"
+    if qcow2.is_qcow2(d):
+        return "qcow2 disk image"
+    if vhd.is_vhd(d):
+        return "VHD disk image"
+    if vmdk.is_vmdk(d):
+        return "VMDK disk image"
+    if dmg.is_udif(d):
+        return "UDIF disk image"
+    if dmg.is_udif(f.tail(512)):
+        return "UDIF disk image"
+    if mdf.is_mds(d):
+        return "MDF/MDS CD image"
+    if f.key.lower().endswith((".mds", ".mdf")):
+        return "MDF/MDS CD image"
+    if f.key.lower().endswith(".cue"):
+        return "BIN/CUE CD image"
+    if f.key.lower().endswith(".bin") and _cue_beside(f):
+        return "BIN/CUE CD image"
+    if dart.is_dart(d):
+        return "DART disk image"
+    if len(d) > DISKCOPY_HEADER and d[82:84] == b"\x01\x00" and d[0] < 64:
+        return "DiskCopy 4.2 image"
+    start = _volume_start(d)
+    if start is not None:
+        signature = start[1]
+        if signature == HFS_SIGNATURE:
+            return "HFS disk image"
+        if signature == MFS_SIGNATURE:
+            return "MFS disk image"
+        return "HFS+ disk image"
+    return None
+
+
+def _cue_beside(f: MacFile) -> bool:
+    """Whether a .bin file has a .cue sheet beside it in its folder —
+    the only case its name says "BIN/CUE CD image"."""
+    folder = f.folder
+    if folder is None:
+        return False
+    try:
+        return bool(folder.find(f.name[:-4] + ".cue"))
+    except Exception:
+        return False
+
+
+def image_kind(f: MacFile) -> str | None:
+    """The name of the disk image f is, if it's one macrt opens: from its
+    first half-megabyte, so a big image isn't read whole for a listing."""
+    if getattr(f, "name", "").lower().endswith((".dtc", ".dt1")):
+        return "Disk Tracker catalog"
+    if getattr(f, "name", "").lower().endswith((".vhd", ".vpc")):
+        # A fixed VHD's footer is at the file's end, beyond the head sample,
+        # so the extension is the only hint a listing has for one.
+        return "VHD disk image"
+    if needs_materialise(f):
+        # The bytes are still inside the archive: only the name says
+        # anything, and reading the body here would decode the member.
+        if isinstance(f, LazyHostFile):
+            return _pending_image_kind(f)
+        return None
+    d = f.head(524296)
+    if not d:
+        return None
+    if moof.is_moof(d):
+        return "MOOF disk image"
+    if chd.is_chd(d):
+        return "CHD disk image"
+    if qcow2.is_qcow2(d):
+        return "qcow2 disk image"
+    if vhd.is_vhd(d):
+        return "VHD disk image"
+    if vmdk.is_vmdk(d):
+        return "VMDK disk image"
+    if dmg.is_udif(d):
+        # An early image, with its koly trailer at offset 0 (or a file
+        # smaller than the sample): the head carries it.
+        return "UDIF disk image"
+    if dmg.is_udif(f.tail(512)):
+        # The normal place: the koly trailer in the file's last 512 bytes.
+        return "UDIF disk image"
+    if f.rsrc and dmg.is_ndif_fork(f.rsrc):
+        return "NDIF disk image"
+    if mdf.is_mds(d):
+        return "MDF/MDS CD image"
+    if f.key.lower().endswith((".mds", ".mdf")):
+        return "MDF/MDS CD image"
+    if f.key.lower().endswith(".cue"):
+        return "BIN/CUE CD image"
+    if f.key.lower().endswith(".bin") and _cue_beside(f):
+        return "BIN/CUE CD image"
+    if dart.is_dart(d):
+        return "DART disk image"
+    if len(d) > DISKCOPY_HEADER and d[82:84] == b"\x01\x00" and d[0] < 64:
+        return "DiskCopy 4.2 image"
+    if _hfs_partition(d) is not None:
+        return "Apple partition map"
+    start = _volume_start(d)
+    if start is not None:
+        signature = start[1]
+        if signature == HFS_SIGNATURE:
+            return "HFS disk image"
+        if signature == MFS_SIGNATURE:
+            return "MFS disk image"
+        return "HFS+ disk image"
+    if len(d) > 16 * 2048 + 6 and d[16 * 2048] == 1 \
+            and d[16 * 2048 + 1:16 * 2048 + 6] == b"CD001":
+        return "CD-ROM image"
+    sectors = _sectors(d)[0]
+    if sectors is not d and _volume_start(sectors) is not None:
+        return "Mac disk image"
+    return None
+
+
+def _container_kind(raw: bytes) -> str | None:
+    """Which encoding raw is, if it's one load_file decodes — MacBinary,
+    BinHex or AppleSingle — else None for plain bytes.  A container that's
+    there but damaged raises, as its parser does."""
+    if _parse_macbinary(raw) is not None:
+        return "MacBinary"
+    if _parse_binhex(raw) is not None:
+        return "BinHex"
+    if _parse_apple_single(raw) is not None:
+        return "AppleSingle"
+    return None
+
+
+def container_kind(path: str | os.PathLike) -> str | None:
+    """The encoding at path, when load_file decodes it as one — MacBinary,
+    BinHex or AppleSingle — else None for a plain file.  Damaged or
+    unreadable reads as None too: load_file already said what was wrong."""
+    try:
+        return _container_kind(Path(path).read_bytes())
+    except (OSError, ValueError):
+        return None
+
+
+def container_contents(data: bytes, name: str, folder: Folder | None = None) -> MacFile | None:
+    """The file an encoded container's bytes hold — MacBinary, BinHex or
+    AppleSingle — else None when data isn't one of those.  A container
+    that's there but damaged raises, as load_file's parsers do."""
+    mb = _parse_macbinary(data) or _parse_binhex(data)
+    if mb is not None:
+        mb.folder = folder
+        return mb
+    single = _parse_apple_single(data)
+    if single is None:
+        return None
+    magic, entries = single
+    if magic == APPLE_DOUBLE:             # a sidecar header: no data fork of its own
+        real = entries.get(AS_NAME)
+        return MacFile(real.decode("mac_roman") if real else name,
+                       b"", entries.get(AS_RSRC, b""), folder=folder)
+    real = entries.get(AS_NAME)
+    f = MacFile(real.decode("mac_roman") if real else name,
+                entries.get(AS_DATA, b""), entries.get(AS_RSRC, b""), folder=folder)
+    _apply_finder_info(f, entries.get(AS_FINDER_INFO, b""))
+    return f
+
+
+class ContainerFolder:
+    """The contents of an encoded container — MacBinary, BinHex,
+    AppleSingle — as the folder holding the one Mac file it decodes to,
+    for a Filer window to list."""
+
+    def __init__(self, contents: MacFile, name: str):
+        self.contents = contents
+        self.name = name                      # the container's own name, for the title
+
+    def files(self) -> list[MacFile]:
+        return [self.contents]
+
+    def find(self, name: str) -> MacFile | None:
+        return self.contents if self.contents.name.lower() == name.lower() else None
+
+
+class ArchiveFolder:
+    """The contents of a macextract-recognised archive, as a folder of
+    its entries nested by their paths — for a Filer window to list.
+    raw keeps the archive's own bytes, so Extract… can re-read it with
+    its macextract format, Finder info included."""
+
+    def __init__(self, entries: list[MacFile], name: str, raw: bytes):
+        self.entries = entries
+        self.name = name                      # the archive's own name, for the title
+        self.raw = raw
+        for entry in entries:                 # as a folder holds its files
+            entry.folder = self
+
+    def files(self) -> list[MacFile]:
+        return self.entries
+
+    def find(self, name: str) -> MacFile | None:
+        folded = name.lower()
+        return next((f for f in self.entries if f.name.lower() == folded), None)
+
+
+def archive_entries(data: bytes, name: str = "archive") -> list[MacFile] | None:
+    """macextract's entries as MacFiles — one per file in the archive —
+    or None when macextract does not recognise the bytes.  Recognised
+    but damaged raises ValueError, as the other parsers do; an archive
+    that wants a password says so the same way.  The members' forks
+    decode on first touch, so listing reads the directory only; a
+    member whose body decodes damaged raises ValueError when its fork
+    is first touched."""
+    if not data:
+        return None
+    try:
+        import macextract
+    except ImportError:
+        return None
+    try:
+        buf = io.BytesIO(data)
+        # In-situ compressors keep the host's name; macextract names the
+        # entry from the file object's name.
+        buf.name = name
+        archive = macextract.open(buf)
+    except macextract.UnsupportedError:
+        return None
+    except macextract.PasswordRequiredError:
+        raise ValueError(f"{name} needs a password, which the Filer cannot ask for yet")
+    except macextract.BadPasswordError:
+        raise ValueError(f"{name}: the password did not open it")
+    except macextract.MacExtractError as e:
+        raise ValueError(f"{name}: {e}")
+    out: list[MacFile] = []
+    for entry in archive.entries:
+        def _load(entry=entry):
+            try:
+                return (archive.read(entry, "data"),
+                        archive.read(entry, "rsrc"))
+            except macextract.MacExtractError as e:
+                raise ValueError(f"{entry.name}: {e}")
+        # The forks decode on first touch, not while the archive is
+        # listed — listing reads the directory only.
+        out.append(LazyArchiveFile(entry.name, entry.type, entry.creator,
+                                   entry.finder_flags, entry.created,
+                                   entry.modified, entry.data_size,
+                                   entry.resource_size, _load))
+    return out
+
+
+def extract_archive(raw: bytes, destination, fork_mode: str = "appledouble") -> list[str]:
+    """Extract an archive's contents under destination, macextract-style:
+    data fork to <name>, and a macOS-style ._<name> AppleDouble beside it
+    when there is a resource fork or Finder info.  Returns the paths
+    written; raises ValueError with a clear message when the archive is
+    damaged or wants a password."""
+    try:
+        import macextract
+    except ImportError:
+        raise ValueError("the macextract.py library is not installed")
+    try:
+        with macextract.open(io.BytesIO(raw)) as archive:
+            return [str(p) for p in archive.extract(destination, fork_mode=fork_mode)]
+    except macextract.UnsupportedError:
+        raise ValueError("macextract does not recognise this archive")
+    except macextract.PasswordRequiredError:
+        raise ValueError("the archive needs a password, which the Filer cannot ask for yet")
+    except macextract.BadPasswordError:
+        raise ValueError("the password did not open the archive")
+    except macextract.MacExtractError as e:
+        raise ValueError(str(e))
 
 
 def open_application(path: str | os.PathLike, name: str | None = None) -> MacFile:
@@ -1107,7 +2368,7 @@ def open_applications(paths, names=()) -> list[MacFile]:
     return open_disks(paths, names)[0]
 
 
-def open_disks(paths, names=()) -> tuple[list[MacFile], list[machfs.Volume]]:
+def open_disks(paths, names=(), *, browse: bool = False) -> tuple[list[MacFile], list[machfs.Volume]]:
     """The applications to launch, from several files, and the disk images
     among them, in the order they came, to be put in the drives.  Each file
     that isn't a disk image is an application; from the images, the names
@@ -1122,8 +2383,12 @@ def open_disks(paths, names=()) -> tuple[list[MacFile], list[machfs.Volume]]:
     rather than the HyperCard Player beside it.  An
     image nothing is taken from, one with no application or, when there
     are names, none of them, is a disk of documents, in a drive for the
-    applications to open: Beyond Dark Castle's second disk."""
-    opened = [(Path(p), *_volume_or_file(p)) for p in paths]
+    applications to open: Beyond Dark Castle's second disk.
+
+    With browse and no names, nothing is taken from the images: they are
+    the caller's to show, in Filer windows, and only the files that
+    aren't images are applications here."""
+    opened = [(Path(p), *_volume_or_file(p, browse=browse)) for p in paths]
     images = [(path, volume) for path, volume, _ in opened if volume is not None]
     if names and not images:
         raise ValueError("--app picks an application on a disk image, and there's none here")
@@ -1165,33 +2430,217 @@ def open_disks(paths, names=()) -> tuple[list[MacFile], list[machfs.Volume]]:
             continue
         if i in picked:
             apps += picked[i]
-        elif not names and not disks_only and not _runs_nothing(volume):
+        elif not names and not browse and not disks_only and not _runs_nothing(volume):
             apps.append(_only_application(volume, path))
         i += 1
-    if not apps and images:
+    if not apps and images and not browse:
         _only_application(images[0][1], images[0][0])     # says there's nothing on it to run
     return apps, [volume for _, volume in images]
 
 
-def _volume_or_file(path: str | os.PathLike) -> tuple[machfs.Volume | None, MacFile | None]:
+def launch_target(f: MacFile) -> MacFile:
+    """What the Finder's opening f launches: f itself, if it's a program
+    (an application, a control panel with code of its own, or a program
+    in the Finder's place), or the application that made a document, with
+    the document to open.  ValueError if nothing here opens it."""
+    if not _is_document(f):
+        return f
+    volume = f.folder.volume if isinstance(f.folder, VolumeFolder) else None
+    made = _creator_on(volume, f.creator) if volume is not None else None
+    if made is None:
+        where = volume.name if volume is not None else "here"
+        raise ValueError(f"{f.name} is a document, and no application on {where} "
+                         f"made it (its creator is {_ostype(f.creator)})")
+    made = copy.copy(made)
+    made.documents = (f,)
+    return made
+
+
+def _cue_member(f: MacFile) -> bytes | None:
+    """The (.cue, .bin) pair among an archive's members that f is one half
+    of: the sheet is f or its .cue member beside it, and the .bin is the
+    member the sheet names.  None for a bare .bin member with no sheet
+    beside it — it opens as it always has, with the warning."""
+    low = f.name.lower()
+    if low.endswith(".cue"):
+        cue_f = f
+    else:
+        folder = f.folder
+        cue_f = folder.find(f.name[:-4] + ".cue") if folder is not None else None
+        if cue_f is None:
+            log.warning("%s: it is unknown what disc this is; "
+                        "convert it to a known image format first", f.name)
+            return None
+    name, tracks = _cue_plan(cue_f.data, cue_f.name)
+    folder = cue_f.folder
+    bin_f = folder.find(name) if folder is not None else None
+    if bin_f is None:
+        raise ValueError(f"{cue_f.name}: {name} is missing")
+    return bin.read_image(bin_f.data, tracks)
+
+
+def _mdf_pair(f: MacFile) -> tuple[MacFile, MacFile] | None:
+    """The (.mds, .mdf) pair f is one half of, when both sit in the same
+    folder — an archive's members — else None."""
+    low = f.name.lower()
+    if not low.endswith((".mds", ".mdf")):
+        return None
+    other = ".mdf" if low.endswith(".mds") else ".mds"
+    folder = f.folder
+    sibling = folder.find(f.name[:-4] + other) if folder is not None else None
+    mds = f if low.endswith(".mds") else sibling
+    mdf = sibling if low.endswith(".mds") else f
+    if mds is None or mdf is None:
+        return None
+    return mds, mdf
+
+
+def image_volume(f: MacFile) -> machfs.Volume:
+    """The volume on an image file, from its own forks when there is no
+    host path to use (an image nested in a MacBinary has nowhere to
+    look for its resource fork), else from its key, as open_container."""
+    if dmg.is_ndif_fork(f.rsrc):
+        return load_volume(dmg.read_ndif(f.data, f.rsrc))
+    p = Path(f.key)
+    if p.is_file():
+        return open_container(p)
+    low = f.name.lower()
+    if low.endswith((".cue", ".bin")):
+        stream = _cue_member(f)
+        if stream is not None:
+            return load_volume(stream)
+        return load_volume(f.data)
+    if low.endswith((".mds", ".mdf")):
+        pair = _mdf_pair(f)
+        if pair is None:
+            other = ".mdf" if low.endswith(".mds") else ".mds"
+            raise ValueError(f"{f.name}: it has no {other} beside it")
+        mds_file, mdf_file = pair
+        return load_volume(mdf.read_image(mdf_file.data, mds_file.data))
+    return load_volume(f.data)
+
+
+def open_container(path: str | os.PathLike) -> machfs.Volume:
+    """Open a recognized container (.dtc, .dt1, disk image) into a machfs.Volume,
+    raising ValueError with a clear message for unsupported formats or invalid input."""
+    vol, f = _volume_or_file(path)
+    if vol is not None:
+        return vol
+    raise ValueError(f"{Path(path).name}: not a recognized volume container")
+
+
+def archive_file(path: str | os.PathLike) -> ArchiveFolder | None:
+    """A Filer window's worth of an archive file on the host, or None when
+    it isn't one macextract reads.  Only the head of the file — and the
+    end, for a zip's central directory — is read to tell."""
     path = Path(path)
-    raw = _image(path) if path.exists() else b""          # app with only app.rsrc
-    volume, problem = None, None
-    if is_disk_image(raw):
+    try:
+        with path.open("rb") as f:
+            head = f.read(65536)
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            tail = f.read() if size <= 65536 else f.read()[-65536:]
+    except OSError:
+        return None
+    if is_disk_image(head):
+        return None                               # a volume, not an archive
+    d = head if size <= 65536 else head + tail      # a small file, whole
+    if not d:
+        return None
+    if not (archive_name_on(d) or (d[:4] == b"PK\x03\x04" and _eocd_in(tail or head))):
+        return None
+    with path.open("rb") as f:
+        raw = f.read()
+    entries = archive_entries(raw, path.name)
+    return None if entries is None else ArchiveFolder(entries, path.name, raw)
+
+
+def _eocd_in(tail: bytes) -> bool:
+    """Whether a zip's end-of-central-directory record is in its last bytes."""
+    at = tail.rfind(b"PK\x05\x06")
+    return at >= 0 and len(tail) - at >= 22
+
+
+def archive_name_on(d: bytes) -> str | None:
+    """archive_name, on bytes already read."""
+    if not d:
+        return None
+    try:
+        from macextract import formats
+    except ImportError:
+        return None
+    for module in formats.FORMATS:
+        name = module.__name__.rsplit(".", 1)[-1]
+        kind = _ARCHIVE_KINDS.get(name)
+        if kind is None:
+            continue
         try:
-            volume = load_volume(raw)
+            if module.probe(d):
+                return kind
+        except Exception:
+            continue
+    return None
+
+
+def _volume_or_file(path: str | os.PathLike, *,
+                    browse: bool = False) -> tuple[machfs.Volume | None, MacFile | None]:
+    path = Path(path)
+    if path.suffix.lower() in ('.dtc', '.dt1'):
+        try:
+            from disktracker.filer_adapter import DiskTrackerVolume
+            return DiskTrackerVolume(path), None
+        except Exception as e:
+            raise ValueError(f"{path.name}: could not load Disk Tracker catalog: {e}")
+    raw = _image(path) if path.exists() else b""          # app with only app.rsrc
+    low = path.suffix.lower()
+    cue_bin = low == ".cue" or (low == ".bin" and path.with_suffix(".cue").is_file())
+    volume, problem = None, None
+    if cue_bin:
+        # a .cue sheet and its .bin (or either alone, to refuse by name):
+        # the data track is extracted, not the file's bytes mounted whole
+        try:
+            volume = load_volume(path)
+        except ValueError as e:
+            problem = e
+    elif is_disk_image(raw):
+        try:
+            volume = load_volume(path if low == ".bin" else raw)
+        except ValueError as e:
+            problem = e
+    if volume is None and not is_disk_image(raw) and path.exists():
+        # NDIF's chunk map lives in the resource fork: probe it before
+        # the file-or-archive fallback.
+        try:
+            probe = load_file(path)
+        except (OSError, ValueError):
+            probe = None
+        if probe is not None and dmg.is_ndif_fork(probe.rsrc):
+            try:
+                volume = load_volume(dmg.read_ndif(probe.data, probe.rsrc))
+            except (OSError, ValueError) as e:
+                problem = e
+    if volume is None and path.exists() and path.suffix.lower() in (".mds", ".mdf", ".cue"):
+        try:
+            volume = load_volume(path)
         except ValueError as e:
             problem = e
     if volume is not None:
-        volume.cdrom = path.suffix.lower() in CD_IMAGES or _raw_cd(raw)
+        volume.cdrom = low in CD_IMAGES or _raw_cd(raw) or cue_bin
         return volume, None
     f = load_file(path)
-    if problem is not None and not f.rsrc:
+    if problem is not None and (not f.rsrc or dmg.is_ndif_fork(f.rsrc)
+                                or path.suffix.lower() in (".mds", ".mdf", ".cue")):
         raise ValueError(f"{path.name}: {problem}")     # an image, but one that can't be read
     kind = archive_kind(f)
-    if kind is not None:
+    # An archive an encoding's payload turned out to hold is browsable
+    # in Filer view: the drill reaches it the way any archive opens.
+    # Without browsing, there is nothing to do with an archive but say
+    # to unpack it.
+    if kind in ("StuffIt", "zip") and not (browse and f.name != path.name):
         raise ValueError(f"{path.name} is a {kind} archive: unpack it first, for example "
                          f"with The Unarchiver (unar {path.name})")
+    # Archive formats macextract recognises pass through: the Filer can
+    # browse them, and an attempt to launch one is refused downstream.
     return None, f
 
 
@@ -1232,6 +2681,34 @@ def _creator_on(volume: machfs.Volume, creator: bytes) -> MacFile | None:
     """The application on the volume with that creator, nearest the top."""
     apps = [f for f in volume_files(volume) if f.is_application and f.creator == creator]
     return min(apps, key=lambda f: f.key.count(":"), default=None)
+
+
+def creator_application(creator: bytes, files) -> MacFile | None:
+    """The application that made documents of `creator`, on the first of
+    the mounted volumes that has one — the Finder's look across the
+    disks, for a file whose own folder is not a volume: an archive's
+    member, a file on the host.  `files` is the System's FileSystem,
+    whose volumes are the Toolbox's; a plain sequence of machfs volumes
+    answers too."""
+    if files is None:
+        return None
+    volumes = getattr(files, "volumes", None)
+    if volumes is None:
+        for volume in files or ():
+            made = _creator_on(volume, creator)
+            if made is not None:
+                return made
+        return None
+    # Imported here: toolbox.files imports this module.
+    from .toolbox.files import File as VolumeNode
+    for volume in volumes:
+        found = [m for node in volume.nodes.values()
+                 if isinstance(node, VolumeNode) and node.type == b"APPL"
+                 and node.creator == creator
+                 and (m := files.macfile_of(node)) is not None]
+        if found:                       # the nearest the top, as _creator_on picks
+            return min(found, key=lambda f: f.key.count(":"))
+    return None
 
 
 def _ostype(code: bytes) -> str:

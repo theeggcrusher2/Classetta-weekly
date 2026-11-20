@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 from PyQt6.QtWidgets import QDialog, QHBoxLayout, QLabel, QListWidget, QPushButton, QVBoxLayout
 
 from . import theme
-from .stdfile import STYLE, icon
+from .stdfile import STYLE, display_depth, standin_icon
 
 if TYPE_CHECKING:
     from .display import Display
@@ -28,6 +28,7 @@ class DiskDialog(QDialog):
                  future: Future):
         super().__init__(display.host_window if display is not None else None)
         self.display = display
+        self._depth = display_depth(display) if display is not None else 1
         self._future = future
         self.setWindowTitle(f"Drive {drive}")
         self.setModal(False)
@@ -36,7 +37,7 @@ class DiskDialog(QDialog):
         self.list = QListWidget()
         for name in names:
             self.list.addItem(name)
-            self.list.item(self.list.count() - 1).setIcon(icon("volume"))
+            self.list.item(self.list.count() - 1).setIcon(standin_icon("volume", self._depth))
         self.list.setCurrentRow(current)
         self.list.setMinimumSize(220, 120)
         self.list.itemDoubleClicked.connect(lambda _: self.insert())

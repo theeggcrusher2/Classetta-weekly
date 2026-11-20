@@ -33,7 +33,7 @@ from typing import Callable
 
 from PyQt6.QtCore import QEvent, QObject, QPoint, Qt, QTimer
 from PyQt6.QtGui import QCursor, QGuiApplication, QImage, QPainter, QPixmap
-from PyQt6.QtWidgets import QApplication, QMessageBox, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox, QVBoxLayout, QWidget
 
 from ..m68k.segload import Layout
 from ..m68k.sound import WaveFile
@@ -57,6 +57,9 @@ from ..toolbox.types import Point, Rect
 from ..toolbox.windows import WindowRecord, describe_proc
 from . import chrome, theme
 from .bridge import GuiBridge
+from .filer import (APPLE_MENU_ID, DISK_MENU_ID, FILE_MENU_ID, SPECIAL_MENU_ID, AboutClassettaWindow,
+                    AboutWindow, ContentViewerWindow, FilerMenus, FilerOptions,
+                    FilerWindow, GetInfoWindow)
 from .keymap import key_message, modifiers_from_qt
 from .menubar import MenuBarWidget, MenuTracker, PopUpTracker
 from .tracking import BoxTracker, DragTracker, GrowTracker, Tracker
@@ -219,11 +222,19 @@ class Display(QObject):
         self.memory_sizes: dict[str, int] = {}  # files' memory sizes, as Get Info sets them
         self.views: dict[WindowRecord, MacWindowView] = {}
         self.app_bars: dict[Process, AppBarWindow] = {}
+        self.filer_windows: list[FilerWindow] = []
+        self.front_filer: FilerWindow | None = None
+        self.filer_menus = FilerMenus(self)
+        self.about_windows: list[AboutWindow] = []
+        self.info_windows: list[GetInfoWindow] = []
+        self.viewer_windows: list[ContentViewerWindow] = []
+        self.front_aux_window: AboutWindow | GetInfoWindow | ContentViewerWindow | None = None
         self.tracker: Tracker | MenuTracker | None = None
         self.body_font = theme.body_font()
         self._swallow_release = False
         self._last_clicked: QWidget | None = None
         self._shut_down = False
+        self.restarting = False    # Special > Restart: run the original command again after
         self.system_errors: list[tuple[str, int, str]] = []    # (app, ID, what happened)
         self._alerts: list[QMessageBox] = []
         self.file_dialogs: list = []              # Standard File's, open now
@@ -249,6 +260,9 @@ class Display(QObject):
         has_global_bar = self.config.menu_bar == "global"
         disks = self.config.disks
         disk_system = system_on(disks[0]) if disks else None
+        # The System file the emulator runs: the one asked for, or the
+        # disk's, or none when macrt's own built-in stands in for it.
+        self.running_system_file = self.config.system_file or disk_system
         self.sound = self._sound_outputs()
         self.system = System(self.size, desk_top=theme.MENU_BAR_HEIGHT if has_global_bar else 0,
                              menu_bar_height=theme.MENU_BAR_HEIGHT,
@@ -360,28 +374,35 @@ class Display(QObject):
         return outputs
 
     def shutdown(self, quit_app: bool = True) -> None:
+        """Close every window, ask each application to quit, and only
+        then let the Qt application go.  An application whose quit
+        raises must not keep the rest of the sequence from happening."""
         if self._shut_down:
             return
         self._shut_down = True
         self.bridge.closed = True
-        self.system.screen.close()
-        for out in self.sound:
-            out.close()
-        if self.tracker is not None:
-            self.tracker.cancel()
-        for proc in self.processes:
-            proc.kill()
-        app = QApplication.instance()
-        app.removeEventFilter(self._router)
-        self._app_bar_timer.stop()
-        widgets = [*self.views.values(), *self.app_bars.values(), self.global_bar,
-                   self.host_window, *self._alerts, *self.file_dialogs,
+        widgets = [*self.views.values(), *self.app_bars.values(), *self.filer_windows,
+                   *self.about_windows, *self.info_windows, *self.viewer_windows,
+                   self.global_bar, self.host_window, *self._alerts, *self.file_dialogs,
                    *self.print_dialogs, *self.disk_dialogs, *self.color_dialogs,
                    *self.edition_dialogs]
         for w in widgets:
             if w is not None:
                 w.hide()
                 w.deleteLater()
+        self.system.screen.close()
+        for out in self.sound:
+            out.close()
+        if self.tracker is not None:
+            self.tracker.cancel()
+        app = QApplication.instance()
+        app.removeEventFilter(self._router)
+        self._app_bar_timer.stop()
+        for proc in list(self.processes):
+            try:
+                proc.quit()
+            except Exception:  # noqa: BLE001 - one app's failure must not skip the rest
+                traceback.print_exc()
         if quit_app:
             app.quit()
 
@@ -448,6 +469,52 @@ class Display(QObject):
         self._alerts.append(box)
         box.show()
 
+    def ask_choice(self, title: str, text: str,
+                   choices: list[tuple[str, Callable[[], None]]],
+                   detail: str = "") -> QMessageBox:
+        """A host question with one button per choice, shown as show_alert
+        shows an alert and recorded beside them; the button pressed calls
+        its callable, and every other way of dismissing it (Cancel, the
+        close box, Escape) keeps the Cancel semantics: none of the
+        callables run, so nothing happens."""
+        if self._shut_down:
+            return None
+        box = QMessageBox(QMessageBox.Icon.Question, title, text,
+                          QMessageBox.StandardButton.Cancel, self.host_window)
+        if detail:
+            box.setDetailedText(detail)
+        box.setWindowModality(Qt.WindowModality.NonModal)
+        box.finished.connect(lambda _: self._alert_closed(box))
+        for label, answered in choices:
+            button = box.addButton(label, QMessageBox.ButtonRole.AcceptRole)
+            button.clicked.connect(lambda _=None, a=answered: a())
+        self._alerts.append(box)
+        box.show()
+        return box
+
+    def ask_question(self, title: str, text: str, answered: Callable[[bool], None],
+                     detail: str = "") -> QMessageBox:
+        """A host question with Yes and No, shown as show_alert shows an
+        alert and recorded beside them; `answered` gets which button the
+        user pressed.  Dismissing it without pressing either (the
+        shutdown's dismiss) answers neither way, so nothing runs."""
+        if self._shut_down:
+            return None
+        box = QMessageBox(QMessageBox.Icon.Question, title, text,
+                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                          self.host_window)
+        if detail:
+            box.setDetailedText(detail)
+        box.setWindowModality(Qt.WindowModality.NonModal)
+        box.finished.connect(lambda _: self._alert_closed(box))
+        box.button(QMessageBox.StandardButton.Yes).clicked.connect(
+            lambda _: answered(True))
+        box.button(QMessageBox.StandardButton.No).clicked.connect(
+            lambda _: answered(False))
+        self._alerts.append(box)
+        box.show()
+        return box
+
     def dismiss_alerts(self) -> None:
         """OK every host alert that's up, as the user would."""
         for box in list(self._alerts):
@@ -456,7 +523,7 @@ class Display(QObject):
     def _alert_closed(self, box: QMessageBox) -> None:
         if box in self._alerts:
             self._alerts.remove(box)
-        if not self._alerts and not self.processes:
+        if not self._alerts and not self.processes and not self.filer_windows:
             self.shutdown()             # the last app crashed; its alert kept the display up
 
     def _process_exited(self, proc: Process) -> None:
@@ -479,8 +546,10 @@ class Display(QObject):
         if self._obscured is proc:
             self._obscured = None
         if not self.processes:
-            if not self._alerts:
+            if not self._alerts and not self.filer_windows:
                 self.shutdown()
+            else:
+                self.refresh_bars()         # the Filer windows carry on without it
             return
         if was_front:
             self.switch_to(self.processes[0], force=True)
@@ -539,6 +608,26 @@ class Display(QObject):
         w, h = self.size
         return Rect(self.desk_top + t + 3, l + 3, h - b - s - 3, w - r - s - 3)
 
+    def place_aux_window(self, win, over: FilerWindow | None = None) -> None:
+        """Centre `win` on `over` in Mac coordinates — or on the screen when
+        there is none — and keep it on the screen: its top is never behind
+        the menu bar, and a window too tall for the space below the bar
+        keeps its bottom while that keeps the top below the bar."""
+        screen = self.screen_bounds
+        if over is not None:
+            o = over.mac_origin()
+            v = o.v + (over.height() - win.height()) // 2
+            h = o.h + (over.width() - win.width()) // 2
+        else:
+            v = self.desk_top + (screen.bottom - self.desk_top - win.height()) // 2
+            h = (screen.right - win.width()) // 2
+        bottom_keep = screen.bottom - 8 - win.height()
+        # A window taller than the desk clips at the bottom; one taller than
+        # the screen clips at the bottom too — never at the bar.
+        v = min(max(v, self.desk_top), max(self.desk_top, bottom_keep))
+        h = min(max(h, 4), max(4, screen.right - 8 - win.width()))
+        win.place(Point(v, h))
+
     # =====================================================================
     # Processes
     # =====================================================================
@@ -552,8 +641,13 @@ class Display(QObject):
     def switch_to(self, proc: Process, force: bool = False) -> None:
         """Make proc the front process, like clicking its window under MultiFinder."""
         old = self.front_process
-        if proc not in self.processes or (old is proc and not force):
+        if proc not in self.processes or (old is proc and not force and self.front_filer is None):
             return                      # an app that has just quit can't come forward
+        if self.front_filer is not None:
+            self.filer_front(None)      # an application is coming forward
+        else:
+            # No Filer window was front; an application is coming forward.
+            self.front_aux_window = None
         self.processes.remove(proc)
         self.processes.insert(0, proc)
         if proc.hidden:
@@ -579,6 +673,12 @@ class Display(QObject):
                                      self.input.modifiers))
         self.restack()
         self.focus(fw)
+        if fw is not None:
+            view = self.views.get(fw)
+            if view is not None:
+                view.raise_()
+                if view.isWindow():
+                    view.activateWindow()
         self.refresh_bars()
         self._show_cursor(proc)
 
@@ -609,6 +709,10 @@ class Display(QObject):
             self.global_bar.raise_()
 
     def focus(self, rec: WindowRecord | None) -> None:
+        """Give the keyboard to rec's window: an application's, which takes
+        the menu bar from a Filer window that had it."""
+        if rec is not None and self.front_filer is not None:
+            self.filer_front(None)
         if self.screen_widget is not None:
             self.screen_widget.setFocus()
         elif rec is not None and rec in self.views and self.views[rec].isVisible():
@@ -634,12 +738,130 @@ class Display(QObject):
         self._retire(view)
         self._app_bar_timer.start()
 
-    def _retire(self, widget: MacWindowView | AppBarWindow) -> None:
-        """Hide a window view or bar window for good, first ending any
-        tracking that's using it."""
+    def open_filer(self, volume, path: tuple[str, ...] = (),
+                    options: FilerOptions | None = None) -> FilerWindow:
+        """A Filer window over one folder of a disk image or host folder, or the one
+        already open there: brought to the front instead."""
+        for win in self.filer_windows:
+            if win.volume is volume and win.path == path:
+                win.raise_()
+                win.activateWindow()
+                win.show()
+                self.filer_front(win)
+                return win
+        win = FilerWindow(self, volume, path, options, parent=self.screen_widget)
+        self.filer_windows.append(win)
+        i = len(self.filer_windows) - 1
+        w, h = self.size
+        x = min(400 + 26 * i, max(4, w - win.width() - 8))
+        y = min(self.desk_top + 70 + 26 * i, max(self.desk_top, h - win.height() - 8))
+        win.place(Point(y, x))
+        win.show()
+        if win.isWindow():
+            win.activateWindow()
+        else:
+            win.tree.setFocus()
+        self.filer_front(win)
+        return win
+
+    def filer_front(self, win: FilerWindow | None) -> None:
+        """Make win the Filer's frontmost window, or none: while one is
+        frontmost the bar shows the Filer's menus instead of a process's."""
+        if win is not None and win not in self.filer_windows:
+            return
+        # No About, Get Info or Viewer window is frontmost together with the
+        # Filer.  It is raised above them below; lowering the auxiliary
+        # windows is not an option — on the host's desktop that buries them
+        # behind every other window instead of merely behind the Filer.
+        self.front_aux_window = None
+        if win is self.front_filer:
+            return
+
+        old_filer = self.front_filer
+        old_process = self.front_process
+        self.front_filer = win
+
+        # If showing the Filer, hide the front app
+        if win is not None:
+            win.raise_()
+            if win.isWindow():
+                win.activateWindow()
+            else:
+                win.tree.setFocus()
+            # Hide the front process if it exists
+            if old_process is not None:
+                fw = old_process.front_window()
+                if fw is not None and fw.hilited:
+                    fw.hilited = False
+                    self.sync(fw)
+                    old_process.events.post_activate(fw, False)
+                old_process.events.post(EventRecord(osEvt, suspendResumeMessage << 24, 0,
+                                                    self.input.mac_pos, self.input.modifiers))
+        # If hiding the Filer, show the front process
+        else:
+            # The application coming forward is raised by switch_to()'s
+            # restack(); the Filer's own windows are not to be buried —
+            # on the host's desktop that puts them behind every window,
+            # instead of merely behind the application's.
+            if old_process is not None and old_process not in self.processes:
+                # Process might have been quit
+                pass
+            elif old_process is not None and old_process is not self.front_process:
+                self.switch_to(old_process)
+        
+        self.refresh_bars()
+
+    def filer_blurred(self, win: FilerWindow, new: QWidget | None) -> None:
+        """A Filer window has lost the focus.  It is frontmost no more only
+        if what took it is an application's window: the desk, the menu bar,
+        a host alert and the Filer's own windows are all still its own, and
+        only an application taking the keyboard gives the bar back."""
+        if self.front_filer is not win:
+            return
+        w = new
+        while w is not None and not isinstance(w, (MacWindowView, AppBarWindow)):
+            w = w.parentWidget()
+        if w is not None:
+            self.filer_front(None)
+
+    def close_filer(self, win: FilerWindow) -> None:
+        """Close a Filer window.  With no applications left running and
+        no Filer windows open, macrt quits: they were all that was up."""
+        if win not in self.filer_windows:
+            return
+        self.filer_windows.remove(win)
+        
+        # Eject/unmount volume if applicable (skip Macintosh HD boot volume and subfolder windows)
+        vol = getattr(win, "volume", None)
+        path = getattr(win, "path", ())
+        if isinstance(vol, VolumeFolder) and not path:
+            image_name = vol.volume.name
+            # Find and unmount in FileSystem if not boot volume
+            fs = self.system.files
+            for v in list(fs.volumes):
+                if v.name == image_name and v is not fs.boot:
+                    try:
+                        fs.unmount(v)
+                        # Clean up cache in macfile
+                        from .. import macfile
+                        macfile._VOLUME_CACHE.pop(str(v.store.source) if hasattr(v.store, "source") and v.store.source else "", None)
+                    except Exception:
+                        pass
+        
+        self._retire(win)
+        if self.front_filer is win:
+            self.front_filer = self.filer_windows[-1] if self.filer_windows else None
+            self.refresh_bars()
+        if not self.processes and not self._alerts and not self.filer_windows:
+            self.shutdown()
+
+    def _retire(self, widget: MacWindowView | AppBarWindow | FilerWindow) -> None:
+        """Hide a window view, bar window or Filer window for good,
+        first ending any tracking that's using it."""
         t = self.tracker
         tracked = getattr(t, "view", None) or getattr(t, "widget", None)
-        if tracked is widget or (isinstance(t, MenuTracker) and t.bar is widget.bar):
+        if tracked is widget or (isinstance(t, MenuTracker)
+                                 and getattr(widget, "bar", None) is t.bar):
             t.cancel()
         widget.hide()
         widget.deleteLater()
@@ -785,10 +1007,12 @@ class Display(QObject):
     # =====================================================================
     # Menu bars
     # =====================================================================
-    def bars_for(self, proc: Process) -> list[MenuBarWidget]:
+    def bars_for(self, proc: Process | FilerMenus) -> list[MenuBarWidget]:
         bars = []
         if self.global_bar is not None and self.global_bar.process is proc:
             bars.append(self.global_bar)
+        if proc is self.filer_menus:
+            return bars             # Filer windows all share the one bar
         for rec in proc.windows:
             view = self.views.get(rec)
             if view is not None and view.bar is not None:
@@ -797,9 +1021,11 @@ class Display(QObject):
             bars.append(self.app_bars[proc].bar)
         return bars
 
-    def default_bar(self, proc: Process) -> MenuBarWidget | None:
+    def default_bar(self, proc: Process | FilerMenus) -> MenuBarWidget | None:
         if self.global_bar is not None:
             return self.global_bar if self.global_bar.process is proc else None
+        if proc is self.filer_menus:
+            return None             # Filer windows share the one bar, above
         # A dialog in front has no bar of its own; use the next window's.
         for rec in proc.windows:
             view = self.views.get(rec)
@@ -839,7 +1065,8 @@ class Display(QObject):
     def refresh_bars(self) -> None:
         self._sync_application_menu()
         if self.global_bar is not None:
-            self.global_bar.process = self.front_process
+            self.global_bar.process = (self.filer_menus if self.front_filer is not None
+                                       else self.front_process)
             self.global_bar.update()
         for view in self.views.values():
             if view.bar is not None:
@@ -847,6 +1074,98 @@ class Display(QObject):
         for bar in self.app_bars.values():
             bar.relayout()
         self._app_bar_timer.start()
+
+    def show_about_classetta(self) -> AboutClassettaWindow:
+        win = AboutClassettaWindow(self)
+        self.about_windows.append(win)
+        self.front_aux_window = win
+        self.place_aux_window(win, self.front_filer)
+        win.show()
+        win.raise_()
+        win.activateWindow()
+        return win
+
+    def toggle_record_sound(self) -> None:
+        """File > Record Sound…: start or stop writing the Mac's sound to a
+        WAV file as it plays (--record-sound)."""
+        recording = [out for out in self.sound if isinstance(out, WaveFile)]
+        if recording:
+            for out in recording:
+                out.close()
+                self.sound.remove(out)
+            self.config.record_sound = None
+            self.show_alert(QMessageBox.Icon.Information, "Record Sound",
+                            "Stopped recording the Mac's sound.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self.host_window, "Record Sound", "sound.wav", "WAV files (*.wav)")
+        if not path:
+            return
+        try:
+            self.sound.append(WaveFile(path))
+        except OSError as e:
+            self.show_alert(QMessageBox.Icon.Warning, "Record Sound",
+                            f"Couldn't record to {path}: {e}")
+            return
+        self.config.record_sound = path
+        self.show_alert(QMessageBox.Icon.Information, "Record Sound",
+                        f"Recording the Mac's sound to {path}")
+
+    def filer_menu_choice(self, menu_id: int, item: int) -> None:
+        """A choice from the Filer's own menus, which no process answers."""
+        if menu_id == APPLE_MENU_ID and item == 1:
+            self.show_about_classetta()
+        elif menu_id == FILE_MENU_ID and item == 1:
+            front = self.front_filer
+            if front is not None:
+                front.open_selected()
+        elif menu_id == FILE_MENU_ID and item == 3:
+            front = self.front_filer
+            if front is not None:
+                front.get_info()
+        elif menu_id == FILE_MENU_ID and item == 4:
+            front = self.front_filer
+            if front is not None:
+                front.display_contents()
+        elif menu_id == FILE_MENU_ID and item == 5:
+            front = self.front_filer
+            if front is not None:
+                front.view_selected()
+        elif menu_id == FILE_MENU_ID and item == 6:
+            front = self.front_filer
+            if front is not None:
+                front.trace_selected()
+        elif menu_id == FILE_MENU_ID and item == 7:
+            front = self.front_filer
+            if front is not None:
+                front.set_memory()
+        elif menu_id == FILE_MENU_ID and item == 9:
+            front = self.front_filer
+            if front is not None:
+                front.save_catalog()
+        elif menu_id == FILE_MENU_ID and item == 10:
+            front = self.front_filer
+            if front is not None:
+                front.extract()
+        elif menu_id == FILE_MENU_ID and item == 11:
+            self.toggle_record_sound()
+        elif menu_id == FILE_MENU_ID and item == 13:
+            aux = self.front_aux_window
+            if aux is not None:
+                # the window the Close is for is the one on top: an
+                # auxiliary window, not the Filer behind it
+                aux.close()
+                return
+            front = self.front_filer
+            if front is not None:
+                front.close()
+        elif menu_id == DISK_MENU_ID and item >= 1:
+            self.filer_menus.disk_choice(item)
+        elif menu_id == SPECIAL_MENU_ID and item == 6:
+            self.restarting = True             # Special > Restart
+            self.shutdown()                    # the same graceful shutdown first
+        elif menu_id == SPECIAL_MENU_ID and item == 7:
+            self.shutdown()                    # Special > Shutdown
 
     def bar_image(self, proc: Process) -> QImage | None:
         """The menu bar as proc's DrawMenuBar draws it in the screen
@@ -879,21 +1198,28 @@ class Display(QObject):
         mode = self.config.application_menu
         if bar is not self.global_bar or mode == "never":
             return None
-        if mode == "auto" and len(self.processes) < 2:
+        if mode == "auto" and len(self.processes) + len(self.filer_windows) < 2:
             return None
         return Menu(kApplicationMenuID, "", self._application_items())
 
     def _application_items(self) -> list[MenuItem]:
         front = self.front_process
-        others = len(self.processes) > 1
+        # Count Filer as an application for menu visibility purposes
+        # Filer is not a Process, so we need to check separately
+        others = len(self.processes) > 1 or (len(self.processes) == 0 and self.filer_windows)
+        hide_text = f"Hide {front.name}" if front is not None else ""
         items = [
-            MenuItem(f"Hide {front.name}", enabled=others),
+            MenuItem(hide_text, enabled=others) if hide_text else MenuItem(""),
             MenuItem("Hide Others", enabled=others),
             MenuItem("Show All"),
             MenuItem("-", enabled=False),
         ]
-        items += [MenuItem(p.name, mark=checkMark if p is front else "")
+        # Add all apps (checked only if this app is front and front_filer is None)
+        items += [MenuItem(p.name, mark=checkMark if (p is front and self.front_filer is None) else "")
                   for p in self.launch_order]
+        # Add Filer if any Filer windows exist (checked if front_filer is not None)
+        if self.filer_windows:
+            items.append(MenuItem("Filer", mark=checkMark if self.front_filer is not None else ""))
         return items
 
     def _sync_application_menu(self) -> None:
@@ -927,6 +1253,8 @@ class Display(QObject):
             self.restack()
         elif item >= 5 and item - 5 < len(self.launch_order):
             self.switch_to(self.launch_order[item - 5])
+        elif self.filer_windows and item == 5 + len(self.launch_order):
+            self.filer_front(self.front_filer or self.filer_windows[0])
         self.refresh_bars()
 
     # =====================================================================
@@ -999,14 +1327,26 @@ class Display(QObject):
     def mouse_down(self, obj: QWidget) -> None:
         gpos = self.input.global_pos
         if self.tracker is not None:
+            # A press in a menu that is down belongs to the menu, not to a
+            # window: the auxiliary window in front stays front.
             self.tracker.press(gpos)
             return
         owner, widget = self._owner(obj)
+        if owner is self.filer_menus:
+            # The Filer's menus, which no process waits on: the Display pulls
+            # them down and takes the pick itself, as it does the Application
+            # menu's.  The bar is not a place a window comes forward, so an
+            # auxiliary window in front stays front.
+            self._start_tracker(MenuTracker(self, widget, Future(),
+                                            self.config.sticky_menus))
+            return
+        self.front_aux_window = None
         if owner is not None and owner not in self.processes:
             # A window of an app that has quit, not yet gone from the screen.
             self._swallow_release = True
             return
-        self._last_clicked = widget
+        if owner is not None and self.front_filer is not None:
+            self.filer_front(None)             # a click in an application's window
         if owner is not None and owner is not self.front_process:
             self.switch_to(owner)
             self._swallow_release = True
@@ -1061,7 +1401,35 @@ class Display(QObject):
         if state != Qt.ApplicationState.ApplicationActive:
             self.system.input.release()
 
-    def key_event(self, ev) -> None:
+    def _filer_shortcut(self, ev) -> bool:
+        """A Control key over a key equivalent of the front Filer's menus
+        gives its command, as MenuKey gives an application's: True if this
+        key was one of them."""
+        if self.front_filer is None or ev.type() != QEvent.Type.KeyPress:
+            return False
+        if self.front_aux_window is not None:
+            return False
+        if not ev.modifiers() & (Qt.KeyboardModifier.ControlModifier
+                                 | Qt.KeyboardModifier.MetaModifier):
+            return False
+        try:
+            ch = chr(ev.key())
+        except (ValueError, OverflowError):
+            return False
+        for menu in self.filer_menus.bar_menus():
+            for i, item in enumerate(menu.items, start=1):
+                if item.enabled and item.key and item.key.upper() == ch.upper():
+                    # The menu's title lights, then the choice is taken.
+                    self.hilite_menu(self.filer_menus, menu.id)
+                    QTimer.singleShot(100, lambda m=menu.id, n=i: (
+                        self.hilite_menu(self.filer_menus, 0),
+                        self.filer_menu_choice(m, n)))
+                    return True
+        return False
+
+    def key_event(self, ev) -> bool:
+        """A key for the screen or a Filer window: True when a Filer menu
+        shortcut took it, so the widget it arrived at need not see it."""
         self.input.modifiers = modifiers_from_qt(ev.modifiers(), self.input.down)
         self.system.input.modifiers(self.input.modifiers)
         msg = key_message(ev, self.system.model.keyboard)
@@ -1070,16 +1438,22 @@ class Display(QObject):
         if self.tracker is not None:
             if ev.key() == Qt.Key.Key_Escape and ev.type() == QEvent.Type.KeyPress:
                 self.tracker.cancel()
-            return
+            return False
+        if self._filer_shortcut(ev):
+            return True
         proc = self.front_process
-        if proc is None:
-            return
+        if proc is None or self.front_filer is not None:
+            # A Filer window is frontmost, so these keys are its own: it has
+            # commands for some and ignores the rest, rather than leave them
+            # queued for an application that is behind it.
+            return False
         if ev.type() == QEvent.Type.KeyPress:
             what = autoKey if ev.isAutoRepeat() else keyDown
         elif ev.isAutoRepeat():
-            return
+            return False
         else:
             what = keyUp
         if msg is not None:
             proc.events.post(EventRecord(what, msg, 0, self.system.input.position,
                                          self.input.modifiers))
+        return False

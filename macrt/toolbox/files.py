@@ -58,8 +58,8 @@ from typing import TYPE_CHECKING, Callable
 import machfs
 
 from ..macfile import (APPLE_DOUBLE, APPLE_SINGLE, AS_DATA, AS_FINDER_INFO, AS_NAME, AS_RSRC,
-                       BINHEX_BANNER, HostFolder, MacFile, MemoryFolder, OnDisk, VolumeFolder,
-                       load_file)
+                       BINHEX_BANNER, HostFolder, MacFile, MemoryFolder, OnDisk, ToolboxFolder,
+                       VolumeFolder, load_file)
 from ..memory import from_mac, to_mac
 from . import lowmem
 
@@ -1241,6 +1241,13 @@ class FileSystem:
                 return d
             if isinstance(folder, MemoryFolder):
                 return self.mount_folder(folder).root
+            if isinstance(folder, ToolboxFolder):
+                d = folder.volume.root
+                for part in folder.path:
+                    d = d.child(part) if d is not None else None
+                    if d is None or not d.is_dir:
+                        return None
+                return d
             return None
 
     def node_for(self, f: MacFile) -> File:

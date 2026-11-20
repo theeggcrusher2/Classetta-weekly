@@ -59,20 +59,22 @@ built-in demo programs instead.
 `pip install -e .` installs all four. unicorn has wheels for Linux, macOS
 and Windows.
 
-- **To unpack Mac archives** (StuffIt, Compact Pro and so on), get The
-  Unarchiver's command-line tool, `unar`: `apt install unar` or `brew
-  install unar`.
+- **To unpack Mac archives the Filer can't list**, get The Unarchiver's
+  command-line tool, `unar`: `apt install unar` or `brew install unar`.
+  The Filer browses almost every format macextract knows itself — see
+  [Archives](#archives).
 - **To run without a display** (a server or CI), set
   `QT_QPA_PLATFORM=offscreen`.
 
 ### Fonts
 
 The chrome looks right with Chicago (system font) and Geneva (application
-font). These aren't bundled. Put `.ttf`/`.otf` files in `macrt/ui/fonts/` and
-they load at startup. *ChicagoFLF* is a freely licensed Chicago clone. With a
-Mac font present, text is drawn without antialiasing for the crisp 1-bit look.
-Without one, macrt falls back to Helvetica at 13px with antialiasing on, because
-outline fonts look broken without it. `theme.TEXT_ANTIALIAS = True/False`
+font). *ChicagoFLF*, a freely licensed Chicago clone, ships in
+`macrt/ui/fonts/`; drop more Chicago/Geneva lookalikes there as `.ttf`/`.otf`
+and they load at startup. With a Mac font present, text is drawn without
+antialiasing for the crisp 1-bit look. Without one, macrt falls back to
+Helvetica at 13px with antialiasing on, because outline fonts look broken
+without it. `theme.TEXT_ANTIALIAS = True/False`
 forces either. An application's own fonts are drawn from their bitmaps
 (see [Text and fonts](architecture.md#text-and-fonts)).
 
@@ -143,7 +145,7 @@ it works it out from the contents:
 | Executor | `App` next to `%App` | Executor's host folder |
 | a resource fork on its own | `App.rsrc`, or any file that is one | `DeRez`/`Rez` tooling, resource editors |
 | a macOS file | `App` itself, through `App/..namedfork/rsrc` | a Mac running macOS |
-| an HFS, HFS Plus or MFS disk image | `Disk.dsk`, `.img`, `.image`, `.hfs`, `.iso`, `.cdr`, `.toast` | raw and DiskCopy 4.2 floppy images (800K and 1.4MB HFS, 400K MFS), with each sector's 12 tag bytes or without them, HFS and HFS Plus CD images, partitioned hard disk images. A CD's image, or any other of 16 MB or more, is mapped rather than read in, and a file's forks are read from it only when they're wanted, so only what's used of it is in memory. A raw CD image, which keeps each of the disc's 2352-byte sectors whole, is read in as the 2048 bytes of data in each. |
+| an HFS, HFS Plus or MFS disk image | `Disk.dsk`, `.img`, `.image`, `.hfs`, `.iso`, `.cdr`, `.toast` | raw and DiskCopy 4.2 floppy images (800K and 1.4MB HFS, 400K MFS), with each sector's 12 tag bytes or without them, HFS and HFS Plus CD images, partitioned hard disk images. A disc with no Mac volume but an ISO 9660 one also opens, with its files browsable but nothing to launch. A CD's image, or any other of 16 MB or more, is mapped rather than read in, and a file's forks are read from it only when they're wanted, so only what's used of it is in memory. A raw CD image, which keeps each of the disc's 2352-byte sectors whole, is read in as the 2048 bytes of data in each. |
 | a MOOF floppy image | `Disk.moof` | Applesauce, imaging a 400K or 800K floppy's tracks bit by bit |
 
 For AppleDouble and the emulator folders, give macrt the data-fork file
@@ -186,9 +188,26 @@ both BMUG PD-ROM discs was mastered like this.
 
 Most Mac software online is in an archive: `.sit` (StuffIt), `.cpt`
 (Compact Pro), `.sea` (self-extracting), `.sit.hqx`, or a `.zip` with a
-`__MACOSX` folder. macrt doesn't unpack archives; it tells you when you've
-given it one. Unpack it with The Unarchiver, which keeps the resource
-forks:
+`__MACOSX` folder. The Filer browses an archive like a folder — double-click
+it, or name it on the command line with `--filer` — no unpacking first:
+
+```sh
+python -m macrt Game.sit --filer      # a Filer window on the archive's contents
+python -m macrt --filer vector-25.hqx  # same for the BinHex of a StuffIt
+```
+
+What it lists is every format macextract knows: MacBinary, BinHex,
+AppleSingle, PackIt, StuffIt (1.5.1 through 5.x), Compact Pro, zip, 7z, rar,
+lha, arc and the rest — including members that are themselves archives, disk
+images, or AppleDouble files. Folder members open in windows of their own,
+as folders on a disk do; a nested archive opens in a window as well.
+File ▸ Extract writes the archive out: resource
+forks beside their data forks as `._name` AppleDoubles, as The Unarchiver
+leaves them. An archive the Filer can't read is refused by name, with the
+`unar` hint, rather than guessed at.
+
+If you would rather unpack on the command line with The Unarchiver, which
+keeps the resource forks:
 
 ```sh
 unar Game.sit.hqx               # decodes the BinHex and unstuffs what's inside
@@ -202,7 +221,8 @@ An application's data fork is usually empty, and then `unar` writes only
 file. On macOS, `unar` writes real resource forks.
 
 Don't use `unzip` on a zip from a Mac: it leaves the resource forks in the
-`__MACOSX` folder, away from their files. `unar` puts them back together.
+`__MACOSX` folder, away from their files. `unar` puts them back together —
+and `macrt Game.zip --filer` lists the zip around them in place.
 
 For example, Vector 2.5, a small program from the Info-Mac archive:
 
@@ -219,7 +239,8 @@ $ python -m macrt "vect_250 folder/Vector 2.5"
 ### Disk images
 
 Many collections come as disk images: floppies, CD-ROMs and hard disks.
-macrt reads HFS, HFS Plus and MFS volumes directly, so there's nothing to
+macrt reads HFS, HFS Plus and MFS volumes directly — and an ISO 9660
+disc with no Mac volume too — so there's nothing to
 extract:
 
 ```sh
@@ -227,6 +248,22 @@ python -m macrt "System 6.0.8.dsk"                  # a disk with one applicatio
 python -m macrt "System 6.0.8.dsk" --app TeachText
 python -m macrt Tools.img --app "Tools:Disk Tools:Disk First Aid"
 python -m macrt Paint.dsk                           # a 400K MFS floppy from 1984
+python -m macrt Catalog.dtc                         # a Disk Tracker index, browsed read-only
+python -m macrt --filer ~/Downloads/MacArchives   # browses local folder
+```
+
+The Filer supports nested navigation: double-clicking an archive file or
+folder member within a Filer window opens that item in a new window, allowing
+you to drill down through complex, multi-layered directory structures.
+
+Disk Tracker's own index files (`.dtc` or `.dt1`) open in a read-only Filer
+window, listing the disks they index as folders. Double-clicking a file in
+one shows it's recorded in the index rather than stored; File ▸ Get Info shows
+its metadata (size, type, creator, dates).
+
+```sh
+# Example: creating a Disk Tracker index
+python -m disktracker.build "Disk 1.dsk" "Disk 2.dsk" > Catalog.dtc
 ```
 
 `--app` takes the application's name, or its Mac path with folders
@@ -261,13 +298,17 @@ the 2048 bytes of data in each (after the header in a mode 1 sector, and
 after 8 more bytes in a mode 2 one) and mounts the result as a CD-ROM,
 whatever the image is called.
 
-macrt can't read compressed images yet: NDIF (DiskCopy 6) and UDIF
-(`.dmg`, `.smi`). Convert them to a raw image first.
+macrt also reads the compressed and container formats — UDIF (`.dmg`),
+NDIF, CHD, qcow2, VHD, VMDK, MDF/MDS, BIN/CUE, DART and DiskMaker — so
+converting to raw first is no longer needed. The full list, and what
+each refuses by name, is in [Disk image formats](disk-images.md).
 
 #### CD-ROM images
 
 An image whose name ends in `.iso`, `.cdr` or `.toast` is mounted as a
-CD-ROM, whatever its size. Its driver has a device control entry in the
+CD-ROM, whatever its size; an image of a disc's whole 2352-byte sectors
+mounts as one too, whatever its name. A disc with no Mac volume but an
+ISO 9660 one also opens, with its files browsable but nothing to launch. Its driver has a device control entry in the
 unit table, named `.AppleCD`, the Apple CD-ROM driver's name in Technical
 Note DV 22, "CD-ROM Driver Calls", so a program that checks its disc's
 driver by name finds it, as Lode Runner: The Legend Returns does. The
@@ -347,9 +388,10 @@ on a Mac Plus.
 
 A few early games took the Finder's place on their disk, so that a Mac
 started from it went straight into the game. Given a disk without
-`--app`, macrt runs the program the disk starts up into, as its boot
-blocks name it, when that isn't Apple's Finder, and otherwise the disk's
-only application.
+`--app`, macrt runs nothing itself: it opens a Filer window over the
+disk's contents (see [Several applications at once](#several-applications-at-once)),
+where the program the disk starts up into, as its boot blocks name it —
+the game on such a disk — is there to double-click like anything else.
 
 #### Copy protection
 
@@ -427,6 +469,7 @@ python -m macrt FILE... [--app NAME]... [options]
 | Option | What it does |
 | --- | --- |
 | `--app NAME` | Picks the application on a disk image, by name or Mac path. A document's name launches the application that made it, with the document open (see [Opening a document](#opening-a-document)). Repeat it to run several. |
+| `--filer` | Shows a loose file in a Filer window instead of running it: the window lists the folder it's in (an encoding lists what it decodes to), so you can look through it rather than launch it. |
 | `--list` | Lists the file's resources and exits. |
 | `--view` | Shows the application's menus, windows and dialogs from its resources, without running its code. Useful when the code won't run. |
 | `--trace-traps` | Logs every Toolbox and OS trap the application calls. |
@@ -473,11 +516,45 @@ python -m macrt mac6-0-8.dsk --app TeachText --app "Creepy Castle™"
 
 Every file you name is launched, in order. When disk images are among
 them, each `--app` is looked for on the images in turn and taken from the
-first one that has it. Without `--app`, each image gives its only
-application, unless an application file is among the files you name: the
-images are then its disks, as a CD is for a copy of its program on the
-Mac's own disk.
+first one that has it. Without `--app`, nothing is launched from an
+image: each one opens in a Filer window, as System 6's Finder would show
+the disk — double-click an application to run it (its launch is as if it
+had been named on the command line, so several can be started from the
+one window), a document to open it with the application that made it, or
+a folder to open a window of that folder too. The window stays up, and
+its close box closes it, like a real Filer window's. Its menu bar has
+the Filer's own menus: File (Open, Get Info, Display Contents, Save
+Catalog, Extract, Close, Eject), View (by Icon, by Name, by Date, by Size,
+by Kind), and Special
+(Clean Up Window, Empty Trash, Erase Disk, Set Startup, Restart,
+Shutdown). File ▸ Get Info
+(key I) shows an item's data and resource fork sizes, its type, creator and
+Finder flags, and its creation and modification dates, plus the icon it
+carries and, for a program, its version resource's name and message. File ▸ Close (key W) closes the frontmost
+window: a Get Info, Display Contents or About window while one is
+up, else the Filer window, as Control-W does. File ▸ Save Catalog
+(key S) writes what the
+window browses — the whole volume, host folder or encoded container —
+to a Disk Tracker 2 catalog (`.dtc`) of its own; the command is off in
+the read-only windows Disk Tracker catalogs open in. File ▸ Extract
+writes what the window browses, or the selected archive, to a folder
+you pick — resource forks beside their data forks as `._name`
+AppleDoubles, as The Unarchiver leaves them. A Disk Tracker
+index (`.dtc`, `.dt1`) opens in such
+a window too, but read-only: see [Disk images](#disk-images).
+The exception is an application file named among the files: the images are then its
+disks, as a CD is for a copy of its program on the Mac's own disk, and they stay out
+of the Filer.
 
+Archives the Filer recognises — MacBinary, BinHex and AppleSingle, and
+every format its `macextract.py` dependency knows (PackIt, AppleLink,
+MIME, uuencode and its kin) — open in a Filer window like a folder: the
+archive's files listed, each openable as usual, one window per folder
+inside the archive as on a disk image, and one window per nested
+archive. New formats are recognised as they are added to
+macextract.py; there is nothing to configure and no per-format code to
+write. A damaged archive says so when you try to open it; nothing else
+happens to it.
 An image nothing is launched from, one with no application on it or, with
 `--app`, none of the names, is a disk of documents. Every image is in a
 drive from the start, the first in the internal drive, so a game on two
@@ -1041,6 +1118,16 @@ went on with a value that call should have filled in.
 | 12 | unimplemented trap | A trap macrt doesn't even know the name of, or a private call. PrintMonitor's private MultiFinder calls stop it here. |
 | 15 | segment loader error | A `CODE` segment that's missing or compressed, or one built for the far code model that the application's own runtime doesn't load. |
 | 25 | out of memory | A Toolbox call couldn't get the memory it had to have. Most calls report `memFullErr` instead and let the application decide. |
+
+Some early applications wait on something macrt doesn't advance, and
+sit still alive: no window, no error, no missing calls to report.
+`--trace-traps` shows launch's first traps, then the same few over and
+over — `CopyBits`, `OffsetRect`, `TickCount` — and nothing after them.
+Mousing Around, on the ADC Developer CD's guided-tour disks, is one.
+Its bytes sit still from a disk image and from a host folder alike, so
+the wait isn't the image's or the Filer's, but the emulator's. Programs
+like that are the ones [Games from 1984](#games-from-1984) is about;
+what they wait on beyond it isn't there yet.
 
 ### Looking closer
 
