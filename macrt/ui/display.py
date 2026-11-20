@@ -831,9 +831,10 @@ class Display(QObject):
             return
         self.filer_windows.remove(win)
         
-        # Eject/unmount volume if applicable (skip Macintosh HD boot volume)
+        # Eject/unmount volume if applicable (skip Macintosh HD boot volume and subfolder windows)
         vol = getattr(win, "volume", None)
-        if isinstance(vol, VolumeFolder):
+        path = getattr(win, "path", ())
+        if isinstance(vol, VolumeFolder) and not path:
             image_name = vol.volume.name
             # Find and unmount in FileSystem if not boot volume
             fs = self.system.files
