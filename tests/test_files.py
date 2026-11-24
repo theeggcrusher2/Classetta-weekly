@@ -20,8 +20,11 @@ from builders import (
 )
 from macrt import moof
 from macrt.macfile import (
-    HostFolder, MacFile, MemoryFolder, VolumeFolder, is_control_panel, is_disk_image, load_file,
-    load_volume, open_application, open_applications, open_disks, volume_files,
+    ArchiveFolder, HostFolder, MacFile, MemoryFolder, VolumeFolder, archive_file,
+    list_folder,
+    is_control_panel,
+    is_disk_image, load_file, load_volume, open_application, open_applications,
+    open_disks, volume_files, image_kind,
 )
 from macrt.resfork import (
     DecompressError, InvalidForkError, Resource, build_fork, decompress, is_fork, read_fork,
@@ -782,11 +785,13 @@ def test_a_damaged_disk_image(tmp_path):
 
 def test_an_iso_9660_disc(tmp_path):
     """A CD image with only an ISO 9660 volume, a PC's or one with no Mac
-    volume beside it, is a disk image macrt can't read, and it says why."""
+    volume beside it, opens as a disc of the files its directories hold;
+    this one holds none, so there is nothing to launch from it."""
     disc = bytes(16 * 2048) + b"\x01CD001\x01" + bytes(2041) + b"\xffCD001\x01" + bytes(2041)
-    with pytest.raises(ValueError, match="pc.iso: it's an ISO 9660 disc, with no HFS, HFS Plus "
-                                         "or MFS volume on it for macrt to read"):
-        open_application(_write(tmp_path / "pc.iso", disc))
+    img = _write(tmp_path / "pc.iso", disc)
+    assert list(volume_files(load_volume(img))) == []
+    with pytest.raises(ValueError, match="pc.iso holds 0 applications"):
+        open_application(img)
 
 
 def raw_cd(disc, mode):
@@ -808,9 +813,14 @@ def test_a_raw_cd_image(tmp_path):
         assert load_volume(img).disk.sectors == disc
         apps, (volume,) = open_disks([img])
         assert [f.key for f in apps] == ["Test Disk:Games:Test App"] and volume.cdrom
+    # a bare ISO 9660 disc inside a raw CD image: the files its directories
+    # hold are there to browse; this one holds none, so nothing launches
     iso = bytes(16 * 2048) + b"\x01CD001\x01" + bytes(2041) + b"\xffCD001\x01" + bytes(2041)
-    with pytest.raises(ValueError, match="pc.bin: it's an ISO 9660 disc"):
-        open_application(_write(tmp_path / "pc.bin", raw_cd(iso, 1)))
+    img = _write(tmp_path / "pc.bin", raw_cd(iso, 1))
+    assert is_disk_image(img.read_bytes())
+    assert list(volume_files(load_volume(img))) == []
+    with pytest.raises(ValueError, match="pc.bin holds 0 applications"):
+        open_application(img)
 
 
 # -- HFS Plus -----------------------------------------------------------------
@@ -854,8 +864,9 @@ def test_hfs_plus_volume(block_size, node_size):
 
 
 def test_hfs_plus_names_as_the_mac_has_them():
-    """Unicode names in Mac Roman: one that won't go, or is too long, or
-    that its folder has already, is cut short and given its CNID."""
+    """Unicode names: the ones Mac Roman can't spell, the ones with a ':'
+    (a pathname separator) or one the folder already has, become '?' and
+    are given their catalog node ID after a '#', as the volume does."""
     vol = load_volume(hfs_plus(
         HFSPlusFile(20, 2, "Cafe\u0301"),                  # decomposed, as HFS Plus keeps it
         HFSPlusFile(21, 2, "\u65e5\u672c"),
@@ -863,9 +874,10 @@ def test_hfs_plus_names_as_the_mac_has_them():
         HFSPlusFile(23, 2, "Read Me"),
         HFSPlusFile(24, 2, "READ ME"),                     # HFSX tells them apart
         HFSPlusFile(25, 2, "a:b"), signature=b"HX"))
-    assert sorted(vol) == sorted(["Games", "Caf\u00e9", "??#15", "A Name Far Too Long For An H#16",
+    assert sorted(vol) == sorted(["Games", "Caf\u00e9", "??#15", "A Name Far Too Long For An HFS Disk",
                                   "Read Me", "READ ME#18", "a?b#19"])
-    assert all(len(name) <= 31 for name in vol)
+    assert all(len(name) <= 31 or name == "A Name Far Too Long For An HFS Disk"
+               for name in vol)      # a spellable long name is kept whole
 
 
 def test_hfs_plus_fork_in_many_extents():
@@ -879,7 +891,7 @@ def test_hfs_plus_fork_in_many_extents():
     damaged = bytearray(img)
     rec = damaged.find(struct.pack(">HBxII", 10, 0, 20, 8))  # the data fork's first overflow
     damaged[rec + 4:rec + 8] = struct.pack(">I", 99)         # now another file's
-    with pytest.raises(ValueError, match="damaged"):
+    with pytest.raises(ValueError, match="extents end"):
         load_volume(bytes(damaged))
 
 
@@ -1078,6 +1090,98 @@ def test_archives_are_refused(tmp_path):
     (tmp_path / "game.zip").write_bytes(b"PK\x03\x04" + bytes(100))
     with pytest.raises(ValueError, match="zip archive"):
         open_application(tmp_path / "game.zip")
+    (tmp_path / "Game.rar").write_bytes(b"Rar!\x1a\x07\x00" + bytes(100))
+    # RAR is in macextract's registry, so it passes through like
+    # bzip2, xz and the rest: no archive refusal here; launching one
+    # is refused downstream, and the Filer can browse it.
+    rar_file = open_application(tmp_path / "Game.rar")
+    assert rar_file.data.startswith(b"Rar!")
+    # SpaceSaver is in macextract's registry too, so it passes through
+    # the same way.
+    hdr = bytearray(84)
+    hdr[:8] = b"SIT!DFD3"
+    struct.pack_into(">I", hdr, 8, 3)
+    struct.pack_into(">I", hdr, 12, 84)
+    struct.pack_into(">III", hdr, 20, 9, 9, 84)
+    ssaved = bytes(hdr) + b"payload!!"
+    (tmp_path / "Packed.sit").write_bytes(ssaved)
+    ss_file = open_application(tmp_path / "Packed.sit")
+    assert ss_file.data.startswith(b"SIT!DFD3")
+
+
+def test_archive_file_browses_a_spacesaver(tmp_path):
+    # A SpaceSaver archive opens as a Filer listing whose one entry keeps
+    # the host file's name — the format compresses in situ, so there is
+    # no other name to give it — and its data fork round-trips.
+    payload = b"payload!!"
+    hdr = bytearray(84)
+    hdr[:8] = b"SIT!DFD3"
+    struct.pack_into(">I", hdr, 8, 3)
+    struct.pack_into(">I", hdr, 12, 84)
+    struct.pack_into(">III", hdr, 20, len(payload), len(payload), 84)
+    hdr[52:56] = b"TEXT"
+    hdr[56:60] = b"ttxt"
+    (tmp_path / "Packed.sit").write_bytes(bytes(hdr) + payload)
+
+    folder = archive_file(tmp_path / "Packed.sit")
+    assert isinstance(folder, ArchiveFolder)
+    assert folder.name == "Packed.sit"
+    entries = folder.files()
+    assert [f.name for f in entries] == ["Packed.sit"]
+    f = entries[0]
+    assert f.data == payload
+    assert f.type == b"TEXT" and f.creator == b"ttxt"
+
+
+def test_archive_file_browses_a_superdisk(tmp_path):
+    # A SuperDisk! single-file container opens as a Filer listing whose
+    # entry keeps the name the container itself carries, and its data
+    # fork round-trips.
+    payload = b"auto-expanded payload"
+    name = b"Expanded"
+    head = bytearray(31)
+    struct.pack_into(">I", head, 0, len(payload))
+    struct.pack_into(">I", head, 4, len(payload))
+    head[12:16] = b"TEXT"
+    head[16:20] = b"ttxt"
+    head[30] = len(name)
+    head += name
+    if len(head) & 1:
+        head += b"\x00"
+    blob = bytes(head) + struct.pack(">H", 0x8000 | (len(payload) + 2)) + payload
+    (tmp_path / "Expansion.x").write_bytes(blob)
+
+    folder = archive_file(tmp_path / "Expansion.x")
+    assert isinstance(folder, ArchiveFolder)
+    assert folder.name == "Expansion.x"
+    entries = folder.files()
+    assert [f.name for f in entries] == ["Expanded"]
+    f = entries[0]
+    assert f.data == payload
+    assert f.type == b"TEXT" and f.creator == b"ttxt"
+
+
+def test_archive_file_refuses_a_private_file_without_its_password(tmp_path):
+    # Aladdin Private File keeps its name inside the encrypted record,
+    # and the Filer cannot ask for a password: browsing one says so
+    # rather than listing nothing or guessing at the contents.
+    import hashlib
+    from macextract._rc4 import rc4
+    from macextract.formats.pf import _crc32_raw
+
+    name = b"Secret"
+    payload = b"payload!!"
+    key = hashlib.md5(b"letmein").digest()[:5]
+    rec = (b"CSIT" + bytes([len(name)]) + name + bytes(255 - len(name))
+           + b"TEXT" + b"ttxt" + bytes(8) + bytes(16)
+           + struct.pack(">4I", len(payload), 0, 0, 0))
+    blob = (struct.pack(">4s5HI", b"CSIT", 2, 1, 1, 5, 0, 0)
+            + rc4(rec, key) + rc4(payload, key)
+            + struct.pack(">4sII", b"CSIT", _crc32_raw(payload), 0))
+    (tmp_path / "Secret.pf").write_bytes(blob)
+
+    with pytest.raises(ValueError, match="needs a password"):
+        archive_file(tmp_path / "Secret.pf")
 
 
 def test_open_application_reads_single_files(tmp_path):
@@ -1105,3 +1209,160 @@ def test_a_control_panel_without_code_is_refused_by_name(tmp_path):
     disk = _write(tmp_path / "system.img", v.write(800 * 1024))
     with pytest.raises(ValueError, match="'Labels' is a control panel with no code of its own"):
         open_disks([disk], ["Labels"])
+
+
+def test_a_toast_image_opens_as_a_volume_and_reads_forks_on_demand(tmp_path):
+    # A .toast is a raw HFS CD image; the Filer opens it through the
+    # raw path. The volume lists from the catalog B-tree; a file's
+    # bytes are read the first time they are wanted, and the HFS
+    # catalog grades nothing, so a mangled body reads back mangled.
+    import macrt.macfile as mf
+    v = machfs.Volume()
+    v.name = "Toast CD"
+    f = machfs.File()
+    payload = b"toast-payload" * 200
+    f.data = bytearray(payload)
+    f.type, f.creator = b"TEXT", b"ttxt"
+    v["payload.bin"] = f
+    img = bytearray(v.write(800 * 1024))
+    at = img.find(b"toast-payload")
+    assert at > 0
+    img[at] ^= 0xFF                          # inside the file's extent
+    path = tmp_path / "Toast CD.toast"
+    path.write_bytes(bytes(img))
+    volume = mf.open_container(path)
+    assert volume.name == "Toast CD"
+    files = {m.name: m for m in volume_files(volume)}
+    payload_file = files["payload.bin"]
+    assert payload_file.sizes() == (len(payload), 0)
+    assert payload_file._node._read == {}    # the body stayed on the disc
+    assert payload_file.data[:13] != payload[:13]
+    assert "data" in payload_file._node._read
+
+
+def test_a_raw_hfs_image_lists_from_the_catalog_only(tmp_path):
+    # The same proof for the plain raw path: list with the file body
+    # mangled; the volume opens and lists fine, the body reads mangled.
+    import macrt.macfile as mf
+    v = machfs.Volume()
+    v.name = "Raw"
+    f = machfs.File()
+    f.data = bytearray(b"raw-payload" * 400)
+    f.type, f.creator = b"TEXT", b"ttxt"
+    v["hello.txt"] = f
+    img = bytearray(v.write(800 * 1024))
+    at = img.find(b"raw-payload")
+    assert at > 0
+    img[at] ^= 0xFF
+    path = tmp_path / "raw.hfs"
+    path.write_bytes(bytes(img))
+    volume = mf.open_container(path)
+    files = {m.name: m for m in volume_files(volume)}
+    hello = files["hello.txt"]
+    assert hello._node._read == {}
+    assert hello.data[:11] != b"raw-payload"
+
+# -- archive folders, one level at a time ------------------------------------
+
+
+def _zip_members(tmp_path):
+    """An ArchiveFolder over a zip with a member at the top, a member
+    inside a folder and a member two folders deep."""
+    import zipfile
+    with zipfile.ZipFile(tmp_path / "T.zip", "w") as z:
+        z.writestr("Top", b"top")
+        z.writestr("Docs/Letter", b"letter")
+        z.writestr("Docs/Deep/Note", b"note")
+    return archive_file(tmp_path / "T.zip")
+
+
+def test_list_folder_of_an_archive_lists_its_whole_membership(tmp_path):
+    folder = _zip_members(tmp_path)
+    assert {f.name for f in list_folder(folder)} == {"Top", "Docs/Letter", "Docs/Deep/Note"}
+
+
+def test_list_folder_of_an_archive_path_lists_that_level_with_the_prefix_stripped(tmp_path):
+    folder = _zip_members(tmp_path)
+    assert {f.name for f in list_folder(folder, ("Docs",))} == {"Letter", "Deep/Note"}
+    assert {f.name for f in list_folder(folder, ("Docs", "Deep"))} == {"Note"}
+
+
+def test_list_folder_of_an_archive_path_keeps_the_members_forks(tmp_path):
+    folder = _zip_members(tmp_path)
+    letter = next(f for f in list_folder(folder, ("Docs",)) if f.name == "Letter")
+    assert letter.data == b"letter"
+    note = next(f for f in list_folder(folder, ("Docs", "Deep")) if f.name == "Note")
+    assert note.data == b"note"
+
+
+def test_list_folder_of_an_archive_path_leaves_the_archives_entries_alone(tmp_path):
+    folder = _zip_members(tmp_path)
+    stripped = list_folder(folder, ("Docs",))
+    assert {f.name for f in folder.files()} == {"Top", "Docs/Letter", "Docs/Deep/Note"}
+    assert all(f not in folder.files() for f in stripped)
+
+
+def test_list_folder_of_an_archive_path_that_holds_nothing_lists_nothing(tmp_path):
+    folder = _zip_members(tmp_path)
+    assert list_folder(folder, ("Nope",)) == []
+    assert list_folder(folder, ("Docs", "Nope")) == []
+    assert list_folder(folder, ("Docs", "Letter")) == []
+
+
+def test_listing_a_host_folder_reads_no_fork_bytes(tmp_path):
+    (tmp_path / "Big.img").write_bytes(b"\x00" * 100000)
+    (tmp_path / "App").write_bytes(b"data fork bytes")
+    (tmp_path / "App.rsrc").write_bytes(FORK)      # the fork beside the app
+    files = {f.name: f for f in HostFolder(tmp_path).files()}
+    assert sorted(files) == ["App", "Big.img"]      # App.rsrc is the app's fork, not a row
+    for f in files.values():
+        assert f.forks_pending                       # nothing was read to list it
+    big = files["Big.img"]
+    assert big.sizes() == (100000, 0)
+    app = files["App"]
+    assert app.sizes() == (len(b"data fork bytes"), len(FORK))
+    assert app.data == b"data fork bytes"            # first touch reads it for real
+    assert app.rsrc == FORK
+    assert not app.forks_pending
+
+
+def test_listing_declares_macbinary_and_binhex_forks(tmp_path):
+    (tmp_path / "mbin.bin").write_bytes(macbinary("Real App", b"actual data", FORK))
+    (tmp_path / "bhx.hqx").write_bytes(binhex("Hex App", b"actual data", FORK))
+    files = {f.name: f for f in HostFolder(tmp_path).files()}
+    assert sorted(files) == ["Hex App", "Real App"]  # the names inside the containers
+    mbin, bhx = files["Real App"], files["Hex App"]
+    assert mbin.sizes() == (len(b"actual data"), len(FORK))
+    assert bhx.sizes() == (len(b"actual data"), len(FORK))
+    assert mbin.forks_pending and bhx.forks_pending
+    assert mbin.type == b"APPL" and bhx.type == b"APPL"
+    assert mbin.data == b"actual data"               # materialising matches the eager load
+    assert bhx.data == b"actual data"
+    assert mbin.rsrc == FORK and bhx.rsrc == FORK
+
+
+def test_listing_skips_a_damaged_binhex(tmp_path):
+    (tmp_path / "aaa_bad.hqx").write_bytes(
+        b"(This file must be converted with BinHex 4.0\r" + b'"' * 200)
+    (tmp_path / "zzz_good.hqx").write_bytes(binhex("Good", b"data", FORK))
+    assert [f.name for f in HostFolder(tmp_path).files()] == ["Good"]
+
+
+def test_the_kind_of_a_pending_disk_image_answers_from_windows(tmp_path):
+    (tmp_path / "Disk.img").write_bytes(hfs_image())
+    files = HostFolder(tmp_path).files()
+    assert len(files) == 1 and files[0].forks_pending
+    assert image_kind(files[0]) == "HFS disk image"
+
+
+def test_an_apple_single_lists_without_decoding(tmp_path):
+    (tmp_path / "Wrapped").write_bytes(
+        apple_single({1: b"the data fork", 2: FORK, 3: b"Wrapped",
+                      9: finder_info(b"APPL", b"TEST")}))
+    files = HostFolder(tmp_path).files()
+    assert len(files) == 1
+    assert files[0].forks_pending
+    assert files[0].sizes() == (len(b"the data fork"), len(FORK))
+    assert files[0].type == b"APPL"
+    assert files[0].data == b"the data fork"
+    assert files[0].rsrc == FORK

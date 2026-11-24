@@ -2,13 +2,14 @@
 table and inverse table, what QuickDraw draws there, and the Color
 Manager's calls."""
 
+import gc
 import random
 import struct
 import time
 
 import pytest
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QImage
+from PyQt6.QtGui import QColor, QImage, QPainter
 
 from macrt.demo import parse_args
 from macrt.m68k.glue_os import (QD32TRAP, SLOT_TRAPS, UNIMPLEMENTED, VIDEO_DEFAULT, Gestalt,
@@ -71,6 +72,24 @@ def test_pixels_at_each_depth_come_back_as_they_went(qapp, depth):
         [[img.pixel(x, y) for x in range(13)] for y in range(3)]
     for c in colors:
         assert pixels.value_rgb(pixels.rgb_value(c, depth, table), depth, table) == c
+
+
+def test_pixels_decode_at_32_bits_own_their_buffer(qapp):
+    # convertToFormat on an image already in RGB32 shares its bits rather
+    # than copying, and decode()'s wrapper over the source bytes dies with
+    # it: the image it returns must stand on its own after that. A frame
+    # big enough that its bytes come from mmap, so a freed one unmaps.
+    w, h = 512, 512
+    img = QImage(w, h, QImage.Format.Format_RGB32)
+    img.fill(QColor(10, 200, 30))
+    data, bpl = pixels.encode(img, 32)
+    back = pixels.decode(data, w, h, bpl, 32)
+    gc.collect()                     # the temporary _swapped's bytes die here
+    p = QPainter(back)               # detaches: memcpy from the bits
+    p.setPen(QColor(255, 0, 0))
+    p.drawPoint(0, 0)
+    p.end()
+    assert back.pixel(0, 0) == 0xFFFF0000
 
 
 def read_table_bytes(data: bytes) -> list[int]:

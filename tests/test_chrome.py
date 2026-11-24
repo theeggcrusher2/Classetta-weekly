@@ -109,3 +109,63 @@ def test_paint_produces_one_bit_pixels(qapp):
               for x in range(W) for y in range(title.top(), title.bottom())
               if not (W // 2 - 40 < x < W // 2 + 40)}      # skip the (antialiased) title text
     assert colors <= {0x000000, 0xFFFFFF}
+
+
+def test_a_title_bar_icon_is_drawn_as_one_block_with_the_text(qapp):
+    from PyQt6.QtGui import QFontMetrics, QImage, QPainter
+    icon = ["#" * 16] * 16
+    f = Frame(WindowKind.DOCUMENT, title="Doc", title_icon=icon,
+              go_away=True, zoom=True, grow=True)
+    w, h = chrome.structure_size(f, 300, 200)
+    img = QImage(w, h, QImage.Format.Format_RGB32)
+    img.fill(0xFFFFFFFF)
+    p = QPainter(img)
+    chrome.paint(p, f, w, h)
+    p.end()
+
+    def rgb(x, y) -> int:
+        return img.pixel(x, y) & 0xFFFFFF
+
+    tr = chrome.title_rect(f, w)
+    lead = 16 + theme.TITLE_ICON_GAP
+    m = QFontMetrics(theme.title_font())
+    # The icon and the text share one centred block: the icon starts
+    # where the block starts, the gap is clear, the text follows it.
+    left = theme.BOX_INSET + theme.BOX_SIZE + theme.BOX_CLEARANCE + theme.TITLE_CLEARANCE
+    x = max((w - m.horizontalAdvance("Doc") - lead) // 2, left)
+    y = tr.y() + (tr.height() - 16) // 2
+    assert all(rgb(x + i, y) == 0x000000 for i in range(16))      # the icon's top row
+    assert all(rgb(x + 16 + i, yy) == 0xFFFFFF                    # the gap between,
+               for i in range(theme.TITLE_ICON_GAP)
+               for yy in range(tr.y(), tr.bottom() + 1))
+    assert any(rgb(xx, yy) != 0xFFFFFF                            # the text
+               for xx in range(x + lead, x + lead + m.horizontalAdvance("Doc"))
+               for yy in range(tr.y(), tr.bottom() + 1))
+
+
+def test_a_title_bar_pixmap_stands_in_for_the_icon(qapp):
+    from PyQt6.QtGui import QColor, QFontMetrics, QImage, QPainter, QPixmap
+    pm = QPixmap(16, 16)
+    pm.fill(QColor("#E02020"))
+    f = Frame(WindowKind.DOCUMENT, title="Doc", title_pixmap=pm,
+              go_away=True, zoom=True, grow=True)
+    w, h = chrome.structure_size(f, 300, 200)
+    img = QImage(w, h, QImage.Format.Format_RGB32)
+    img.fill(0xFFFFFFFF)
+    p = QPainter(img)
+    chrome.paint(p, f, w, h)
+    p.end()
+
+    def rgb(x, y):
+        return img.pixel(x, y) & 0xFFFFFF
+
+    tr = chrome.title_rect(f, w)
+    lead = 16 + theme.TITLE_ICON_GAP
+    m = QFontMetrics(theme.title_font())
+    left = theme.BOX_INSET + theme.BOX_SIZE + theme.BOX_CLEARANCE + theme.TITLE_CLEARANCE
+    x = max((w - m.horizontalAdvance("Doc") - lead) // 2, left)
+    y = tr.y() + (tr.height() - 16) // 2
+    assert all(rgb(x + i, y) == 0xE02020 for i in range(16))  # the pixmap's top row
+    assert any(rgb(xx, yy) != 0xFFFFFF                          # the text, after it
+               for xx in range(x + lead, x + lead + m.horizontalAdvance("Doc"))
+               for yy in range(tr.y(), tr.bottom() + 1))

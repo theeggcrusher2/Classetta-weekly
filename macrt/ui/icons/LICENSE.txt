@@ -1,0 +1,28 @@
+The icons in this directory are original artwork drawn for Classetta
+by its contributors. No outside icon set was traced, copied or
+referenced; each icon here was drawn pixel by pixel for this project.
+
+Copyright (c) the Classetta contributors.
+
+The icons are dedicated to the public domain under the Creative Commons
+CC0 1.0 Universal dedication (https://creativecommons.org/publicdomain/zero/1.0/).
+To the extent any portion of this dedication is not effective in a
+jurisdiction:
+
+  Permission is hereby granted, free of charge, to any person or legal
+  entity obtaining a copy of the icons and associated documentation files
+  (the "Artwork"), to deal in the Artwork without restriction, including
+  without limitation the rights to use, copy, modify, merge, publish,
+  distribute, sublicense, prepare derivative works of, and/or sell copies
+  of the Artwork, and to permit persons to whom the Artwork is furnished
+  to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included
+  in all copies or substantial portions of the Artwork.
+
+THE ARTWORK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+CONTRIBUTORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE ARTWORK OR THE USE OR OTHER DEALINGS IN THE ARTWORK.

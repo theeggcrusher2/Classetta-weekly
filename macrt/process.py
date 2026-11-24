@@ -220,6 +220,12 @@ class Process:
         self.thread = threading.Thread(target=run, name=f"guest:{self.name}", daemon=True)
         self.thread.start()
 
+    def quit(self) -> None:
+        """Ask the application to stop on its own: the request ends its
+        event waits with ProcessKilled, so it stops at its next wait or
+        trap instead of wherever its code happens to be."""
+        self.events.kill()
+
     def kill(self) -> None:
         """Stop the application, wherever it is: waiting for an event,
         tracking the mouse, or in the middle of its own code."""

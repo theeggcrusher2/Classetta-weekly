@@ -46,7 +46,7 @@ from PyQt6.QtWidgets import (QAbstractButton, QCheckBox, QComboBox, QDialog, QFr
                              QListWidgetItem, QMessageBox, QPushButton, QRadioButton, QVBoxLayout,
                              QWidget)
 
-from . import theme
+from . import icons, theme
 
 if TYPE_CHECKING:
     from ..process import Process
@@ -177,6 +177,23 @@ DOCUMENT_ICON = [
     "###########",
 ]
 
+ALIAS_ICON = [
+    "########...",
+    "#......##..",
+    "#......#.#.",
+    "#......####",
+    "#.........#",
+    "#..#......#",
+    "#..##.....#",
+    "#..###....#",
+    "#..####...#",
+    "#..#####..#",
+    "#..###....#",
+    "#..##.....#",
+    "#..#......#",
+    "###########",
+]
+
 DISK_ICON = [
     "################",
     "#..............#",
@@ -200,8 +217,76 @@ DESKTOP_ICON = [
     "....######....",
 ]
 
-ICONS = {"folder": FOLDER_ICON, "document": DOCUMENT_ICON, "volume": DISK_ICON,
-         "application": theme.GENERIC_APP_ICON, "desktop": DESKTOP_ICON}
+CATALOG_ICON = [
+    "################",
+    "#..............#",
+    "#.###########.#",
+    "#.#.........#.#",
+    "#.###########.#",
+    "#.#.........#.#",
+    "#.###########.#",
+    "#..............#",
+    "################",
+]
+
+CONTROL_PANEL_ICON = [
+    "################",
+    "#..............#",
+    "#....####......#",
+    "#....####......#",
+    "#..##########..#",
+    "#..##########..#",
+    "#....####......#",
+    "#....####......#",
+    "#..............#",
+    "#..............#",
+    "################",
+]
+
+EXTENSION_ICON = [
+    ".#.#.#.#.#.#.#.#",
+    ".##############.",
+    ".#............#.",
+    ".#....####....#.",
+    ".#....####....#.",
+    ".#....####....#.",
+    ".#............#.",
+    ".#............#.",
+    ".##############.",
+    ".#.#.#.#.#.#.#.#",
+]
+
+DESK_ACCESSORY_ICON = [
+    ".....####.....",
+    "...########...",
+    "..##########..",
+    ".############.",
+    "##############",
+    ".############.",
+    "..##########..",
+    "...########...",
+    ".....####.....",
+]
+
+FONT_ICON = [
+    "############",
+    "############",
+    "###.........",
+    "###.........",
+    "##########..",
+    "##########..",
+    "###.........",
+    "###.........",
+    "###.........",
+    "###.........",
+    "###.........",
+    "###.........",
+]
+
+ICONS = {"folder": FOLDER_ICON, "document": DOCUMENT_ICON, "alias": ALIAS_ICON,
+         "volume": DISK_ICON, "application": theme.GENERIC_APP_ICON, "desktop": DESKTOP_ICON,
+         "control_panel": CONTROL_PANEL_ICON, "extension": EXTENSION_ICON,
+         "desk_accessory": DESK_ACCESSORY_ICON, "font": FONT_ICON}
 
 
 def _filled(row: str) -> str:
@@ -211,16 +296,15 @@ def _filled(row: str) -> str:
     return row if a < 0 else "." * a + "#" * (b - a + 1) + "." * (len(row) - b - 1)
 
 
-@cache
-def icon(kind: str) -> QIcon:
-    """Black on white; inverted, like its name, when it's selected."""
-    bitmap = ICONS[kind]
+def icon_from_bitmap(bitmap: list[str], box: int = 16) -> QIcon:
+    """Black on white from '#' and '.' rows; inverted, like its name,
+    when it's selected."""
     w, h = theme.bitmap_size(bitmap)
-    x, y = (16 - w) // 2, (16 - h) // 2
+    x, y = (box - w) // 2, (box - h) // 2
     out = QIcon()
     for paper, ink, mode in ((theme.WHITE, theme.BLACK, QIcon.Mode.Normal),
                              (theme.BLACK, theme.WHITE, QIcon.Mode.Selected)):
-        pm = QPixmap(16, 16)
+        pm = QPixmap(box, box)
         pm.fill(Qt.GlobalColor.transparent)
         p = QPainter(pm)
         theme.draw_bitmap(p, x, y, [_filled(row) for row in bitmap], paper)
@@ -228,6 +312,58 @@ def icon(kind: str) -> QIcon:
         p.end()
         out.addPixmap(pm, mode)
     return out
+
+
+def _double(rows: list[str]) -> list[str]:
+    """A 1-bit icon doubled: every row and column twice."""
+    out = []
+    for row in rows:
+        row2 = "".join(ch * 2 for ch in row)
+        out.append(row2)
+        out.append(row2)
+    return out
+
+
+ICONS_LARGE = {kind: _double(rows) for kind, rows in ICONS.items()}
+
+
+@cache
+def icon(kind: str, large: bool = False) -> QIcon:
+    """Black on white; inverted, like its name, when it's selected."""
+    if large:
+        return icon_from_bitmap(ICONS_LARGE[kind], box=32)
+    return icon_from_bitmap(ICONS[kind])
+
+
+_COLOUR_STANDINS = {"folder": "folder", "document": "document", "volume": "disk",
+                    "application": "app", "archive": "archive", "catalog": "catalog",
+                    "control_panel": "control_panel", "extension": "extension",
+                    "desk_accessory": "desk_accessory", "font": "font",
+                    "alias": "alias"}
+
+
+def display_depth(display) -> int:
+    """The depth to make colour decisions by: the running System's, as the
+    guest sees it; the configured depth; then 1."""
+    system = getattr(display, "system", None)
+    depth = getattr(system, "depth", None)
+    if depth is None:
+        config = getattr(display, "config", None)
+        depth = getattr(config, "depth", None) if config is not None else None
+    return depth if depth is not None else 1
+
+
+@cache
+def standin_icon(kind: str, depth: int, large: bool = False) -> QIcon:
+    """The system's stand-in for a kind of item: Classetta's colour art at
+    depth > 2 for the kinds it has, the 1-bit icon otherwise.  At depth > 2 a
+    colour stand-in is not inverted on selection; the 1-bit icon still is."""
+    key = _COLOUR_STANDINS.get(kind)
+    if key is not None and depth > 2:
+        q = QIcon()
+        q.addPixmap(icons.pixmap_large(key) if large else icons.pixmap(key))
+        return q
+    return icon(kind, large=large) if kind in ICONS else icon("document", large=large)
 
 
 STYLE = """
@@ -261,6 +397,7 @@ class StandardFileDialog(QDialog):
         parent = display.host_window if display is not None else None
         super().__init__(parent)
         self.display = display
+        self._depth = display_depth(display) if display is not None else 1
         self.put = put
         self.ok_title = ok or ("Save" if put else "Open")
         self.place = Place([])
@@ -288,12 +425,12 @@ class StandardFileDialog(QDialog):
 
         self.disk = QLabel()
         self.disk_icon = QLabel()
-        self.disk_icon.setPixmap(icon("volume").pixmap(16, 16))
+        self.disk_icon.setPixmap(standin_icon("volume", self._depth).pixmap(16, 16))
         self.eject = QPushButton("Eject")
         self.eject.setEnabled(False)                # nothing here is removable
         self.desk = QPushButton("Desktop")
         self.desk.clicked.connect(lambda: self._act("desktop"))
-        self.new_folder = QPushButton(icon("folder"), "New")
+        self.new_folder = QPushButton(standin_icon("folder", self._depth), "New")
         self.new_folder.clicked.connect(self._ask_new_folder)
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.clicked.connect(self.cancel)
@@ -370,13 +507,13 @@ class StandardFileDialog(QDialog):
         self.popup.clear()
         for i, folder in enumerate(place.path):
             kind = "volume" if i == len(place.path) - 1 else "folder"
-            self.popup.addItem(icon(kind), folder)
-        self.popup.addItem(icon("desktop"), "Desktop")
+            self.popup.addItem(standin_icon(kind, self._depth), folder)
+        self.popup.addItem(standin_icon("desktop", self._depth), "Desktop")
         self.popup.setCurrentIndex(0)
         self.popup.blockSignals(False)
         self.list.clear()
         for item in place.items:
-            w = QListWidgetItem(icon(item.kind), item.name)
+            w = QListWidgetItem(standin_icon(item.kind, self._depth), item.name)
             if not item.enabled:
                 w.setFlags(w.flags() & ~Qt.ItemFlag.ItemIsEnabled)
             self.list.addItem(w)
@@ -389,7 +526,8 @@ class StandardFileDialog(QDialog):
         self._told = -2                     # new to the application
         self._reporting, self._pending = False, None    # a step in the last list is no step
         self.disk.setText(place.volume or "Desktop")
-        self.disk_icon.setPixmap(icon("volume" if place.volume else "desktop").pixmap(16, 16))
+        self.disk_icon.setPixmap(standin_icon("volume" if place.volume else "desktop",
+                                              self._depth).pixmap(16, 16))
         self.message.setText(place.message)
         self.message.setVisible(bool(place.message))
         fut = self._future = Future()
